@@ -1,6 +1,7 @@
 package configscan
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,17 +32,21 @@ func TestCurrentCodexPreservesOAuthAuth(t *testing.T) {
 	}
 }
 
-func TestCCSwitchQueryRetriesTransientSQLiteFailure(t *testing.T) {
-	dir := t.TempDir()
-	count := filepath.Join(dir, "count")
-	bin := filepath.Join(dir, "sqlite3-test")
-	script := "#!/bin/sh\ncount=0\n[ -f '" + count + "' ] && count=$(cat '" + count + "')\ncount=$((count+1))\nprintf '%s' \"$count\" > '" + count + "'\nif [ \"$count\" -lt 3 ]; then echo 'database is locked' >&2; exit 11; fi\nprintf '[]'\n"
-	if err := os.WriteFile(bin, []byte(script), 0700); err != nil {
+func TestCCSwitchQueryUsesNativeReadOnlySQLite(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "cc-switch.db")
+	db, err := sql.Open("sqlite3", database)
+	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Scanner{SQLiteBin: bin, CCSwitchDB: filepath.Join(dir, "cc-switch.db")}
-	out, err := s.queryCCSwitch("SELECT 1")
-	if err != nil || string(out) != "[]" {
-		t.Fatalf("query did not recover: output=%q err=%v", out, err)
+	if _, err = db.Exec(`CREATE TABLE providers(id TEXT, name TEXT); INSERT INTO providers VALUES('p1', 'Provider 1')`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s := &Scanner{CCSwitchDB: database}
+	out, err := s.queryCCSwitch("SELECT id, name FROM providers")
+	if err != nil || !strings.Contains(string(out), `"id":"p1"`) {
+		t.Fatalf("native query failed: output=%q err=%v", out, err)
 	}
 }

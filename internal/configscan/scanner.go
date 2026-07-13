@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +18,8 @@ import (
 
 	"ai-watch/internal/domain"
 	"ai-watch/internal/security"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type Scanner struct {
@@ -73,9 +77,6 @@ func (s *Scanner) Providers(cli domain.CLI) ([]domain.Provider, error) {
 	if !exists(s.CCSwitchDB) {
 		return providers, nil
 	}
-	if !available(s.SQLiteBin) {
-		return providers, nil
-	}
 	q := fmt.Sprintf(`SELECT id, name, is_current, settings_config FROM providers WHERE app_type='%s' ORDER BY COALESCE(sort_index,999999), created_at, id;`, sqlQuote(string(cli)))
 	out, err := s.queryCCSwitch(q)
 	if err != nil {
@@ -84,7 +85,7 @@ func (s *Scanner) Providers(cli domain.CLI) ([]domain.Provider, error) {
 	var rows []struct {
 		ID       string `json:"id"`
 		Name     string `json:"name"`
-		Current  int    `json:"is_current"`
+		Current  any    `json:"is_current"`
 		Settings string `json:"settings_config"`
 	}
 	if err := json.Unmarshal(out, &rows); err != nil {
@@ -97,7 +98,7 @@ func (s *Scanner) Providers(cli domain.CLI) ([]domain.Provider, error) {
 			Env    map[string]string `json:"env"`
 		}
 		_ = json.Unmarshal([]byte(row.Settings), &raw)
-		p := domain.Provider{ID: row.ID, Name: row.Name, CLI: cli, Current: row.Current == 1, Model: raw.Env["ANTHROPIC_MODEL"]}
+		p := domain.Provider{ID: row.ID, Name: row.Name, CLI: cli, Current: sqliteBool(row.Current), Model: raw.Env["ANTHROPIC_MODEL"]}
 		if cli == domain.CLICodex {
 			c := parseCodex(raw.Config)
 			p.BaseURL = c.BaseURL
@@ -110,6 +111,19 @@ func (s *Scanner) Providers(cli domain.CLI) ([]domain.Provider, error) {
 		providers = append(providers, p)
 	}
 	return providers, nil
+}
+
+func sqliteBool(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case float64:
+		return typed != 0
+	case string:
+		return typed == "1" || strings.EqualFold(typed, "true")
+	default:
+		return false
+	}
 }
 
 func sqlQuote(v string) string { return strings.ReplaceAll(v, "'", "''") }
@@ -190,9 +204,8 @@ func (s *Scanner) queryCCSwitch(query string) ([]byte, error) {
 	const attempts = 3
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		cmd := exec.CommandContext(ctx, s.SQLiteBin, "-readonly", "-cmd", ".timeout 2000", "-json", s.CCSwitchDB, query)
-		out, err := cmd.Output()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		out, err := querySQLiteJSON(ctx, s.CCSwitchDB, query)
 		cancel()
 		if err == nil {
 			return out, nil
@@ -200,7 +213,7 @@ func (s *Scanner) queryCCSwitch(query string) ([]byte, error) {
 		if ctx.Err() != nil {
 			lastErr = errors.New("SQLite query timed out")
 		} else {
-			lastErr = sqliteQueryError(err, s.CCSwitchDB)
+			lastErr = sanitizeSQLiteError(err, s.CCSwitchDB)
 		}
 		if attempt+1 < attempts {
 			time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
@@ -209,14 +222,56 @@ func (s *Scanner) queryCCSwitch(query string) ([]byte, error) {
 	return nil, lastErr
 }
 
-func sqliteQueryError(err error, databasePath string) error {
-	message := err.Error()
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
-			message = stderr
-		}
+func querySQLiteJSON(ctx context.Context, databasePath, query string) ([]byte, error) {
+	// Docker Desktop bind mounts do not reliably forward SQLite file locks from
+	// macOS into the Linux VM. CC Switch uses DELETE journaling and replaces the
+	// database atomically, so immutable read-only snapshots avoid cross-VM lock
+	// waits; the outer retry handles the brief replacement window.
+	dsn := (&url.URL{Scheme: "file", Path: databasePath, RawQuery: "mode=ro&immutable=1&_query_only=true"}).String()
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		return nil, err
 	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(0)
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]map[string]any, 0)
+	for rows.Next() {
+		values := make([]any, len(columns))
+		pointers := make([]any, len(columns))
+		for index := range values {
+			pointers[index] = &values[index]
+		}
+		if err = rows.Scan(pointers...); err != nil {
+			return nil, err
+		}
+		item := make(map[string]any, len(columns))
+		for index, column := range columns {
+			if bytes, ok := values[index].([]byte); ok {
+				item[column] = string(bytes)
+			} else {
+				item[column] = values[index]
+			}
+		}
+		result = append(result, item)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return json.Marshal(result)
+}
+
+func sanitizeSQLiteError(err error, databasePath string) error {
+	message := err.Error()
 	message = strings.ReplaceAll(message, databasePath, "cc-switch.db")
 	message = strings.Join(strings.Fields(security.Redact(message)), " ")
 	if len(message) > 240 {
