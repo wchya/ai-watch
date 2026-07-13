@@ -102,6 +102,21 @@ func TestScheduledProbeRunsOncePerOccurrence(t *testing.T) {
 	}
 }
 
+func TestScheduleJobOptionsMapsProbeUntilSuccessToRunOnce(t *testing.T) {
+	once := scheduleJobOptions(domain.Schedule{Mode: domain.ModeProbe, UntilSuccess: false})
+	continuous := scheduleJobOptions(domain.Schedule{Mode: domain.ModeProbe, UntilSuccess: true})
+	keepalive := scheduleJobOptions(domain.Schedule{Mode: domain.ModeKeepalive, UntilSuccess: false})
+	if !once.RunOnce || continuous.RunOnce || keepalive.RunOnce {
+		t.Fatalf("unexpected schedule execution mapping: once=%+v continuous=%+v keepalive=%+v", once, continuous, keepalive)
+	}
+
+	now := time.Now().UTC()
+	schedule := domain.Schedule{LastOccurrenceKey: "occurrence", LastStatus: string(domain.JobFailed), LastOccurrenceAt: &now, Mode: domain.ModeProbe}
+	if !shouldSkipScheduleOccurrence(schedule, "occurrence", now.Add(time.Hour)) {
+		t.Fatal("completed one-shot schedule occurrence was started again")
+	}
+}
+
 func TestScheduledProbeTakesPriorityOverKeepaliveForSameTarget(t *testing.T) {
 	st := store.New(t.TempDir())
 	defer st.Close()

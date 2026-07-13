@@ -19,6 +19,24 @@ func New(url string) *DingTalk {
 	return &DingTalk{URL: url, Client: &http.Client{Timeout: 10 * time.Second}}
 }
 func (d *DingTalk) Configured() bool { return d != nil && d.URL != "" }
+
+// Send delivers a Markdown notification through the same client and response
+// validation path used by probe notifications. The webhook remains owned by
+// the notifier and is never included in the message or returned to callers.
+func (d *DingTalk) Send(ctx context.Context, title, content string) error {
+	if !d.Configured() {
+		return nil
+	}
+	payload := map[string]any{
+		"msgtype": "markdown",
+		"markdown": map[string]string{
+			"title": title,
+			"text":  content,
+		},
+	}
+	return d.send(ctx, payload)
+}
+
 func (d *DingTalk) Notify(ctx context.Context, j domain.Job, a domain.AttemptStatus) error {
 	if !d.Configured() {
 		return nil
@@ -52,7 +70,14 @@ func (d *DingTalk) Notify(ctx context.Context, j domain.Job, a domain.AttemptSta
 	text := fmt.Sprintf("%s %s\n状态：%s 探测次数：%d 总耗时：%s\n服务信息\n• 工具：%s\n• 脚本：ai-watch.sh\n• 配置来源：%s\n• 模型：%s\n• provider：%s\n连接信息\n• base_url：%s\n• apikey：%s\n时间\n• 探测开始：%s\n• %s：%s\n• 通知时间：%s",
 		tool, result, state, j.Attempts, formatDuration(duration), tool, source, fallback(j.Model), fallback(j.Provider), fallback(j.Target), fallback(j.MaskedKey),
 		j.StartedAt.In(zone).Format("2006-01-02 15:04:05"), lastLabel, end.In(zone).Format("2006-01-02 15:04:05"), time.Now().In(zone).Format("2006-01-02 15:04:05"))
-	b, _ := json.Marshal(map[string]any{"msgtype": "text", "text": map[string]string{"content": text}})
+	return d.send(ctx, map[string]any{"msgtype": "text", "text": map[string]string{"content": text}})
+}
+
+func (d *DingTalk) send(ctx context.Context, payload map[string]any) error {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode DingTalk payload: %w", err)
+	}
 	req, e := http.NewRequestWithContext(ctx, http.MethodPost, d.URL, bytes.NewReader(b))
 	if e != nil {
 		return e

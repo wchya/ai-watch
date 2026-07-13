@@ -66,6 +66,7 @@ func TestSummaryRetentionAndSanitizedSchema(t *testing.T) {
 		summary := domain.Summary{
 			ID:            string(rune('0' + index)),
 			Mode:          domain.ModeProbe,
+			RunOnce:       index == 4,
 			CLI:           domain.CLICodex,
 			ProviderID:    "provider",
 			ProviderName:  "Provider",
@@ -92,7 +93,7 @@ func TestSummaryRetentionAndSanitizedSchema(t *testing.T) {
 	if len(values) != 3 || values[0].ID != "4" || values[2].ID != "2" {
 		t.Fatalf("unexpected retained summaries: %+v", values)
 	}
-	if values[0].Target != "https://example.test/v1" || values[0].EndedAt == nil || !values[0].EndedAt.Equal(base.Add(4*time.Minute)) {
+	if !values[0].RunOnce || values[0].Target != "https://example.test/v1" || values[0].EndedAt == nil || !values[0].EndedAt.Equal(base.Add(4*time.Minute)) {
 		t.Fatalf("summary did not round trip: %+v", values[0])
 	}
 
@@ -171,7 +172,7 @@ func TestLegacyJSONMigrationRunsOnce(t *testing.T) {
 	if err = reopened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 5 {
+	if versions != 7 {
 		t.Fatalf("got %d migration records", versions)
 	}
 }

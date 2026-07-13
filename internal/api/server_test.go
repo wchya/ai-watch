@@ -30,6 +30,21 @@ func (apiExecutor) Run(context.Context, string, domain.JobOptions, domain.Resolv
 	return runner.Result{ExitCode: 0, Output: "READY"}, nil
 }
 
+type apiNotifier struct {
+	messages chan string
+	err      error
+}
+
+func (n *apiNotifier) Configured() bool                                               { return true }
+func (n *apiNotifier) Notify(context.Context, domain.Job, domain.AttemptStatus) error { return n.err }
+func (n *apiNotifier) Send(_ context.Context, title, content string) error {
+	if n.err != nil {
+		return n.err
+	}
+	n.messages <- title + "\n" + content
+	return nil
+}
+
 func TestHealthAndSPAFallback(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "index.html"), []byte("<main>AI Watch</main>"), 0600)
@@ -40,6 +55,28 @@ func TestHealthAndSPAFallback(t *testing.T) {
 		h.ServeHTTP(w, r)
 		if w.Code != 200 || !strings.Contains(w.Body.String(), tc.contains) {
 			t.Fatalf("%s: status=%d body=%s", tc.path, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestNotificationTestAndStatusReuseConfiguredNotifier(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	n := &apiNotifier{messages: make(chan string, 2)}
+	manager := jobs.New(apiResolver{}, apiExecutor{}, st, n)
+	defer manager.Shutdown()
+	h := New(configscan.New(), manager, "", st).Handler()
+	for _, path := range []string{"/api/notifications/test", "/api/notifications/status"} {
+		r := httptest.NewRequest(http.MethodPost, path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"sent":true`) {
+			t.Fatalf("%s: status=%d body=%s", path, w.Code, w.Body.String())
+		}
+		select {
+		case <-n.messages:
+		case <-time.After(time.Second):
+			t.Fatalf("%s did not use notifier", path)
 		}
 	}
 }
@@ -169,11 +206,11 @@ func TestSchedulesCRUDRejectsRuntimeSecretsAndBulkIsItemized(t *testing.T) {
 		t.Fatalf("list schedules: status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	bulk := `{"action":"probe","items":[{"targetId":"provider-2","cli":"codex","providerId":"provider-2"}]}`
+	bulk := `{"action":"probe_once","items":[{"targetId":"provider-2","cli":"codex","providerId":"provider-2"}]}`
 	r = httptest.NewRequest(http.MethodPost, "/api/jobs/bulk", strings.NewReader(bulk))
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"accepted":1`) || !strings.Contains(w.Body.String(), `"failed":0`) || !strings.Contains(w.Body.String(), `"targetId":"provider-2"`) {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"accepted":1`) || !strings.Contains(w.Body.String(), `"failed":0`) || !strings.Contains(w.Body.String(), `"targetId":"provider-2"`) || !strings.Contains(w.Body.String(), `"runOnce":true`) {
 		t.Fatalf("bulk jobs: status=%d body=%s", w.Code, w.Body.String())
 	}
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  AlertCircle, Bot, CalendarClock, Check, CheckCircle2, Clock3, Command, Edit3,
+  Activity, AlertCircle, Bot, CalendarClock, Check, CheckCircle2, Clock3, Command, Edit3,
   Gauge, LoaderCircle, PauseCircle, Play, Plus, RefreshCw, ShieldCheck, Square,
   TimerReset, Trash2, X,
 } from 'lucide-react'
@@ -257,7 +257,7 @@ export function SchedulesView({ providers, defaultOptions }: { providers: Provid
 
     <div className="schedule-safety"><ShieldCheck/><span><strong>规则只保存非敏感参数</strong><small>运行时从本地 Provider 解析连接信息；每个目标最多保留一个活跃任务，避免重复探测。</small></span></div>
 
-    {selected.size > 0 && <div className="bulk-bar" role="region" aria-label="批量操作"><div><span>{selected.size}</span><strong>已选择计划</strong><small>批量操作会逐项返回结果</small></div><div className="bulk-actions"><button className="secondary" disabled={Boolean(bulkAction)} onClick={() => void runBulk('probe')}>{bulkAction === 'probe' ? <LoaderCircle className="spinning"/> : <Gauge/>}批量测活</button><button className="secondary" disabled={Boolean(bulkAction)} onClick={() => void runBulk('keepalive')}>{bulkAction === 'keepalive' ? <LoaderCircle className="spinning"/> : <TimerReset/>}批量保活</button><button className="danger-button" disabled={Boolean(bulkAction)} onClick={() => void runBulk('stop')}>{bulkAction === 'stop' ? <LoaderCircle className="spinning"/> : <Square/>}停止目标</button><button className="icon-button" aria-label="取消选择" onClick={() => setSelected(new Set())}><X/></button></div></div>}
+    {selected.size > 0 && <div className="bulk-bar" role="region" aria-label="批量操作"><div><span>{selected.size}</span><strong>已选择计划</strong><small>批量操作会逐项返回结果</small></div><div className="bulk-actions"><button className="secondary" disabled={Boolean(bulkAction)} onClick={() => void runBulk('probe_once')}>{bulkAction === 'probe_once' ? <LoaderCircle className="spinning"/> : <Gauge/>}一次测活</button><button className="secondary" disabled={Boolean(bulkAction)} onClick={() => void runBulk('probe')}>{bulkAction === 'probe' ? <LoaderCircle className="spinning"/> : <RefreshCw/>}持续测活</button><button className="secondary" disabled={Boolean(bulkAction)} onClick={() => void runBulk('keepalive_once')}>{bulkAction === 'keepalive_once' ? <LoaderCircle className="spinning"/> : <Activity/>}一次保活</button><button className="secondary" disabled={Boolean(bulkAction)} onClick={() => void runBulk('keepalive')}>{bulkAction === 'keepalive' ? <LoaderCircle className="spinning"/> : <TimerReset/>}持续保活</button><button className="danger-button" disabled={Boolean(bulkAction)} onClick={() => void runBulk('stop')}>{bulkAction === 'stop' ? <LoaderCircle className="spinning"/> : <Square/>}停止目标</button><button className="icon-button" aria-label="取消选择" onClick={() => setSelected(new Set())}><X/></button></div></div>}
 
     {editor && <ScheduleEditor key={editor === 'new' ? 'new' : editor.id} providers={providers} defaults={defaultOptions} schedule={editor === 'new' ? null : editor} close={() => setEditor(null)} save={save}/>} 
     {deleteTarget && <DeleteScheduleConfirm schedule={deleteTarget} busy={changingId === deleteTarget.id} close={() => setDeleteTarget(null)} confirm={() => void remove()}/>} 

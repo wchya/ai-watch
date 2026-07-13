@@ -1,7 +1,7 @@
 import type {
   AppSettings, BulkJobRequest, BulkJobResult, DashboardData, EventListResult, EventQuery,
   JobEvent, JobPhase, JobStatus, JobSummary, OperationalEvent, Provider, ProviderExample,
-  Schedule, ScheduleListResult, ScheduleWriteRequest, StartJobRequest,
+  ProviderExampleWriteRequest, Schedule, ScheduleListResult, ScheduleWriteRequest, StartJobRequest,
 } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '/api'
@@ -27,10 +27,24 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 interface RawProvider { id: string; name: string; cli: 'codex' | 'claude'; current: boolean; model?: string; baseUrl?: string; maskedKey?: string }
 interface RawJob {
   id: string; mode: 'probe' | 'keepalive'; cli: 'codex' | 'claude'; providerId?: string;
+  runOnce?: boolean;
   providerName?: string; model?: string; status: string; phase?: JobPhase; latestAttempt?: JobSummary['lastAttemptStatus'];
   attempts: number; startedAt: string; endedAt?: string; nextAttemptAt?: string; elapsedMillis: number
 }
-interface RawSettings { timeoutSeconds: number; retryIntervalSeconds: number; keepaliveIntervalSeconds: number; historyLimit: number; eventRetentionDays: number; eventRetentionRows: number; eventRetentionBytes: number; dingTalkConfigured?: boolean }
+interface RawSettings {
+  timeoutSeconds: number
+  retryIntervalSeconds: number
+  keepaliveIntervalSeconds: number
+  historyLimit: number
+  eventRetentionDays: number
+  eventRetentionRows: number
+  eventRetentionBytes: number
+  keepaliveSummarySeconds?: number
+  keepaliveSummarySuccesses?: number
+  probeProgressSeconds?: number
+  recoveryMergeSeconds?: number
+  dingTalkConfigured?: boolean
+}
 interface RawConfigStatus {
   codexCli: boolean; claudeCli: boolean; sqliteCli: boolean; codexConfig: boolean;
   claudeConfig: boolean; ccSwitchDb: boolean; codexPath?: string; claudePath?: string; ccSwitchPath?: string
@@ -94,7 +108,7 @@ interface RawSchedule {
 
 const normalizeStatus = (status: string): JobStatus => status === 'queued' ? 'starting' : status as JobStatus
 const normalizeJob = (job: RawJob): JobSummary => ({
-  id: job.id, mode: job.mode, cli: job.cli, providerId: job.providerId, providerName: job.providerName,
+  id: job.id, mode: job.mode, runOnce: job.runOnce, cli: job.cli, providerId: job.providerId, providerName: job.providerName,
   model: job.model, status: normalizeStatus(job.status), phase: job.phase, lastAttemptStatus: job.latestAttempt,
   attemptCount: job.attempts, startedAt: job.startedAt, endedAt: job.endedAt,
   nextAttemptAt: job.nextAttemptAt, elapsedMs: job.elapsedMillis,
@@ -193,7 +207,7 @@ export const api = {
   async startJob(body: StartJobRequest) {
     const o = body.options
     const payload = {
-      mode: body.mode, cli: body.cli, providerId: body.providerId, prompt: o.prompt,
+      mode: body.mode, runOnce: o.runOnce, cli: body.cli, providerId: body.providerId, prompt: o.prompt,
       expected: o.expectedText, timeoutSeconds: o.timeoutSeconds,
       retryIntervalSeconds: o.retryIntervalSeconds, keepaliveIntervalSeconds: o.keepaliveIntervalSeconds,
       failureThreshold: body.mode === 'keepalive' ? o.failureThreshold : undefined,
@@ -210,7 +224,15 @@ export const api = {
   async settings(): Promise<AppSettings> {
     const raw = await request<RawSettings>('/settings')
     const local = readLocalPrefs()
-    return { ...raw, browserNotifications: local.browserNotifications ?? false, dingTalkEnabled: raw.dingTalkConfigured ?? false, dingTalkConfigured: raw.dingTalkConfigured ?? false }
+    return {
+      ...raw,
+      keepaliveSummarySeconds: raw.keepaliveSummarySeconds ?? 3600,
+      keepaliveSummarySuccesses: raw.keepaliveSummarySuccesses ?? 0,
+      probeProgressSeconds: raw.probeProgressSeconds ?? 3600,
+      recoveryMergeSeconds: raw.recoveryMergeSeconds ?? 0,
+      browserNotifications: local.browserNotifications ?? false,
+      dingTalkConfigured: raw.dingTalkConfigured ?? false,
+    }
   },
   async saveSettings(body: AppSettings): Promise<AppSettings> {
     const raw = await request<RawSettings>('/settings', {
@@ -219,6 +241,10 @@ export const api = {
         keepaliveIntervalSeconds: body.keepaliveIntervalSeconds, historyLimit: body.historyLimit,
         eventRetentionDays: body.eventRetentionDays, eventRetentionRows: body.eventRetentionRows,
         eventRetentionBytes: body.eventRetentionBytes,
+        keepaliveSummarySeconds: body.keepaliveSummarySeconds,
+        keepaliveSummarySuccesses: body.keepaliveSummarySuccesses,
+        probeProgressSeconds: body.probeProgressSeconds,
+        recoveryMergeSeconds: body.recoveryMergeSeconds,
       }),
     })
     storeLocalPrefs(body)
@@ -240,6 +266,8 @@ export const api = {
     return result?.deleted ?? 0
   },
   providerExamples: () => request<ProviderExample[]>('/provider-examples'),
+  saveProviderExample: (body: ProviderExampleWriteRequest) => request<ProviderExample>('/provider-examples', { method: 'POST', body: JSON.stringify(body) }),
+  deleteProviderExample: (id: string) => request<{ deleted: boolean; id: string }>(`/provider-examples?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
   async schedules(): Promise<ScheduleListResult> {
     const raw = await request<RawSchedule[] | { schedules?: RawSchedule[]; items?: RawSchedule[]; total?: number; limit?: number }>('/schedules')
     const items = Array.isArray(raw) ? raw : raw.schedules || raw.items || []
@@ -281,5 +309,6 @@ export const api = {
     }
   },
   testDingTalk: () => request<{ sent: boolean }>('/notifications/test', { method: 'POST' }),
+  sendDingTalkStatus: () => request<{ sent: boolean }>('/notifications/status', { method: 'POST' }),
   eventsUrl: (id: string) => `${API_BASE}/jobs/${encodeURIComponent(id)}/events`,
 }

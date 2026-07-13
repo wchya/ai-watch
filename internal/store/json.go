@@ -221,7 +221,58 @@ func (s *JSON) migrate() error {
 			return err
 		}
 	}
+	if !applied[6] {
+		if err := s.applyNotificationSettingsV6(); err != nil {
+			return err
+		}
+	}
+	if !applied[7] {
+		if err := s.applyJobRunOnceV7(); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (s *JSON) applyJobRunOnceV7() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin job run-once migration: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`ALTER TABLE job_summaries ADD COLUMN run_once INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+			return fmt.Errorf("add job run-once column: %w", err)
+		}
+	}
+	if _, err = tx.Exec(`INSERT INTO schema_migrations(version, applied_at_ns) VALUES(7, ?)`, time.Now().UTC().UnixNano()); err != nil {
+		return fmt.Errorf("record job run-once migration: %w", err)
+	}
+	return tx.Commit()
+}
+
+func (s *JSON) applyNotificationSettingsV6() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin notification settings migration: %w", err)
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`ALTER TABLE settings ADD COLUMN keepalive_summary_seconds INTEGER NOT NULL DEFAULT 3600`,
+		`ALTER TABLE settings ADD COLUMN keepalive_summary_successes INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE settings ADD COLUMN probe_progress_seconds INTEGER NOT NULL DEFAULT 3600`,
+		`ALTER TABLE settings ADD COLUMN recovery_merge_seconds INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if _, err = tx.Exec(statement); err != nil {
+			if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+				return fmt.Errorf("add notification settings column: %w", err)
+			}
+		}
+	}
+	if _, err = tx.Exec(`INSERT INTO schema_migrations(version, applied_at_ns) VALUES(6, ?)`, time.Now().UTC().UnixNano()); err != nil {
+		return fmt.Errorf("record notification settings migration: %w", err)
+	}
+	return tx.Commit()
 }
 
 func (s *JSON) applySchedulesV5() error {
@@ -363,6 +414,10 @@ func (s *JSON) applySchemaV1() error {
 			timeout_seconds INTEGER NOT NULL,
 			retry_interval_seconds INTEGER NOT NULL,
 			keepalive_interval_seconds INTEGER NOT NULL,
+			keepalive_summary_seconds INTEGER NOT NULL DEFAULT 3600,
+			keepalive_summary_successes INTEGER NOT NULL DEFAULT 0,
+			probe_progress_seconds INTEGER NOT NULL DEFAULT 3600,
+			recovery_merge_seconds INTEGER NOT NULL DEFAULT 0,
 			history_limit INTEGER NOT NULL,
 			event_retention_days INTEGER NOT NULL DEFAULT 30,
 			event_retention_rows INTEGER NOT NULL DEFAULT 5000,
@@ -374,6 +429,7 @@ func (s *JSON) applySchemaV1() error {
 			seq INTEGER PRIMARY KEY AUTOINCREMENT,
 			job_id TEXT NOT NULL UNIQUE,
 			mode TEXT NOT NULL,
+			run_once INTEGER NOT NULL DEFAULT 0,
 			cli TEXT NOT NULL,
 			provider_id TEXT NOT NULL DEFAULT '',
 			provider_name TEXT NOT NULL DEFAULT '',
@@ -506,9 +562,12 @@ func (s *JSON) LoadSettings() (domain.Settings, error) {
 	var value domain.Settings
 	var configured int
 	err := s.db.QueryRow(`SELECT timeout_seconds, retry_interval_seconds, keepalive_interval_seconds,
+		keepalive_summary_seconds, keepalive_summary_successes, probe_progress_seconds, recovery_merge_seconds,
 		history_limit, event_retention_days, event_retention_rows, event_retention_bytes,
 		dingtalk_configured FROM settings WHERE id = 1`).Scan(
 		&value.TimeoutSeconds, &value.RetryIntervalSeconds, &value.KeepaliveIntervalSeconds,
+		&value.KeepaliveSummarySeconds, &value.KeepaliveSummarySuccesses,
+		&value.ProbeProgressSeconds, &value.RecoveryMergeSeconds,
 		&value.HistoryLimit, &value.EventRetentionDays, &value.EventRetentionRows,
 		&value.EventRetentionBytes, &configured,
 	)
@@ -542,13 +601,18 @@ type sqlExecer interface {
 func saveSettingsDB(exec sqlExecer, value domain.Settings, now time.Time) error {
 	_, err := exec.Exec(`INSERT INTO settings(
 		id, timeout_seconds, retry_interval_seconds, keepalive_interval_seconds,
+		keepalive_summary_seconds, keepalive_summary_successes, probe_progress_seconds, recovery_merge_seconds,
 		history_limit, event_retention_days, event_retention_rows, event_retention_bytes,
 		dingtalk_configured, updated_at_ns
-	) VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		timeout_seconds = excluded.timeout_seconds,
 		retry_interval_seconds = excluded.retry_interval_seconds,
 		keepalive_interval_seconds = excluded.keepalive_interval_seconds,
+		keepalive_summary_seconds = excluded.keepalive_summary_seconds,
+		keepalive_summary_successes = excluded.keepalive_summary_successes,
+		probe_progress_seconds = excluded.probe_progress_seconds,
+		recovery_merge_seconds = excluded.recovery_merge_seconds,
 		history_limit = excluded.history_limit,
 		event_retention_days = excluded.event_retention_days,
 		event_retention_rows = excluded.event_retention_rows,
@@ -556,6 +620,8 @@ func saveSettingsDB(exec sqlExecer, value domain.Settings, now time.Time) error 
 		dingtalk_configured = excluded.dingtalk_configured,
 		updated_at_ns = excluded.updated_at_ns`,
 		value.TimeoutSeconds, value.RetryIntervalSeconds, value.KeepaliveIntervalSeconds,
+		value.KeepaliveSummarySeconds, value.KeepaliveSummarySuccesses,
+		value.ProbeProgressSeconds, value.RecoveryMergeSeconds,
 		value.HistoryLimit, value.EventRetentionDays, value.EventRetentionRows,
 		value.EventRetentionBytes, boolInt(value.DingTalkConfigured), now.UnixNano(),
 	)
@@ -955,25 +1021,25 @@ func (s *JSON) SaveSummary(value domain.Summary, limit int) error {
 	return nil
 }
 
-const summarySelect = `SELECT job_id, mode, cli, provider_id, provider_name, provider, target,
+const summarySelect = `SELECT job_id, mode, run_once, cli, provider_id, provider_name, provider, target,
 	model, masked_key, status, latest_attempt, attempts, started_at_ns, ended_at_ns,
 	next_attempt_at_ns, elapsed_millis FROM job_summaries`
 
 func insertSummaryTx(tx *sql.Tx, value domain.Summary, savedAt time.Time) error {
 	_, err := tx.Exec(`INSERT INTO job_summaries(
-		job_id, mode, cli, provider_id, provider_name, provider, target, model, masked_key,
+		job_id, mode, run_once, cli, provider_id, provider_name, provider, target, model, masked_key,
 		status, latest_attempt, attempts, started_at_ns, ended_at_ns, next_attempt_at_ns,
 		elapsed_millis, saved_at_ns
-	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(job_id) DO UPDATE SET
-		mode = excluded.mode, cli = excluded.cli, provider_id = excluded.provider_id,
+		mode = excluded.mode, run_once = excluded.run_once, cli = excluded.cli, provider_id = excluded.provider_id,
 		provider_name = excluded.provider_name, provider = excluded.provider,
 		target = excluded.target, model = excluded.model, masked_key = excluded.masked_key,
 		status = excluded.status, latest_attempt = excluded.latest_attempt,
 		attempts = excluded.attempts, started_at_ns = excluded.started_at_ns,
 		ended_at_ns = excluded.ended_at_ns, next_attempt_at_ns = excluded.next_attempt_at_ns,
 		elapsed_millis = excluded.elapsed_millis, saved_at_ns = excluded.saved_at_ns`,
-		value.ID, string(value.Mode), string(value.CLI), value.ProviderID, value.ProviderName,
+		value.ID, string(value.Mode), boolInt(value.RunOnce), string(value.CLI), value.ProviderID, value.ProviderName,
 		value.Provider, value.Target, value.Model, value.MaskedKey, string(value.Status),
 		string(value.LatestAttempt), value.Attempts, value.StartedAt.UnixNano(),
 		nullTimeNS(value.EndedAt), nullTimeNS(value.NextAttemptAt), value.ElapsedMillis,
@@ -992,16 +1058,18 @@ type rowScanner interface {
 func scanSummary(row rowScanner) (domain.Summary, error) {
 	var value domain.Summary
 	var mode, cli, status, latest string
+	var runOnce int
 	var started int64
 	var ended, next sql.NullInt64
 	if err := row.Scan(
-		&value.ID, &mode, &cli, &value.ProviderID, &value.ProviderName, &value.Provider,
+		&value.ID, &mode, &runOnce, &cli, &value.ProviderID, &value.ProviderName, &value.Provider,
 		&value.Target, &value.Model, &value.MaskedKey, &status, &latest, &value.Attempts,
 		&started, &ended, &next, &value.ElapsedMillis,
 	); err != nil {
 		return domain.Summary{}, fmt.Errorf("scan summary: %w", err)
 	}
 	value.Mode = domain.Mode(mode)
+	value.RunOnce = runOnce != 0
 	value.CLI = domain.CLI(cli)
 	value.Status = domain.JobStatus(status)
 	value.LatestAttempt = domain.AttemptStatus(latest)

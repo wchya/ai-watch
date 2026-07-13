@@ -35,6 +35,7 @@ const (
 
 type JobOptions struct {
 	Mode                     Mode   `json:"mode"`
+	RunOnce                  bool   `json:"runOnce,omitempty"`
 	CLI                      CLI    `json:"cli"`
 	ProviderID               string `json:"providerId,omitempty"`
 	Prompt                   string `json:"prompt,omitempty"`
@@ -158,6 +159,7 @@ type ConfigStatus struct {
 type Job struct {
 	ID            string        `json:"id"`
 	Mode          Mode          `json:"mode"`
+	RunOnce       bool          `json:"runOnce"`
 	CLI           CLI           `json:"cli"`
 	ProviderID    string        `json:"providerId,omitempty"`
 	ProviderName  string        `json:"providerName,omitempty"`
@@ -186,16 +188,26 @@ type Event struct {
 }
 
 type Settings struct {
-	TimeoutSeconds           int   `json:"timeoutSeconds"`
-	RetryIntervalSeconds     int   `json:"retryIntervalSeconds"`
-	KeepaliveIntervalSeconds int   `json:"keepaliveIntervalSeconds"`
-	HistoryLimit             int   `json:"historyLimit"`
-	EventRetentionDays       int   `json:"eventRetentionDays"`
-	EventRetentionRows       int   `json:"eventRetentionRows"`
-	EventRetentionBytes      int64 `json:"eventRetentionBytes"`
-	DingTalkConfigured       bool  `json:"dingTalkConfigured"`
+	TimeoutSeconds            int   `json:"timeoutSeconds"`
+	RetryIntervalSeconds      int   `json:"retryIntervalSeconds"`
+	KeepaliveIntervalSeconds  int   `json:"keepaliveIntervalSeconds"`
+	KeepaliveSummarySeconds   int   `json:"keepaliveSummarySeconds"`
+	KeepaliveSummarySuccesses int   `json:"keepaliveSummarySuccesses"`
+	ProbeProgressSeconds      int   `json:"probeProgressSeconds"`
+	RecoveryMergeSeconds      int   `json:"recoveryMergeSeconds"`
+	HistoryLimit              int   `json:"historyLimit"`
+	EventRetentionDays        int   `json:"eventRetentionDays"`
+	EventRetentionRows        int   `json:"eventRetentionRows"`
+	EventRetentionBytes       int64 `json:"eventRetentionBytes"`
+	DingTalkConfigured        bool  `json:"dingTalkConfigured"`
 }
 
 func DefaultSettings() Settings {
-	return Settings{TimeoutSeconds: 15, RetryIntervalSeconds: 2, KeepaliveIntervalSeconds: 120, HistoryLimit: 100, EventRetentionDays: 30, EventRetentionRows: 5000, EventRetentionBytes: 8 << 20}
+	return Settings{
+		TimeoutSeconds: 15, RetryIntervalSeconds: 2, KeepaliveIntervalSeconds: 120,
+		KeepaliveSummarySeconds: 3600, KeepaliveSummarySuccesses: 0,
+		ProbeProgressSeconds: 3600, RecoveryMergeSeconds: 0,
+		HistoryLimit: 100, EventRetentionDays: 30, EventRetentionRows: 5000,
+		EventRetentionBytes: 8 << 20,
+	}
 }

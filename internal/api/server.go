@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,7 +22,6 @@ type Server struct {
 	scanner *configscan.Scanner
 	jobs    *jobs.Manager
 	webDir  string
-	client  *http.Client
 	store   *store.JSON
 }
 
@@ -32,7 +30,7 @@ func New(scanner *configscan.Scanner, manager *jobs.Manager, webDir string, stor
 	if len(stores) > 0 {
 		eventStore = stores[0]
 	}
-	return &Server{scanner: scanner, jobs: manager, webDir: webDir, client: &http.Client{Timeout: 10 * time.Second}, store: eventStore}
+	return &Server{scanner: scanner, jobs: manager, webDir: webDir, store: eventStore}
 }
 func (s *Server) Handler() http.Handler { return recoverMiddleware(http.HandlerFunc(s.route)) }
 
@@ -75,6 +73,8 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		s.clearEvents(w)
 	case p == "/api/notifications/test" && r.Method == http.MethodPost:
 		s.notification(w, r)
+	case p == "/api/notifications/status" && r.Method == http.MethodPost:
+		s.notificationStatus(w, r)
 	case strings.HasPrefix(p, "/api/"):
 		writeError(w, 404, "not_found", "API endpoint not found")
 	default:
@@ -225,8 +225,8 @@ func (s *Server) bulkJobs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_bulk_items", "items must contain 1..50 entries")
 		return
 	}
-	if request.Action != "probe" && request.Action != "keepalive" && request.Action != "stop" {
-		writeError(w, http.StatusBadRequest, "invalid_bulk_action", "action must be probe, keepalive, or stop")
+	if request.Action != "probe" && request.Action != "probe_once" && request.Action != "keepalive" && request.Action != "keepalive_once" && request.Action != "stop" {
+		writeError(w, http.StatusBadRequest, "invalid_bulk_action", "action must be probe, probe_once, keepalive, keepalive_once, or stop")
 		return
 	}
 	results := make([]bulkJobResult, 0, len(request.Items))
@@ -238,11 +238,12 @@ func (s *Server) bulkJobs(w http.ResponseWriter, r *http.Request) {
 			err = s.jobs.StopTarget(item.CLI, item.ProviderID, item.ScheduleID)
 		} else {
 			mode := domain.ModeProbe
-			if request.Action == "keepalive" {
+			if request.Action == "keepalive" || request.Action == "keepalive_once" {
 				mode = domain.ModeKeepalive
 			}
 			job, startErr := s.jobs.Start(domain.JobOptions{
-				Mode: mode, CLI: item.CLI, ProviderID: item.ProviderID,
+				Mode: mode, RunOnce: request.Action == "probe_once" || request.Action == "keepalive_once",
+				CLI: item.CLI, ProviderID: item.ProviderID,
 				TimeoutSeconds:           item.TimeoutSeconds,
 				RetryIntervalSeconds:     item.RetryIntervalSeconds,
 				KeepaliveIntervalSeconds: item.KeepaliveIntervalSeconds,
@@ -513,9 +514,56 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
-	var v domain.Settings
-	if !decode(w, r, &v) {
+	type input struct {
+		TimeoutSeconds            *int   `json:"timeoutSeconds"`
+		RetryIntervalSeconds      *int   `json:"retryIntervalSeconds"`
+		KeepaliveIntervalSeconds  *int   `json:"keepaliveIntervalSeconds"`
+		KeepaliveSummarySeconds   *int   `json:"keepaliveSummarySeconds"`
+		KeepaliveSummarySuccesses *int   `json:"keepaliveSummarySuccesses"`
+		ProbeProgressSeconds      *int   `json:"probeProgressSeconds"`
+		RecoveryMergeSeconds      *int   `json:"recoveryMergeSeconds"`
+		HistoryLimit              *int   `json:"historyLimit"`
+		EventRetentionDays        *int   `json:"eventRetentionDays"`
+		EventRetentionRows        *int   `json:"eventRetentionRows"`
+		EventRetentionBytes       *int64 `json:"eventRetentionBytes"`
+	}
+	var request input
+	if !decode(w, r, &request) {
 		return
+	}
+	v := s.jobs.Settings()
+	if request.TimeoutSeconds != nil {
+		v.TimeoutSeconds = *request.TimeoutSeconds
+	}
+	if request.RetryIntervalSeconds != nil {
+		v.RetryIntervalSeconds = *request.RetryIntervalSeconds
+	}
+	if request.KeepaliveIntervalSeconds != nil {
+		v.KeepaliveIntervalSeconds = *request.KeepaliveIntervalSeconds
+	}
+	if request.KeepaliveSummarySeconds != nil {
+		v.KeepaliveSummarySeconds = *request.KeepaliveSummarySeconds
+	}
+	if request.KeepaliveSummarySuccesses != nil {
+		v.KeepaliveSummarySuccesses = *request.KeepaliveSummarySuccesses
+	}
+	if request.ProbeProgressSeconds != nil {
+		v.ProbeProgressSeconds = *request.ProbeProgressSeconds
+	}
+	if request.RecoveryMergeSeconds != nil {
+		v.RecoveryMergeSeconds = *request.RecoveryMergeSeconds
+	}
+	if request.HistoryLimit != nil {
+		v.HistoryLimit = *request.HistoryLimit
+	}
+	if request.EventRetentionDays != nil {
+		v.EventRetentionDays = *request.EventRetentionDays
+	}
+	if request.EventRetentionRows != nil {
+		v.EventRetentionRows = *request.EventRetentionRows
+	}
+	if request.EventRetentionBytes != nil {
+		v.EventRetentionBytes = *request.EventRetentionBytes
 	}
 	if e := s.jobs.SetSettings(v); e != nil {
 		writeError(w, 400, "invalid_settings", e.Error())
@@ -524,29 +572,35 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.jobs.Settings())
 }
 func (s *Server) notification(w http.ResponseWriter, r *http.Request) {
-	url := os.Getenv("DINGTALK_WEBHOOK_URL")
-	if url == "" {
-		writeError(w, 503, "not_configured", "DingTalk webhook is not configured")
+	if s.jobs == nil {
+		writeError(w, http.StatusServiceUnavailable, "not_configured", "DingTalk webhook is not configured")
 		return
 	}
-	payload, _ := json.Marshal(map[string]any{"msgtype": "text", "text": map[string]string{"content": "AI Watch 通知测试成功"}})
-	req, e := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(payload))
-	if e != nil {
-		writeError(w, 500, "notification_failed", e.Error())
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, e := s.client.Do(req)
-	if e != nil {
-		writeError(w, 502, "notification_failed", e.Error())
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		writeError(w, 502, "notification_failed", resp.Status)
+	if err := s.jobs.TestNotification(r.Context()); err != nil {
+		notificationError(w, err)
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"sent": true})
+}
+
+func (s *Server) notificationStatus(w http.ResponseWriter, r *http.Request) {
+	if s.jobs == nil {
+		writeError(w, http.StatusServiceUnavailable, "not_configured", "DingTalk webhook is not configured")
+		return
+	}
+	if err := s.jobs.SendStatusSummary(r.Context()); err != nil {
+		notificationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"sent": true})
+}
+
+func notificationError(w http.ResponseWriter, err error) {
+	if errors.Is(err, jobs.ErrNotificationsNotConfigured) {
+		writeError(w, http.StatusServiceUnavailable, "not_configured", err.Error())
+		return
+	}
+	writeError(w, http.StatusBadGateway, "notification_failed", err.Error())
 }
 
 func (s *Server) web(w http.ResponseWriter, r *http.Request) {

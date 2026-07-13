@@ -98,6 +98,67 @@ func TestProbeClearsOutputAndPersistsSummary(t *testing.T) {
 	}
 }
 
+func TestRunOnceFinishesAfterExactlyOneAttempt(t *testing.T) {
+	tests := []struct {
+		name        string
+		mode        domain.Mode
+		result      runner.Result
+		wantStatus  domain.JobStatus
+		wantAttempt domain.AttemptStatus
+	}{
+		{name: "probe retryable failure", mode: domain.ModeProbe, result: runner.Result{ExitCode: 1, Output: "unexpected response"}, wantStatus: domain.JobFailed, wantAttempt: domain.AttemptUnmatched},
+		{name: "probe fatal failure", mode: domain.ModeProbe, result: runner.Result{ExitCode: 1, Output: "not logged in"}, wantStatus: domain.JobFatal, wantAttempt: domain.AttemptFatal},
+		{name: "immediate keepalive success", mode: domain.ModeKeepalive, result: runner.Result{ExitCode: 0, Output: "READY"}, wantStatus: domain.JobSuccess, wantAttempt: domain.AttemptSuccess},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			st := store.New(t.TempDir())
+			defer st.Close()
+			calls := 0
+			executor := execFunc(func(context.Context, string, domain.JobOptions, domain.ResolvedConfig, func(string)) (runner.Result, error) {
+				calls++
+				return test.result, nil
+			})
+			m := New(fakeResolver{domain.ResolvedConfig{BaseURL: "https://example.test/v1", LockIdentity: test.name}}, executor, st)
+			defer m.Shutdown()
+			job, err := m.Start(domain.JobOptions{Mode: test.mode, RunOnce: true, CLI: domain.CLICodex})
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := waitDone(t, m, job.ID)
+			if calls != 1 || !done.RunOnce || done.Attempts != 1 || done.Status != test.wantStatus || done.LatestAttempt != test.wantAttempt {
+				t.Fatalf("unexpected one-shot result: calls=%d job=%+v", calls, done)
+			}
+			if done.NextAttemptAt != nil || done.Phase == domain.JobPhaseRecoveryProbe {
+				t.Fatalf("one-shot job entered a continuing state: %+v", done)
+			}
+		})
+	}
+}
+
+func TestContinuousProbeStillRetriesUntilSuccess(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	calls := 0
+	executor := execFunc(func(context.Context, string, domain.JobOptions, domain.ResolvedConfig, func(string)) (runner.Result, error) {
+		calls++
+		if calls == 1 {
+			return runner.Result{ExitCode: 1, Output: "unexpected response"}, nil
+		}
+		return runner.Result{ExitCode: 0, Output: "READY"}, nil
+	})
+	m := New(fakeResolver{domain.ResolvedConfig{BaseURL: "https://example.test/v1", LockIdentity: "continuous"}}, executor, st)
+	defer m.Shutdown()
+	job, err := m.Start(domain.JobOptions{Mode: domain.ModeProbe, CLI: domain.CLICodex, RetryIntervalSeconds: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := waitJob(t, m, job.ID, func(job domain.Job) bool { return job.EndedAt != nil })
+	if calls != 2 || done.RunOnce || done.Status != domain.JobSuccess || done.Attempts != 2 {
+		t.Fatalf("continuous probe behavior changed: calls=%d job=%+v", calls, done)
+	}
+}
+
 func TestLifecycleEventsPersistWithoutRawOutput(t *testing.T) {
 	st := store.New(t.TempDir())
 	defer st.Close()

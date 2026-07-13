@@ -216,7 +216,8 @@ func (m *Manager) reconcileSchedules(now time.Time) {
 
 func scheduleJobOptions(schedule domain.Schedule) domain.JobOptions {
 	return domain.JobOptions{
-		Mode: schedule.Mode, CLI: schedule.CLI, ProviderID: schedule.ProviderID,
+		Mode: schedule.Mode, RunOnce: schedule.Mode == domain.ModeProbe && !schedule.UntilSuccess,
+		CLI: schedule.CLI, ProviderID: schedule.ProviderID,
 		TimeoutSeconds:           schedule.TimeoutSeconds,
 		RetryIntervalSeconds:     schedule.RetryIntervalSeconds,
 		KeepaliveIntervalSeconds: schedule.KeepaliveIntervalSeconds,
@@ -234,15 +235,9 @@ func terminalScheduleStatus(status string) bool {
 	}
 }
 
-func shouldSkipScheduleOccurrence(schedule domain.Schedule, occurrence string, now time.Time) bool {
+func shouldSkipScheduleOccurrence(schedule domain.Schedule, occurrence string, _ time.Time) bool {
 	if schedule.LastOccurrenceKey != occurrence || !terminalScheduleStatus(schedule.LastStatus) {
 		return false
-	}
-	if schedule.Mode == domain.ModeProbe && !schedule.UntilSuccess && schedule.LastStatus == string(domain.JobSuccess) {
-		if schedule.LastOccurrenceAt == nil {
-			return false
-		}
-		return now.Sub(*schedule.LastOccurrenceAt) < time.Duration(schedule.RetryIntervalSeconds)*time.Second
 	}
 	return true
 }

@@ -41,25 +41,28 @@ type Notifier interface {
 }
 
 type Manager struct {
-	mu             sync.RWMutex
-	resolver       Resolver
-	executor       Executor
-	store          *store.JSON
-	jobs           map[string]*runtime
-	locks          map[string]string
-	history        []domain.Summary
-	settings       domain.Settings
-	notifier       Notifier
-	ctx            context.Context
-	cancel         context.CancelFunc
-	wg             sync.WaitGroup
-	shutdown       sync.Once
-	closing        bool
-	eventQueue     chan eventWrite
-	eventWG        sync.WaitGroup
-	persistenceErr atomic.Value
-	scheduleJobs   map[string]string
-	scheduleWake   chan struct{}
+	mu                sync.RWMutex
+	resolver          Resolver
+	executor          Executor
+	store             *store.JSON
+	jobs              map[string]*runtime
+	locks             map[string]string
+	history           []domain.Summary
+	settings          domain.Settings
+	notifier          Notifier
+	ctx               context.Context
+	cancel            context.CancelFunc
+	wg                sync.WaitGroup
+	shutdown          sync.Once
+	closing           bool
+	eventQueue        chan eventWrite
+	eventWG           sync.WaitGroup
+	persistenceErr    atomic.Value
+	scheduleJobs      map[string]string
+	scheduleWake      chan struct{}
+	notifications     notificationState
+	notificationSlots chan struct{}
+	notificationWG    sync.WaitGroup
 }
 
 type runtime struct {
@@ -94,7 +97,7 @@ func New(res Resolver, exec Executor, st *store.JSON, notifier ...Notifier) *Man
 		n = notifier[0]
 	}
 	settings.DingTalkConfigured = n != nil && n.Configured()
-	m := &Manager{resolver: res, executor: exec, store: st, jobs: map[string]*runtime{}, locks: map[string]string{}, history: history, settings: settings, notifier: n, ctx: ctx, cancel: cancel, eventQueue: make(chan eventWrite, 256), scheduleJobs: map[string]string{}, scheduleWake: make(chan struct{}, 1)}
+	m := &Manager{resolver: res, executor: exec, store: st, jobs: map[string]*runtime{}, locks: map[string]string{}, history: history, settings: settings, notifier: n, ctx: ctx, cancel: cancel, eventQueue: make(chan eventWrite, 256), scheduleJobs: map[string]string{}, scheduleWake: make(chan struct{}, 1), notificationSlots: make(chan struct{}, 4)}
 	m.persistenceErr.Store("")
 	m.eventWG.Add(1)
 	go m.persistEvents()
@@ -155,7 +158,7 @@ func (m *Manager) start(opts domain.JobOptions, scheduleID, occurrenceKey string
 	if opts.Mode == domain.ModeKeepalive {
 		phase = domain.JobPhaseKeepalive
 	}
-	job := domain.Job{ID: id, Mode: opts.Mode, CLI: opts.CLI, ProviderID: cfg.ProviderID, ProviderName: cfg.ProviderName, Provider: cfg.Provider, Target: sanitizeTarget(cfg.BaseURL), Model: first(opts.Model, cfg.Model), MaskedKey: security.Mask(cfg.APIKey), Status: domain.JobQueued, Phase: phase, StartedAt: now}
+	job := domain.Job{ID: id, Mode: opts.Mode, RunOnce: opts.RunOnce, CLI: opts.CLI, ProviderID: cfg.ProviderID, ProviderName: cfg.ProviderName, Provider: cfg.Provider, Target: sanitizeTarget(cfg.BaseURL), Model: first(opts.Model, cfg.Model), MaskedKey: security.Mask(cfg.APIKey), Status: domain.JobQueued, Phase: phase, StartedAt: now}
 	rt := &runtime{job: job, opts: opts, cfg: cfg, lock: lock, ctx: ctx, cancel: cancel, subscribers: map[chan domain.Event]struct{}{}, scheduleID: scheduleID, occurrenceKey: occurrenceKey}
 	m.mu.Lock()
 	if m.closing {
@@ -224,6 +227,17 @@ func (m *Manager) run(rt *runtime) {
 			m.finish(rt, domain.JobStopped, state, "任务已停止")
 			return
 		}
+		if rt.opts.RunOnce {
+			if rt.opts.Mode == domain.ModeKeepalive && state == domain.AttemptSuccess {
+				m.mu.RLock()
+				notification := view(rt.job)
+				m.mu.RUnlock()
+				m.recordKeepaliveSuccess(notification)
+			}
+			status, message := oneShotResult(rt.opts.Mode, state)
+			m.finish(rt, status, state, message)
+			return
+		}
 		if rt.opts.Mode == domain.ModeProbe {
 			if state == domain.AttemptSuccess {
 				m.finish(rt, domain.JobSuccess, state, "测活成功")
@@ -233,6 +247,10 @@ func (m *Manager) run(rt *runtime) {
 				m.finish(rt, domain.JobFatal, state, "检测到不可重试错误")
 				return
 			}
+			m.mu.RLock()
+			notification := view(rt.job)
+			m.mu.RUnlock()
+			m.recordProbeProgress(notification)
 			if !m.wait(rt, time.Duration(rt.opts.RetryIntervalSeconds)*time.Second) {
 				m.finish(rt, domain.JobStopped, domain.AttemptStopped, "任务已停止")
 				return
@@ -244,6 +262,21 @@ func (m *Manager) run(rt *runtime) {
 				return
 			}
 		}
+	}
+}
+
+func oneShotResult(mode domain.Mode, attempt domain.AttemptStatus) (domain.JobStatus, string) {
+	label := "测活"
+	if mode == domain.ModeKeepalive {
+		label = "保活"
+	}
+	switch attempt {
+	case domain.AttemptSuccess:
+		return domain.JobSuccess, label + "成功"
+	case domain.AttemptFatal:
+		return domain.JobFatal, label + "检测到不可重试错误"
+	default:
+		return domain.JobFailed, label + "单次执行未通过"
 	}
 }
 
@@ -276,7 +309,12 @@ func (m *Manager) continueKeepalive(rt *runtime, state domain.AttemptStatus) boo
 		}
 		m.mu.Unlock()
 		if recovered {
-			m.notify(notification, domain.AttemptSuccess)
+			m.queueRecovery(notification)
+		} else {
+			m.mu.RLock()
+			notification = view(rt.job)
+			m.mu.RUnlock()
+			m.recordKeepaliveSuccess(notification)
 		}
 		return m.waitCountdown(rt, time.Duration(rt.opts.KeepaliveIntervalSeconds)*time.Second, "等待下一次保活")
 	}
@@ -293,8 +331,10 @@ func (m *Manager) continueKeepalive(rt *runtime, state domain.AttemptStatus) boo
 		})
 	}
 	recovering := rt.job.Phase == domain.JobPhaseRecoveryProbe
+	notification := view(rt.job)
 	m.mu.Unlock()
 	if recovering {
+		m.recordProbeProgress(notification)
 		return m.waitCountdown(rt, time.Duration(rt.opts.RetryIntervalSeconds)*time.Second, "等待下一次恢复探测")
 	}
 	return m.waitCountdown(rt, time.Duration(rt.opts.KeepaliveIntervalSeconds)*time.Second, "等待下一次保活")
@@ -359,6 +399,9 @@ func (m *Manager) finish(rt *runtime, status domain.JobStatus, attempt domain.At
 	rt.scheduleID = ""
 	rt.occurrenceKey = ""
 	m.mu.Unlock()
+	if mode == domain.ModeProbe {
+		m.clearProbeProgress(summary)
+	}
 	if err := m.store.SaveSummary(summary, limit); err != nil {
 		m.persistenceErr.Store(err.Error())
 	}
@@ -377,7 +420,27 @@ func (m *Manager) notify(job domain.Job, attempt domain.AttemptStatus) {
 	if m.notifier == nil || !m.notifier.Configured() {
 		return
 	}
-	go func() { _ = m.notifier.Notify(context.Background(), job, attempt) }()
+	m.mu.Lock()
+	if m.closing {
+		m.mu.Unlock()
+		return
+	}
+	select {
+	case m.notificationSlots <- struct{}{}:
+		m.notificationWG.Add(1)
+	default:
+		m.mu.Unlock()
+		return
+	}
+	notifier := m.notifier
+	m.mu.Unlock()
+	go func() {
+		defer func() {
+			<-m.notificationSlots
+			m.notificationWG.Done()
+		}()
+		_ = notifier.Notify(context.Background(), job, attempt)
+	}()
 }
 
 func (m *Manager) update(rt *runtime, change func(*domain.Job), typ, msg string, data map[string]any) {
@@ -535,6 +598,12 @@ func (m *Manager) SetSettings(v domain.Settings) error {
 	if v.EventRetentionBytes == 0 {
 		v.EventRetentionBytes = defaults.EventRetentionBytes
 	}
+	if v.ProbeProgressSeconds < 0 || v.ProbeProgressSeconds > 604800 || v.RecoveryMergeSeconds < 0 || v.RecoveryMergeSeconds > 86400 {
+		return errors.New("invalid notification interval settings")
+	}
+	if v.KeepaliveSummarySeconds < 0 || v.KeepaliveSummarySeconds > 604800 || v.KeepaliveSummarySuccesses < 0 || v.KeepaliveSummarySuccesses > 1_000_000 {
+		return errors.New("invalid keepalive summary settings")
+	}
 	if v.TimeoutSeconds < 1 || v.RetryIntervalSeconds < minRetryIntervalSeconds || v.KeepaliveIntervalSeconds < 1 || v.HistoryLimit < 1 {
 		return errors.New("invalid settings")
 	}
@@ -557,6 +626,11 @@ func (m *Manager) Shutdown() {
 	m.shutdown.Do(func() {
 		m.mu.Lock()
 		m.closing = true
+		if m.notifications.recoveryTimer != nil {
+			m.notifications.recoveryTimer.Stop()
+			m.notifications.recoveryTimer = nil
+		}
+		m.notifications = notificationState{}
 		var cancels []context.CancelFunc
 		for _, rt := range m.jobs {
 			if !rt.closed && rt.cancel != nil {
@@ -569,6 +643,7 @@ func (m *Manager) Shutdown() {
 			cancel()
 		}
 		m.wg.Wait()
+		m.notificationWG.Wait()
 		close(m.eventQueue)
 		m.eventWG.Wait()
 	})
@@ -627,6 +702,18 @@ func normalizedSettings(v domain.Settings) domain.Settings {
 	}
 	if v.KeepaliveIntervalSeconds < 1 {
 		v.KeepaliveIntervalSeconds = defaults.KeepaliveIntervalSeconds
+	}
+	if v.KeepaliveSummarySeconds < 0 {
+		v.KeepaliveSummarySeconds = defaults.KeepaliveSummarySeconds
+	}
+	if v.KeepaliveSummarySuccesses < 0 {
+		v.KeepaliveSummarySuccesses = defaults.KeepaliveSummarySuccesses
+	}
+	if v.ProbeProgressSeconds < 0 {
+		v.ProbeProgressSeconds = defaults.ProbeProgressSeconds
+	}
+	if v.RecoveryMergeSeconds < 0 {
+		v.RecoveryMergeSeconds = defaults.RecoveryMergeSeconds
 	}
 	if v.HistoryLimit < 1 {
 		v.HistoryLimit = defaults.HistoryLimit

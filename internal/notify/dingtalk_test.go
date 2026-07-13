@@ -56,3 +56,27 @@ func TestNotifyRejectsDingTalkApplicationError(t *testing.T) {
 		t.Fatalf("expected DingTalk application error, got %v", err)
 	}
 }
+
+func TestSendMarkdownUsesValidatedDingTalkPath(t *testing.T) {
+	var msgType, title string
+	notifier := New("https://example.invalid/robot")
+	notifier.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var payload struct {
+			MsgType  string `json:"msgtype"`
+			Markdown struct {
+				Title string `json:"title"`
+			} `json:"markdown"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		msgType, title = payload.MsgType, payload.Markdown.Title
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader(`{"errcode":0,"errmsg":"ok"}`)), Header: make(http.Header)}, nil
+	})}
+	if err := notifier.Send(context.Background(), "AI Watch 状态汇总", "content"); err != nil {
+		t.Fatal(err)
+	}
+	if msgType != "markdown" || title != "AI Watch 状态汇总" {
+		t.Fatalf("unexpected payload: msgtype=%q title=%q", msgType, title)
+	}
+}

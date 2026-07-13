@@ -39,11 +39,15 @@ export interface ProviderExample {
   model?: string
   provider?: string
   description?: string
+  updatedAt?: string
 }
+
+export type ProviderExampleWriteRequest = Omit<ProviderExample, 'updatedAt'>
 
 export interface JobSummary {
   id: string
   mode: JobMode
+  runOnce?: boolean
   cli: Cli
   providerId?: string
   providerName?: string
@@ -66,6 +70,7 @@ export interface DashboardData {
 }
 
 export interface JobOptions {
+  runOnce: boolean
   timeoutSeconds: number
   retryIntervalSeconds: number
   keepaliveIntervalSeconds: number
@@ -95,8 +100,11 @@ export interface AppSettings {
   eventRetentionDays: number
   eventRetentionRows: number
   eventRetentionBytes: number
+  keepaliveSummarySeconds: number
+  keepaliveSummarySuccesses: number
+  probeProgressSeconds: number
+  recoveryMergeSeconds: number
   browserNotifications: boolean
-  dingTalkEnabled: boolean
   dingTalkConfigured: boolean
 }
 
@@ -170,7 +178,7 @@ export interface ScheduleListResult {
   limit?: number
 }
 
-export type BulkJobAction = 'probe' | 'keepalive' | 'stop'
+export type BulkJobAction = 'probe' | 'probe_once' | 'keepalive' | 'keepalive_once' | 'stop'
 
 export interface BulkJobTarget {
   targetId: string
