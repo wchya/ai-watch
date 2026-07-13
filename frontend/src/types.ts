@@ -2,6 +2,7 @@ export type Cli = 'codex' | 'claude'
 export type JobMode = 'probe' | 'keepalive'
 export type JobStatus = 'starting' | 'running' | 'success' | 'fatal' | 'stopped' | 'failed'
 export type AttemptStatus = 'success' | 'timeout' | 'overloaded' | 'fatal' | 'unmatched' | 'stopped'
+export type JobPhase = 'probe' | 'keepalive' | 'recovery_probe'
 
 export interface HealthItem {
   id: string
@@ -48,6 +49,7 @@ export interface JobSummary {
   providerName?: string
   model?: string
   status: JobStatus
+  phase?: JobPhase
   lastAttemptStatus?: AttemptStatus
   attemptCount: number
   startedAt: string
@@ -67,6 +69,7 @@ export interface JobOptions {
   timeoutSeconds: number
   retryIntervalSeconds: number
   keepaliveIntervalSeconds: number
+  failureThreshold: number
   prompt: string
   expectedText: string
   requestMaxRetries: number

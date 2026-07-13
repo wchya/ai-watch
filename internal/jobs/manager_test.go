@@ -42,6 +42,33 @@ func waitDone(t *testing.T, m *Manager, id string) domain.Job {
 	t.Fatal("job did not finish")
 	return domain.Job{}
 }
+
+func waitJob(t *testing.T, m *Manager, id string, match func(domain.Job) bool) domain.Job {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		job, err := m.Get(id)
+		if err == nil && match(job) {
+			return job
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	job, err := m.Get(id)
+	t.Fatalf("job condition not reached: job=%+v err=%v", job, err)
+	return domain.Job{}
+}
+
+func receiveAttempt(t *testing.T, attempts <-chan int, want int) {
+	t.Helper()
+	select {
+	case got := <-attempts:
+		if got != want {
+			t.Fatalf("got attempt %d, want %d", got, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("attempt %d did not run", want)
+	}
+}
 func TestProbeClearsOutputAndPersistsSummary(t *testing.T) {
 	secret := "secret-value"
 	e := execFunc(func(_ context.Context, _ string, _ domain.JobOptions, _ domain.ResolvedConfig, out func(string)) (runner.Result, error) {
@@ -167,6 +194,229 @@ func TestProbeTerminalNotifies(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("notification not sent")
+	}
+}
+
+func TestKeepaliveFailureKindsEnterRecoveryProbe(t *testing.T) {
+	cases := []struct {
+		name   string
+		result runner.Result
+		want   domain.AttemptStatus
+	}{
+		{name: "fatal", result: runner.Result{ExitCode: 1, Output: "not logged in"}, want: domain.AttemptFatal},
+		{name: "timeout", result: runner.Result{ExitCode: 124, TimedOut: true}, want: domain.AttemptTimeout},
+		{name: "overloaded", result: runner.Result{ExitCode: 1, Output: "429 too many requests"}, want: domain.AttemptOverloaded},
+		{name: "unmatched", result: runner.Result{ExitCode: 1, Output: "unexpected response"}, want: domain.AttemptUnmatched},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			st := store.New(t.TempDir())
+			defer st.Close()
+			var once sync.Once
+			executor := execFunc(func(ctx context.Context, _ string, _ domain.JobOptions, _ domain.ResolvedConfig, _ func(string)) (runner.Result, error) {
+				first := false
+				once.Do(func() { first = true })
+				if first {
+					return test.result, nil
+				}
+				<-ctx.Done()
+				return runner.Result{Stopped: true}, nil
+			})
+			m := New(fakeResolver{domain.ResolvedConfig{BaseURL: "https://example.com", APIKey: "key"}}, executor, st)
+			job, err := m.Start(domain.JobOptions{
+				Mode: domain.ModeKeepalive, CLI: domain.CLICodex,
+				FailureThreshold: 1, RetryIntervalSeconds: 1, KeepaliveIntervalSeconds: 1,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			active := waitJob(t, m, job.ID, func(job domain.Job) bool {
+				return job.Phase == domain.JobPhaseRecoveryProbe && job.LatestAttempt == test.want
+			})
+			if active.Status != domain.JobRunning || active.Attempts != 1 {
+				t.Fatalf("unexpected recovery job: %+v", active)
+			}
+			if err := m.Stop(job.ID); err != nil {
+				t.Fatal(err)
+			}
+			if done := waitDone(t, m, job.ID); done.Status != domain.JobStopped {
+				t.Fatalf("got %s", done.Status)
+			}
+			m.Shutdown()
+		})
+	}
+}
+
+func TestKeepaliveRecoveryReturnsToNormalAndNotifiesOnce(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	notifier := fakeNotifier{called: make(chan domain.AttemptStatus, 4)}
+	attempts := make(chan int, 8)
+	count := 0
+	executor := execFunc(func(context.Context, string, domain.JobOptions, domain.ResolvedConfig, func(string)) (runner.Result, error) {
+		count++
+		attempts <- count
+		switch count {
+		case 1:
+			return runner.Result{ExitCode: 1, Output: "unexpected response"}, nil
+		case 2:
+			return runner.Result{ExitCode: 1, Output: "429 overloaded"}, nil
+		default:
+			return runner.Result{ExitCode: 0, Output: "READY"}, nil
+		}
+	})
+	m := New(fakeResolver{domain.ResolvedConfig{BaseURL: "https://example.com", APIKey: "key"}}, executor, st, notifier)
+	job, err := m.Start(domain.JobOptions{
+		Mode: domain.ModeKeepalive, CLI: domain.CLICodex,
+		FailureThreshold: 2, RetryIntervalSeconds: 1, KeepaliveIntervalSeconds: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiveAttempt(t, attempts, 1)
+	waitJob(t, m, job.ID, func(job domain.Job) bool {
+		return job.Attempts == 1 && job.Phase == domain.JobPhaseKeepalive && job.LatestAttempt == domain.AttemptUnmatched
+	})
+	receiveAttempt(t, attempts, 2)
+	waitJob(t, m, job.ID, func(job domain.Job) bool {
+		return job.Attempts == 2 && job.Phase == domain.JobPhaseRecoveryProbe && job.LatestAttempt == domain.AttemptOverloaded
+	})
+	receiveAttempt(t, attempts, 3)
+	waitJob(t, m, job.ID, func(job domain.Job) bool {
+		return job.Attempts == 3 && job.Phase == domain.JobPhaseKeepalive && job.LatestAttempt == domain.AttemptSuccess
+	})
+	select {
+	case got := <-notifier.called:
+		if got != domain.AttemptSuccess {
+			t.Fatalf("got notification %s", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("recovery notification not sent")
+	}
+	replay, _, cleanup, err := m.Subscribe(job.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+	var phaseEvent, recoveryEvent bool
+	for _, event := range replay {
+		phaseEvent = phaseEvent || event.Type == "phase"
+		recoveryEvent = recoveryEvent || event.Type == "recovery"
+	}
+	if !phaseEvent || !recoveryEvent {
+		t.Fatalf("missing recovery lifecycle events: phase=%v recovery=%v", phaseEvent, recoveryEvent)
+	}
+
+	receiveAttempt(t, attempts, 4)
+	waitJob(t, m, job.ID, func(job domain.Job) bool { return job.Attempts == 4 })
+	select {
+	case got := <-notifier.called:
+		t.Fatalf("ordinary keepalive success sent another notification: %s", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := m.Stop(job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if done := waitDone(t, m, job.ID); done.Status != domain.JobStopped || done.Phase != domain.JobPhaseKeepalive {
+		t.Fatalf("unexpected stopped job: %+v", done)
+	}
+	m.Shutdown()
+}
+
+func TestKeepaliveSuccessResetsConsecutiveFailures(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	attempts := make(chan int, 4)
+	count := 0
+	executor := execFunc(func(context.Context, string, domain.JobOptions, domain.ResolvedConfig, func(string)) (runner.Result, error) {
+		count++
+		attempts <- count
+		if count == 2 {
+			return runner.Result{ExitCode: 0, Output: "READY"}, nil
+		}
+		return runner.Result{ExitCode: 1, Output: "unexpected response"}, nil
+	})
+	m := New(fakeResolver{domain.ResolvedConfig{BaseURL: "https://example.com", APIKey: "key"}}, executor, st)
+	job, err := m.Start(domain.JobOptions{
+		Mode: domain.ModeKeepalive, CLI: domain.CLICodex,
+		FailureThreshold: 2, RetryIntervalSeconds: 1, KeepaliveIntervalSeconds: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for want := 1; want <= 3; want++ {
+		receiveAttempt(t, attempts, want)
+	}
+	waitJob(t, m, job.ID, func(job domain.Job) bool {
+		return job.Attempts == 3 && job.Phase == domain.JobPhaseKeepalive && job.LatestAttempt == domain.AttemptUnmatched
+	})
+	m.mu.RLock()
+	failures := m.jobs[job.ID].consecutiveFailures
+	m.mu.RUnlock()
+	if failures != 1 {
+		t.Fatalf("got %d consecutive failures, want 1", failures)
+	}
+	if err := m.Stop(job.ID); err != nil {
+		t.Fatal(err)
+	}
+	_ = waitDone(t, m, job.ID)
+	m.Shutdown()
+}
+
+func TestOrdinaryKeepaliveSuccessDoesNotNotify(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	notifier := fakeNotifier{called: make(chan domain.AttemptStatus, 1)}
+	executed := make(chan struct{})
+	executor := execFunc(func(context.Context, string, domain.JobOptions, domain.ResolvedConfig, func(string)) (runner.Result, error) {
+		select {
+		case <-executed:
+		default:
+			close(executed)
+		}
+		return runner.Result{ExitCode: 0, Output: "READY"}, nil
+	})
+	m := New(fakeResolver{domain.ResolvedConfig{BaseURL: "https://example.com", APIKey: "key"}}, executor, st, notifier)
+	job, err := m.Start(domain.JobOptions{Mode: domain.ModeKeepalive, CLI: domain.CLICodex, KeepaliveIntervalSeconds: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-executed
+	waitJob(t, m, job.ID, func(job domain.Job) bool { return job.LatestAttempt == domain.AttemptSuccess })
+	select {
+	case got := <-notifier.called:
+		t.Fatalf("ordinary keepalive success notified: %s", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := m.Stop(job.ID); err != nil {
+		t.Fatal(err)
+	}
+	_ = waitDone(t, m, job.ID)
+	m.Shutdown()
+}
+
+func TestShutdownStopsRecoveryProbe(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	executor := execFunc(func(context.Context, string, domain.JobOptions, domain.ResolvedConfig, func(string)) (runner.Result, error) {
+		return runner.Result{ExitCode: 1, Output: "not logged in"}, nil
+	})
+	m := New(fakeResolver{domain.ResolvedConfig{BaseURL: "https://example.com", APIKey: "key"}}, executor, st)
+	job, err := m.Start(domain.JobOptions{
+		Mode: domain.ModeKeepalive, CLI: domain.CLICodex,
+		FailureThreshold: 1, RetryIntervalSeconds: 30, KeepaliveIntervalSeconds: 30,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitJob(t, m, job.ID, func(job domain.Job) bool { return job.Phase == domain.JobPhaseRecoveryProbe })
+	m.Shutdown()
+	done, err := m.Get(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != domain.JobStopped || done.Phase != domain.JobPhaseRecoveryProbe || done.LatestAttempt != domain.AttemptStopped {
+		t.Fatalf("unexpected shutdown result: %+v", done)
 	}
 }
 

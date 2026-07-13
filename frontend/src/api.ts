@@ -1,5 +1,5 @@
 import type {
-  AppSettings, DashboardData, EventListResult, EventQuery, JobEvent, JobStatus,
+  AppSettings, DashboardData, EventListResult, EventQuery, JobEvent, JobPhase, JobStatus,
   JobSummary, OperationalEvent, Provider, ProviderExample, StartJobRequest,
 } from './types'
 
@@ -26,7 +26,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 interface RawProvider { id: string; name: string; cli: 'codex' | 'claude'; current: boolean; model?: string; baseUrl?: string; maskedKey?: string }
 interface RawJob {
   id: string; mode: 'probe' | 'keepalive'; cli: 'codex' | 'claude'; providerId?: string;
-  providerName?: string; model?: string; status: string; latestAttempt?: JobSummary['lastAttemptStatus'];
+  providerName?: string; model?: string; status: string; phase?: JobPhase; latestAttempt?: JobSummary['lastAttemptStatus'];
   attempts: number; startedAt: string; endedAt?: string; nextAttemptAt?: string; elapsedMillis: number
 }
 interface RawSettings { timeoutSeconds: number; retryIntervalSeconds: number; keepaliveIntervalSeconds: number; historyLimit: number; eventRetentionDays: number; eventRetentionRows: number; eventRetentionBytes: number; dingTalkConfigured?: boolean }
@@ -51,7 +51,7 @@ interface RawOperationalEvent {
 const normalizeStatus = (status: string): JobStatus => status === 'queued' ? 'starting' : status as JobStatus
 const normalizeJob = (job: RawJob): JobSummary => ({
   id: job.id, mode: job.mode, cli: job.cli, providerId: job.providerId, providerName: job.providerName,
-  model: job.model, status: normalizeStatus(job.status), lastAttemptStatus: job.latestAttempt,
+  model: job.model, status: normalizeStatus(job.status), phase: job.phase, lastAttemptStatus: job.latestAttempt,
   attemptCount: job.attempts, startedAt: job.startedAt, endedAt: job.endedAt,
   nextAttemptAt: job.nextAttemptAt, elapsedMs: job.elapsedMillis,
 })
@@ -126,6 +126,7 @@ export const api = {
       mode: body.mode, cli: body.cli, providerId: body.providerId, prompt: o.prompt,
       expected: o.expectedText, timeoutSeconds: o.timeoutSeconds,
       retryIntervalSeconds: o.retryIntervalSeconds, keepaliveIntervalSeconds: o.keepaliveIntervalSeconds,
+      failureThreshold: body.mode === 'keepalive' ? o.failureThreshold : undefined,
       codexRequestRetries: o.requestMaxRetries, codexStreamRetries: o.streamMaxRetries,
       model: o.model || undefined, fallbackModel: o.fallbackModel || undefined, sessionName: o.sessionName || undefined,
     }

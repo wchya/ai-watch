@@ -57,16 +57,17 @@ type Manager struct {
 }
 
 type runtime struct {
-	job         domain.Job
-	opts        domain.JobOptions
-	cfg         domain.ResolvedConfig
-	lock        string
-	ctx         context.Context
-	cancel      context.CancelFunc
-	events      []domain.Event
-	nextEvent   uint64
-	subscribers map[chan domain.Event]struct{}
-	closed      bool
+	job                 domain.Job
+	opts                domain.JobOptions
+	cfg                 domain.ResolvedConfig
+	lock                string
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	events              []domain.Event
+	nextEvent           uint64
+	subscribers         map[chan domain.Event]struct{}
+	consecutiveFailures int
+	closed              bool
 }
 
 type eventWrite struct {
@@ -118,6 +119,9 @@ func (m *Manager) Start(opts domain.JobOptions) (domain.Job, error) {
 	if opts.RetryIntervalSeconds < minRetryIntervalSeconds || opts.KeepaliveIntervalSeconds < 1 {
 		return domain.Job{}, errors.New("invalid intervals")
 	}
+	if opts.FailureThreshold < 1 {
+		return domain.Job{}, errors.New("failureThreshold must be positive")
+	}
 	if opts.CodexRequestRetries < 0 || opts.CodexStreamRetries < 0 || opts.ClaudeMaxRetries < 0 {
 		return domain.Job{}, errors.New("retry counts must be non-negative")
 	}
@@ -133,7 +137,11 @@ func (m *Manager) Start(opts domain.JobOptions) (domain.Job, error) {
 	id := newID()
 	ctx, cancel := context.WithCancel(m.ctx)
 	now := time.Now().UTC()
-	job := domain.Job{ID: id, Mode: opts.Mode, CLI: opts.CLI, ProviderID: cfg.ProviderID, ProviderName: cfg.ProviderName, Provider: cfg.Provider, Target: sanitizeTarget(cfg.BaseURL), Model: first(opts.Model, cfg.Model), MaskedKey: security.Mask(cfg.APIKey), Status: domain.JobQueued, StartedAt: now}
+	phase := domain.JobPhaseProbe
+	if opts.Mode == domain.ModeKeepalive {
+		phase = domain.JobPhaseKeepalive
+	}
+	job := domain.Job{ID: id, Mode: opts.Mode, CLI: opts.CLI, ProviderID: cfg.ProviderID, ProviderName: cfg.ProviderName, Provider: cfg.Provider, Target: sanitizeTarget(cfg.BaseURL), Model: first(opts.Model, cfg.Model), MaskedKey: security.Mask(cfg.APIKey), Status: domain.JobQueued, Phase: phase, StartedAt: now}
 	rt := &runtime{job: job, opts: opts, cfg: cfg, lock: lock, ctx: ctx, cancel: cancel, subscribers: map[chan domain.Event]struct{}{}}
 	m.mu.Lock()
 	if m.closing {
@@ -204,7 +212,7 @@ func (m *Manager) run(rt *runtime) {
 			}
 		}
 		if rt.opts.Mode == domain.ModeKeepalive {
-			if !m.waitCountdown(rt, time.Duration(rt.opts.KeepaliveIntervalSeconds)*time.Second) {
+			if !m.continueKeepalive(rt, state) {
 				m.finish(rt, domain.JobStopped, domain.AttemptStopped, "任务已停止")
 				return
 			}
@@ -225,11 +233,51 @@ func (m *Manager) wait(rt *runtime, d time.Duration) bool {
 		return false
 	}
 }
-func (m *Manager) waitCountdown(rt *runtime, d time.Duration) bool {
+func (m *Manager) continueKeepalive(rt *runtime, state domain.AttemptStatus) bool {
+	if state == domain.AttemptSuccess {
+		var recovered bool
+		var notification domain.Job
+		m.mu.Lock()
+		recovered = rt.job.Phase == domain.JobPhaseRecoveryProbe
+		rt.consecutiveFailures = 0
+		if recovered {
+			rt.job.Phase = domain.JobPhaseKeepalive
+			m.publishLocked(rt, "recovery", "供应商已恢复可用", map[string]any{
+				"phase": domain.JobPhaseKeepalive,
+			})
+			notification = view(rt.job)
+		}
+		m.mu.Unlock()
+		if recovered {
+			m.notify(notification, domain.AttemptSuccess)
+		}
+		return m.waitCountdown(rt, time.Duration(rt.opts.KeepaliveIntervalSeconds)*time.Second, "等待下一次保活")
+	}
+
+	m.mu.Lock()
+	rt.consecutiveFailures++
+	failures := rt.consecutiveFailures
+	if rt.job.Phase != domain.JobPhaseRecoveryProbe && failures >= rt.opts.FailureThreshold {
+		rt.job.Phase = domain.JobPhaseRecoveryProbe
+		m.publishLocked(rt, "phase", "连续失败达到阈值，进入恢复探测", map[string]any{
+			"phase":               domain.JobPhaseRecoveryProbe,
+			"consecutiveFailures": failures,
+			"failureThreshold":    rt.opts.FailureThreshold,
+		})
+	}
+	recovering := rt.job.Phase == domain.JobPhaseRecoveryProbe
+	m.mu.Unlock()
+	if recovering {
+		return m.waitCountdown(rt, time.Duration(rt.opts.RetryIntervalSeconds)*time.Second, "等待下一次恢复探测")
+	}
+	return m.waitCountdown(rt, time.Duration(rt.opts.KeepaliveIntervalSeconds)*time.Second, "等待下一次保活")
+}
+
+func (m *Manager) waitCountdown(rt *runtime, d time.Duration, message string) bool {
 	next := time.Now().UTC().Add(d)
 	m.mu.Lock()
 	rt.job.NextAttemptAt = &next
-	m.publishLocked(rt, "countdown", "等待下一次保活", map[string]any{"nextAttemptAt": next})
+	m.publishLocked(rt, "countdown", message, map[string]any{"nextAttemptAt": next, "phase": rt.job.Phase})
 	m.mu.Unlock()
 	ok := m.wait(rt, d)
 	m.mu.Lock()
@@ -280,9 +328,16 @@ func (m *Manager) finish(rt *runtime, status domain.JobStatus, attempt domain.At
 	if err := m.store.SaveSummary(summary, limit); err != nil {
 		m.persistenceErr.Store(err.Error())
 	}
-	if mode == domain.ModeProbe && (status == domain.JobSuccess || status == domain.JobFatal) && m.notifier != nil && m.notifier.Configured() {
-		go func() { _ = m.notifier.Notify(context.Background(), summary, attempt) }()
+	if mode == domain.ModeProbe && (status == domain.JobSuccess || status == domain.JobFatal) {
+		m.notify(summary, attempt)
 	}
+}
+
+func (m *Manager) notify(job domain.Job, attempt domain.AttemptStatus) {
+	if m.notifier == nil || !m.notifier.Configured() {
+		return
+	}
+	go func() { _ = m.notifier.Notify(context.Background(), job, attempt) }()
 }
 
 func (m *Manager) update(rt *runtime, change func(*domain.Job), typ, msg string, data map[string]any) {
@@ -317,7 +372,7 @@ func (m *Manager) publishLocked(rt *runtime, typ, msg string, data map[string]an
 		level := "info"
 		if typ == "error" || rt.job.Status == domain.JobFatal || rt.job.Status == domain.JobFailed {
 			level = "error"
-		} else if rt.job.Status == domain.JobSuccess {
+		} else if typ == "recovery" || rt.job.Status == domain.JobSuccess {
 			level = "success"
 		}
 		settings := m.settings

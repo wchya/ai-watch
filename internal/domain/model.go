@@ -6,6 +6,7 @@ type Mode string
 type CLI string
 type JobStatus string
 type AttemptStatus string
+type JobPhase string
 
 const (
 	ModeProbe     Mode = "probe"
@@ -26,6 +27,10 @@ const (
 	AttemptFatal      AttemptStatus = "fatal"
 	AttemptUnmatched  AttemptStatus = "unmatched"
 	AttemptStopped    AttemptStatus = "stopped"
+
+	JobPhaseProbe         JobPhase = "probe"
+	JobPhaseKeepalive     JobPhase = "keepalive"
+	JobPhaseRecoveryProbe JobPhase = "recovery_probe"
 )
 
 type JobOptions struct {
@@ -37,6 +42,7 @@ type JobOptions struct {
 	TimeoutSeconds           int    `json:"timeoutSeconds,omitempty"`
 	RetryIntervalSeconds     int    `json:"retryIntervalSeconds,omitempty"`
 	KeepaliveIntervalSeconds int    `json:"keepaliveIntervalSeconds,omitempty"`
+	FailureThreshold         int    `json:"failureThreshold,omitempty"`
 	CodexRequestRetries      int    `json:"codexRequestRetries,omitempty"`
 	CodexStreamRetries       int    `json:"codexStreamRetries,omitempty"`
 	ClaudeMaxRetries         int    `json:"claudeMaxRetries,omitempty"`
@@ -57,6 +63,9 @@ func (o *JobOptions) Defaults() {
 	}
 	if o.KeepaliveIntervalSeconds == 0 {
 		o.KeepaliveIntervalSeconds = 120
+	}
+	if o.FailureThreshold == 0 {
+		o.FailureThreshold = 3
 	}
 	if o.SessionName == "" {
 		o.SessionName = "claude-watch"
@@ -126,6 +135,7 @@ type Job struct {
 	Model         string        `json:"model,omitempty"`
 	MaskedKey     string        `json:"maskedKey,omitempty"`
 	Status        JobStatus     `json:"status"`
+	Phase         JobPhase      `json:"phase"`
 	LatestAttempt AttemptStatus `json:"latestAttempt,omitempty"`
 	Attempts      int           `json:"attempts"`
 	StartedAt     time.Time     `json:"startedAt"`
