@@ -68,3 +68,7 @@ Tablet and mobile layouts reflow information instead of removing core fields. Se
 - Check dashboard, new-job flow, detail view, and settings at 375px, 768px, 1024px, and 1440px.
 - Verify keyboard navigation, focus trapping/restoration, Escape handling, live-region feedback, touch targets, and reduced motion.
 - Confirm no secret, raw historical log, or host-configuration mutation is introduced.
+
+## Browser Icon
+
+The approved browser icon uses an abstract `A/W` signal mark: a cyan pulse line rises into an `A`, falls through a monitoring node, and resolves into a `W` over the deep navy console surface. A small emerald status light communicates live availability. The mark is authored as SVG so it remains sharp from a 16px favicon through high-density browser surfaces.
