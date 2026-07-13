@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">AI Watch</title>
+  <desc id="desc">A cyan monitoring pulse forming an abstract A and W with a green live status light.</desc>
+  <defs>
+    <linearGradient id="surface" x1="8" y1="4" x2="56" y2="60" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#102739"/>
+      <stop offset="1" stop-color="#06111C"/>
+    </linearGradient>
+    <linearGradient id="signal" x1="12" y1="35" x2="52" y2="35" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#59E4D7"/>
+      <stop offset="1" stop-color="#24AFC5"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-60%" width="160%" height="220%">
+      <feGaussianBlur stdDeviation="2.4" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="16" fill="url(#surface)" stroke="#285066" stroke-width="2"/>
+  <path d="M11 40h6l8-20 8 27 6-16 5 9h9" fill="none" stroke="#153747" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" opacity=".8"/>
+  <path d="M11 40h6l8-20 8 27 6-16 5 9h9" fill="none" stroke="url(#signal)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+  <circle cx="33" cy="47" r="3.25" fill="#06111C" stroke="#69E3DB" stroke-width="2"/>
+  <circle cx="49.5" cy="14.5" r="5" fill="#0C2023" stroke="#39765C" stroke-width="1.5"/>
+  <circle cx="49.5" cy="14.5" r="2.5" fill="#5DD39E"/>
+</svg>

@@ -1,0 +1,395 @@
+package api
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net/http"
+	"os"
+	"path"
+	"strconv"
+	"strings"
+	"time"
+
+	"ai-watch/internal/configscan"
+	"ai-watch/internal/domain"
+	"ai-watch/internal/jobs"
+	"ai-watch/internal/store"
+)
+
+type Server struct {
+	scanner *configscan.Scanner
+	jobs    *jobs.Manager
+	webDir  string
+	client  *http.Client
+	store   *store.JSON
+}
+
+func New(scanner *configscan.Scanner, manager *jobs.Manager, webDir string, stores ...*store.JSON) *Server {
+	var eventStore *store.JSON
+	if len(stores) > 0 {
+		eventStore = stores[0]
+	}
+	return &Server{scanner: scanner, jobs: manager, webDir: webDir, client: &http.Client{Timeout: 10 * time.Second}, store: eventStore}
+}
+func (s *Server) Handler() http.Handler { return recoverMiddleware(http.HandlerFunc(s.route)) }
+
+func (s *Server) route(w http.ResponseWriter, r *http.Request) {
+	p := r.URL.Path
+	switch {
+	case p == "/api/health" && r.Method == http.MethodGet:
+		s.health(w)
+	case p == "/api/config/status" && r.Method == http.MethodGet:
+		writeJSON(w, 200, s.scanner.Status())
+	case p == "/api/providers" && r.Method == http.MethodGet:
+		s.providers(w, r)
+	case p == "/api/provider-examples" && r.Method == http.MethodGet:
+		s.providerExamples(w, r)
+	case p == "/api/provider-examples" && r.Method == http.MethodPost:
+		s.upsertProviderExample(w, r)
+	case p == "/api/provider-examples" && r.Method == http.MethodDelete:
+		s.deleteProviderExample(w, r)
+	case p == "/api/jobs" && r.Method == http.MethodGet:
+		writeJSON(w, 200, s.jobs.List())
+	case p == "/api/jobs" && r.Method == http.MethodPost:
+		s.start(w, r)
+	case strings.HasPrefix(p, "/api/jobs/"):
+		s.jobRoute(w, r)
+	case p == "/api/settings" && r.Method == http.MethodGet:
+		writeJSON(w, 200, s.jobs.Settings())
+	case p == "/api/settings" && r.Method == http.MethodPut:
+		s.settings(w, r)
+	case p == "/api/events" && r.Method == http.MethodGet:
+		s.operationalEvents(w, r)
+	case p == "/api/events" && r.Method == http.MethodDelete:
+		s.clearEvents(w)
+	case p == "/api/notifications/test" && r.Method == http.MethodPost:
+		s.notification(w, r)
+	case strings.HasPrefix(p, "/api/"):
+		writeError(w, 404, "not_found", "API endpoint not found")
+	default:
+		s.web(w, r)
+	}
+}
+
+func (s *Server) providerExamples(w http.ResponseWriter, _ *http.Request) {
+	if s.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "provider_examples_unavailable", "provider example store is unavailable")
+		return
+	}
+	examples, err := s.store.ListProviderExamples()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "provider_examples_read_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, examples)
+}
+
+func (s *Server) upsertProviderExample(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "provider_examples_unavailable", "provider example store is unavailable")
+		return
+	}
+	var example domain.ProviderExample
+	if !decode(w, r, &example) {
+		return
+	}
+	saved, err := s.store.UpsertProviderExample(example)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_provider_example", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, saved)
+}
+
+func (s *Server) deleteProviderExample(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "provider_examples_unavailable", "provider example store is unavailable")
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		var request struct {
+			ID string `json:"id"`
+		}
+		if !decode(w, r, &request) {
+			return
+		}
+		id = request.ID
+	}
+	deleted, err := s.store.DeleteProviderExample(id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_provider_example", err.Error())
+		return
+	}
+	if !deleted {
+		writeError(w, http.StatusNotFound, "provider_example_not_found", "provider example not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "id": id})
+}
+
+func (s *Server) operationalEvents(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "events_unavailable", "event store is unavailable")
+		return
+	}
+	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil || limit <= 0 {
+		limit = 100
+	}
+	filter := store.EventFilter{ProviderID: r.URL.Query().Get("providerId"), JobID: r.URL.Query().Get("jobId"), Type: r.URL.Query().Get("type"), Level: r.URL.Query().Get("level"), Limit: limit}
+	events, err := s.store.ListEvents(filter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "events_read_failed", err.Error())
+		return
+	}
+	total, err := s.store.CountEvents(filter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "events_count_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": events, "total": total})
+}
+
+func (s *Server) clearEvents(w http.ResponseWriter) {
+	if s.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "events_unavailable", "event store is unavailable")
+		return
+	}
+	if s.jobs != nil {
+		if err := s.jobs.FlushEvents(); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "events_flush_failed", err.Error())
+			return
+		}
+	}
+	deleted, err := s.store.ClearEvents()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "events_clear_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int64{"deleted": deleted})
+}
+
+func (s *Server) health(w http.ResponseWriter) {
+	if s.jobs != nil {
+		if message := s.jobs.PersistenceError(); message != "" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "degraded", "time": time.Now().UTC(), "version": "dev", "persistenceError": message})
+			return
+		}
+	}
+	writeJSON(w, 200, map[string]any{"status": "ok", "time": time.Now().UTC(), "version": "dev"})
+}
+func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
+	cli := domain.CLI(r.URL.Query().Get("cli"))
+	v, e := s.scanner.Providers(cli)
+	if e != nil {
+		writeError(w, 400, "provider_discovery", e.Error())
+		return
+	}
+	writeJSON(w, 200, v)
+}
+func (s *Server) start(w http.ResponseWriter, r *http.Request) {
+	var v domain.JobOptions
+	if !decode(w, r, &v) {
+		return
+	}
+	job, e := s.jobs.Start(v)
+	if e != nil {
+		code := 400
+		kind := "invalid_job"
+		if errors.Is(e, jobs.ErrLockConflict) {
+			code = 409
+			kind = "lock_conflict"
+		}
+		writeError(w, code, kind, e.Error())
+		return
+	}
+	writeJSON(w, 201, job)
+}
+func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request) {
+	tail := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
+	parts := strings.Split(strings.Trim(tail, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeError(w, 404, "not_found", "job not found")
+		return
+	}
+	id := parts[0]
+	if len(parts) == 1 && r.Method == http.MethodGet {
+		v, e := s.jobs.Get(id)
+		if e != nil {
+			writeError(w, 404, "not_found", e.Error())
+			return
+		}
+		writeJSON(w, 200, v)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "stop" && r.Method == http.MethodPost {
+		if e := s.jobs.Stop(id); e != nil {
+			writeError(w, 404, "not_found", e.Error())
+			return
+		}
+		writeJSON(w, 202, map[string]bool{"accepted": true})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "events" && r.Method == http.MethodGet {
+		s.events(w, r, id)
+		return
+	}
+	writeError(w, 404, "not_found", "job endpoint not found")
+}
+
+func (s *Server) events(w http.ResponseWriter, r *http.Request, id string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, 500, "streaming_unavailable", "streaming unavailable")
+		return
+	}
+	after := uint64(0)
+	raw := r.Header.Get("Last-Event-ID")
+	if raw == "" {
+		raw = r.URL.Query().Get("after")
+	}
+	if n, e := strconv.ParseUint(raw, 10, 64); e == nil {
+		after = n
+	}
+	replay, ch, cleanup, e := s.jobs.Subscribe(id, after)
+	if e != nil {
+		writeError(w, 404, "not_found", e.Error())
+		return
+	}
+	defer cleanup()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	send := func(event domain.Event) bool {
+		b, _ := json.Marshal(event)
+		// Emit both a typed event and a default message. This keeps EventSource
+		// clients using addEventListener(type) and onmessage clients compatible.
+		if _, e := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\nid: %d\ndata: %s\n\n", event.ID, event.Type, b, event.ID, b); e != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	for _, e := range replay {
+		if !send(e) {
+			return
+		}
+	}
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case e, ok := <-ch:
+			if !ok {
+				return
+			}
+			if !send(e) {
+				return
+			}
+		case <-ticker.C:
+			if _, e := fmt.Fprint(w, ": keepalive\n\n"); e != nil {
+				return
+			}
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
+	var v domain.Settings
+	if !decode(w, r, &v) {
+		return
+	}
+	if e := s.jobs.SetSettings(v); e != nil {
+		writeError(w, 400, "invalid_settings", e.Error())
+		return
+	}
+	writeJSON(w, 200, s.jobs.Settings())
+}
+func (s *Server) notification(w http.ResponseWriter, r *http.Request) {
+	url := os.Getenv("DINGTALK_WEBHOOK_URL")
+	if url == "" {
+		writeError(w, 503, "not_configured", "DingTalk webhook is not configured")
+		return
+	}
+	payload, _ := json.Marshal(map[string]any{"msgtype": "text", "text": map[string]string{"content": "AI Watch 通知测试成功"}})
+	req, e := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(payload))
+	if e != nil {
+		writeError(w, 500, "notification_failed", e.Error())
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, e := s.client.Do(req)
+	if e != nil {
+		writeError(w, 502, "notification_failed", e.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		writeError(w, 502, "notification_failed", resp.Status)
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"sent": true})
+}
+
+func (s *Server) web(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	if s.webDir == "" {
+		http.Error(w, "AI Watch backend is running", http.StatusNotFound)
+		return
+	}
+	root := os.DirFS(s.webDir)
+	name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+	if name == "." || name == "" {
+		name = "index.html"
+	}
+	if st, e := fs.Stat(root, name); e == nil && !st.IsDir() {
+		http.ServeFileFS(w, r, root, name)
+		return
+	}
+	if _, e := fs.Stat(root, "index.html"); e == nil {
+		http.ServeFileFS(w, r, root, "index.html")
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	d := json.NewDecoder(r.Body)
+	d.DisallowUnknownFields()
+	if e := d.Decode(v); e != nil {
+		writeError(w, 400, "invalid_json", e.Error())
+		return false
+	}
+	return true
+}
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
+}
+func recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recover() != nil {
+				writeError(w, 500, "internal_error", "internal server error")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}

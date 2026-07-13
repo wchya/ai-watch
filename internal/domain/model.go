@@ -1,0 +1,160 @@
+package domain
+
+import "time"
+
+type Mode string
+type CLI string
+type JobStatus string
+type AttemptStatus string
+
+const (
+	ModeProbe     Mode = "probe"
+	ModeKeepalive Mode = "keepalive"
+	CLICodex      CLI  = "codex"
+	CLIClaude     CLI  = "claude"
+
+	JobQueued  JobStatus = "queued"
+	JobRunning JobStatus = "running"
+	JobSuccess JobStatus = "success"
+	JobFatal   JobStatus = "fatal"
+	JobStopped JobStatus = "stopped"
+	JobFailed  JobStatus = "failed"
+
+	AttemptSuccess    AttemptStatus = "success"
+	AttemptTimeout    AttemptStatus = "timeout"
+	AttemptOverloaded AttemptStatus = "overloaded"
+	AttemptFatal      AttemptStatus = "fatal"
+	AttemptUnmatched  AttemptStatus = "unmatched"
+	AttemptStopped    AttemptStatus = "stopped"
+)
+
+type JobOptions struct {
+	Mode                     Mode   `json:"mode"`
+	CLI                      CLI    `json:"cli"`
+	ProviderID               string `json:"providerId,omitempty"`
+	Prompt                   string `json:"prompt,omitempty"`
+	Expected                 string `json:"expected,omitempty"`
+	TimeoutSeconds           int    `json:"timeoutSeconds,omitempty"`
+	RetryIntervalSeconds     int    `json:"retryIntervalSeconds,omitempty"`
+	KeepaliveIntervalSeconds int    `json:"keepaliveIntervalSeconds,omitempty"`
+	CodexRequestRetries      int    `json:"codexRequestRetries,omitempty"`
+	CodexStreamRetries       int    `json:"codexStreamRetries,omitempty"`
+	ClaudeMaxRetries         int    `json:"claudeMaxRetries,omitempty"`
+	Model                    string `json:"model,omitempty"`
+	FallbackModel            string `json:"fallbackModel,omitempty"`
+	SessionName              string `json:"sessionName,omitempty"`
+}
+
+func (o *JobOptions) Defaults() {
+	if o.Prompt == "" {
+		o.Prompt = "hi，只回复 READY"
+	}
+	if o.Expected == "" {
+		o.Expected = "READY"
+	}
+	if o.TimeoutSeconds == 0 {
+		o.TimeoutSeconds = 15
+	}
+	if o.KeepaliveIntervalSeconds == 0 {
+		o.KeepaliveIntervalSeconds = 120
+	}
+	if o.SessionName == "" {
+		o.SessionName = "claude-watch"
+	}
+}
+
+type ResolvedConfig struct {
+	Source       string            `json:"source"`
+	ProviderID   string            `json:"providerId,omitempty"`
+	ProviderName string            `json:"providerName,omitempty"`
+	Provider     string            `json:"provider"`
+	Model        string            `json:"model,omitempty"`
+	BaseURL      string            `json:"baseUrl"`
+	APIKey       string            `json:"-"`
+	AuthJSON     []byte            `json:"-"`
+	LockIdentity string            `json:"-"`
+	APIKeySource string            `json:"apiKeySource,omitempty"`
+	CodexConfig  string            `json:"-"`
+	ClaudeEnv    map[string]string `json:"-"`
+	ConfigDir    string            `json:"-"`
+}
+
+type Provider struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	CLI       CLI    `json:"cli"`
+	Current   bool   `json:"current"`
+	Model     string `json:"model,omitempty"`
+	BaseURL   string `json:"baseUrl,omitempty"`
+	MaskedKey string `json:"maskedKey,omitempty"`
+}
+
+// ProviderExample is a non-sensitive connection template. Credentials are
+// intentionally absent: examples describe only how a CLI provider is shaped,
+// while authentication must be supplied by mounted config or environment.
+type ProviderExample struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	CLI         CLI       `json:"cli"`
+	BaseURL     string    `json:"baseUrl"`
+	Model       string    `json:"model,omitempty"`
+	Provider    string    `json:"provider,omitempty"`
+	Description string    `json:"description,omitempty"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+type ConfigStatus struct {
+	CodexCLI     bool   `json:"codexCli"`
+	ClaudeCLI    bool   `json:"claudeCli"`
+	SQLiteCLI    bool   `json:"sqliteCli"`
+	CodexConfig  bool   `json:"codexConfig"`
+	ClaudeConfig bool   `json:"claudeConfig"`
+	CCSwitchDB   bool   `json:"ccSwitchDb"`
+	CodexPath    string `json:"codexPath,omitempty"`
+	ClaudePath   string `json:"claudePath,omitempty"`
+	CCSwitchPath string `json:"ccSwitchPath,omitempty"`
+}
+
+type Job struct {
+	ID            string        `json:"id"`
+	Mode          Mode          `json:"mode"`
+	CLI           CLI           `json:"cli"`
+	ProviderID    string        `json:"providerId,omitempty"`
+	ProviderName  string        `json:"providerName,omitempty"`
+	Provider      string        `json:"provider,omitempty"`
+	Target        string        `json:"target"`
+	Model         string        `json:"model,omitempty"`
+	MaskedKey     string        `json:"maskedKey,omitempty"`
+	Status        JobStatus     `json:"status"`
+	LatestAttempt AttemptStatus `json:"latestAttempt,omitempty"`
+	Attempts      int           `json:"attempts"`
+	StartedAt     time.Time     `json:"startedAt"`
+	EndedAt       *time.Time    `json:"endedAt,omitempty"`
+	NextAttemptAt *time.Time    `json:"nextAttemptAt,omitempty"`
+	ElapsedMillis int64         `json:"elapsedMillis"`
+}
+
+type Summary = Job
+
+type Event struct {
+	ID      uint64         `json:"id"`
+	Type    string         `json:"type"`
+	At      time.Time      `json:"at"`
+	Message string         `json:"message,omitempty"`
+	Data    map[string]any `json:"data,omitempty"`
+}
+
+type Settings struct {
+	TimeoutSeconds           int   `json:"timeoutSeconds"`
+	RetryIntervalSeconds     int   `json:"retryIntervalSeconds"`
+	KeepaliveIntervalSeconds int   `json:"keepaliveIntervalSeconds"`
+	HistoryLimit             int   `json:"historyLimit"`
+	EventRetentionDays       int   `json:"eventRetentionDays"`
+	EventRetentionRows       int   `json:"eventRetentionRows"`
+	EventRetentionBytes      int64 `json:"eventRetentionBytes"`
+	DingTalkConfigured       bool  `json:"dingTalkConfigured"`
+}
+
+func DefaultSettings() Settings {
+	return Settings{TimeoutSeconds: 15, RetryIntervalSeconds: 2, KeepaliveIntervalSeconds: 120, HistoryLimit: 100, EventRetentionDays: 30, EventRetentionRows: 5000, EventRetentionBytes: 8 << 20}
+}

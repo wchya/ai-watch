@@ -1,0 +1,84 @@
+name: ai-watch
+
+services:
+  ai-watch:
+    build:
+      context: .
+      args:
+        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE:-public.ecr.aws/docker/library/node:22-bookworm-slim}
+        GO_BASE_IMAGE: ${GO_BASE_IMAGE:-public.ecr.aws/docker/library/golang:1.24-bookworm}
+        CODEX_CLI_VERSION: ${CODEX_CLI_VERSION:-latest}
+        CLAUDE_CLI_VERSION: ${CLAUDE_CLI_VERSION:-latest}
+        DEBIAN_MIRROR: ${DEBIAN_MIRROR:-http://mirrors.aliyun.com}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
+    image: ai-watch:local
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    pids_limit: 256
+    mem_limit: 2g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "127.0.0.1:${AI_WATCH_PORT:-8787}:8787"
+    environment:
+      AI_WATCH_ADDR: 0.0.0.0:8787
+      AI_WATCH_DATA_DIR: /data
+      AI_WATCH_RUNTIME_DIR: /run/ai-watch
+      AI_WATCH_WEB_DIR: /app/web
+      DINGTALK_WEBHOOK_URL: ${DINGTALK_WEBHOOK_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CODEX_API_KEY: ${CODEX_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      CODEX_BASE_URL: ${CODEX_BASE_URL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      CLAUDE_API_KEY: ${CLAUDE_API_KEY:-}
+      CLAUDE_BASE_URL: ${CLAUDE_BASE_URL:-}
+      CLAUDE_CODE_USE_BEDROCK: ${CLAUDE_CODE_USE_BEDROCK:-}
+      CLAUDE_CODE_USE_VERTEX: ${CLAUDE_CODE_USE_VERTEX:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_PROFILE: ${AWS_PROFILE:-}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+      CLOUD_ML_REGION: ${CLOUD_ML_REGION:-}
+      ANTHROPIC_VERTEX_PROJECT_ID: ${ANTHROPIC_VERTEX_PROJECT_ID:-}
+    volumes:
+      - ai-watch-data:/data
+      - type: bind
+        source: ${CODEX_CONFIG_DIR:-${HOME}/.codex}
+        target: /home/aiwatch/.codex
+        read_only: true
+      - type: bind
+        source: ${CLAUDE_CONFIG_DIR:-${HOME}/.claude}
+        target: /home/aiwatch/.claude
+        read_only: true
+      - type: bind
+        source: ${CC_SWITCH_CONFIG_DIR:-${HOME}/.cc-switch}
+        target: /home/aiwatch/.cc-switch
+        read_only: true
+    tmpfs:
+      - /run/ai-watch:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0,size=64m
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:unconfined
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8787/api/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 5
+
+volumes:
+  ai-watch-data:
