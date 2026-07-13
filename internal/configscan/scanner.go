@@ -2,6 +2,7 @@ package configscan
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"ai-watch/internal/domain"
 	"ai-watch/internal/security"
@@ -75,8 +77,7 @@ func (s *Scanner) Providers(cli domain.CLI) ([]domain.Provider, error) {
 		return providers, nil
 	}
 	q := fmt.Sprintf(`SELECT id, name, is_current, settings_config FROM providers WHERE app_type='%s' ORDER BY COALESCE(sort_index,999999), created_at, id;`, sqlQuote(string(cli)))
-	cmd := exec.Command(s.SQLiteBin, "-readonly", "-json", s.CCSwitchDB, q)
-	out, err := cmd.Output()
+	out, err := s.queryCCSwitch(q)
 	if err != nil {
 		return nil, fmt.Errorf("query cc switch: %w", err)
 	}
@@ -136,9 +137,9 @@ func (s *Scanner) Resolve(cli domain.CLI, providerID string) (domain.ResolvedCon
 
 func (s *Scanner) ccProvider(cli domain.CLI, id string) (domain.ResolvedConfig, error) {
 	q := fmt.Sprintf(`SELECT name, settings_config FROM providers WHERE app_type='%s' AND id='%s' LIMIT 1;`, sqlQuote(string(cli)), sqlQuote(id))
-	out, err := exec.Command(s.SQLiteBin, "-readonly", "-json", s.CCSwitchDB, q).Output()
+	out, err := s.queryCCSwitch(q)
 	if err != nil {
-		return domain.ResolvedConfig{}, err
+		return domain.ResolvedConfig{}, fmt.Errorf("query cc switch provider: %w", err)
 	}
 	var rows []struct {
 		Name     string `json:"name"`
@@ -183,6 +184,48 @@ func (s *Scanner) ccProvider(cli domain.CLI, id string) (domain.ResolvedConfig, 
 		}
 	}
 	return r, nil
+}
+
+func (s *Scanner) queryCCSwitch(query string) ([]byte, error) {
+	const attempts = 3
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cmd := exec.CommandContext(ctx, s.SQLiteBin, "-readonly", "-cmd", ".timeout 2000", "-json", s.CCSwitchDB, query)
+		out, err := cmd.Output()
+		cancel()
+		if err == nil {
+			return out, nil
+		}
+		if ctx.Err() != nil {
+			lastErr = errors.New("SQLite query timed out")
+		} else {
+			lastErr = sqliteQueryError(err, s.CCSwitchDB)
+		}
+		if attempt+1 < attempts {
+			time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+		}
+	}
+	return nil, lastErr
+}
+
+func sqliteQueryError(err error, databasePath string) error {
+	message := err.Error()
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+			message = stderr
+		}
+	}
+	message = strings.ReplaceAll(message, databasePath, "cc-switch.db")
+	message = strings.Join(strings.Fields(security.Redact(message)), " ")
+	if len(message) > 240 {
+		message = message[:240]
+	}
+	if message == "" {
+		message = "SQLite query failed"
+	}
+	return errors.New(message)
 }
 
 type codexTOML struct{ Provider, Model, BaseURL, APIKey, APIKeyEnv string }

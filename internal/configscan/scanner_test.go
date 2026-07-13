@@ -30,3 +30,18 @@ func TestCurrentCodexPreservesOAuthAuth(t *testing.T) {
 		t.Fatalf("OAuth auth was not safely preserved: %+v", cfg)
 	}
 }
+
+func TestCCSwitchQueryRetriesTransientSQLiteFailure(t *testing.T) {
+	dir := t.TempDir()
+	count := filepath.Join(dir, "count")
+	bin := filepath.Join(dir, "sqlite3-test")
+	script := "#!/bin/sh\ncount=0\n[ -f '" + count + "' ] && count=$(cat '" + count + "')\ncount=$((count+1))\nprintf '%s' \"$count\" > '" + count + "'\nif [ \"$count\" -lt 3 ]; then echo 'database is locked' >&2; exit 11; fi\nprintf '[]'\n"
+	if err := os.WriteFile(bin, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	s := &Scanner{SQLiteBin: bin, CCSwitchDB: filepath.Join(dir, "cc-switch.db")}
+	out, err := s.queryCCSwitch("SELECT 1")
+	if err != nil || string(out) != "[]" {
+		t.Fatalf("query did not recover: output=%q err=%v", out, err)
+	}
+}
