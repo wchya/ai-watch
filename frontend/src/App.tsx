@@ -7,13 +7,14 @@ import {
   TimerReset, Trash2, Wifi, WifiOff, X, Zap,
 } from 'lucide-react'
 import { api, normalizeEvent } from './api'
+import { DiagnosticsView } from './DiagnosticsView'
 import { SchedulesView } from './SchedulesView'
 import type {
   AppSettings, Cli, DashboardData, JobEvent, JobMode, JobOptions, JobStatus,
   JobSummary, OperationalEvent, Provider, ProviderExample, ProviderExampleWriteRequest, StartJobRequest,
 } from './types'
 
-type View = 'dashboard' | 'schedules' | 'events' | 'settings'
+type View = 'dashboard' | 'schedules' | 'events' | 'diagnostics' | 'settings'
 
 const DEFAULT_OPTIONS: JobOptions = {
   runOnce: true,
@@ -57,10 +58,8 @@ const formatDuration = (ms?: number) => {
   return `${Math.floor(ms / 60_000)}m ${Math.floor(ms % 60_000 / 1000)}s`
 }
 const eventTypeLabels: Record<string, string> = {
-  job_started: '任务启动', job_completed: '任务完成', job_failed: '任务失败',
-  job_stopped: '任务停止', attempt_started: '开始尝试', attempt_finished: '尝试结束',
-  provider_discovered: '发现供应商', settings_updated: '设置更新',
-  notification_sent: '通知发送', cleanup: '运行时清理',
+  job_state: '任务状态', attempt_start: '开始尝试', classification: '探测判定',
+  phase: '阶段切换', recovery: '恢复可用', countdown: '等待重试', cleanup: '运行时清理',
 }
 const eventTypeLabel = (type: string) => eventTypeLabels[type] || type.replaceAll('_', ' ')
 const eventLevelLabel = (level?: string) => {
@@ -113,7 +112,7 @@ export function App() {
 
   const openJob = (job: JobSummary) => { setDetailJob(job); setMobileNav(false) }
   const onStarted = (job: JobSummary, notifyOnComplete: boolean) => { setDrawerOpen(false); setDetailJob(job); if (notifyOnComplete) setNotificationJobs(current => new Set(current).add(job.id)); void load(true) }
-  const viewLabel = view === 'dashboard' ? '总览' : view === 'schedules' ? '计划任务' : view === 'events' ? '事件' : '设置与通知'
+  const viewLabel = view === 'dashboard' ? '总览' : view === 'schedules' ? '计划任务' : view === 'events' ? '事件' : view === 'diagnostics' ? '系统诊断' : '设置与通知'
 
   return <div className="app-shell">
     <div className="ambient ambient-a"/><div className="ambient ambient-b"/>
@@ -123,6 +122,7 @@ export function App() {
         <button className={view === 'dashboard' ? 'active' : ''} aria-current={view === 'dashboard' ? 'page' : undefined} onClick={() => { setView('dashboard'); setMobileNav(false) }}><Gauge/><span>总览</span></button>
         <button className={view === 'schedules' ? 'active' : ''} aria-current={view === 'schedules' ? 'page' : undefined} onClick={() => { setView('schedules'); setMobileNav(false) }}><CalendarClock/><span>计划任务</span></button>
         <button className={view === 'events' ? 'active' : ''} aria-current={view === 'events' ? 'page' : undefined} onClick={() => { setView('events'); setMobileNav(false) }}><History/><span>事件记录</span></button>
+        <button className={view === 'diagnostics' ? 'active' : ''} aria-current={view === 'diagnostics' ? 'page' : undefined} onClick={() => { setView('diagnostics'); setMobileNav(false) }}><Server/><span>系统诊断</span></button>
         <button className={view === 'settings' ? 'active' : ''} aria-current={view === 'settings' ? 'page' : undefined} onClick={() => { setView('settings'); setMobileNav(false) }}><Settings/><span>设置与通知</span></button>
       </nav>
       <div className="sidebar-spacer"/>
@@ -136,10 +136,10 @@ export function App() {
       <header className="topbar">
         <button className="icon-button menu-button" onClick={() => setMobileNav(true)} aria-label="打开菜单"><Menu/></button>
         <div className="crumb"><span>AI Watch</span><ChevronRight/><strong>{viewLabel}</strong></div>
-        <div className="top-actions">{view !== 'schedules' && <button className="icon-button" onClick={() => view === 'events' ? setEventsRefreshToken(current => current + 1) : void load()} aria-label={view === 'events' ? '刷新事件' : '刷新'}><RefreshCw className={view !== 'events' && loading ? 'spinning' : ''}/></button>}<button className="primary compact" onClick={() => { setPresetProvider(null); setPresetExample(null); setDrawerOpen(true) }}><Plus/>新建任务</button></div>
+        <div className="top-actions">{view !== 'schedules' && view !== 'diagnostics' && <button className="icon-button" onClick={() => view === 'events' ? setEventsRefreshToken(current => current + 1) : void load()} aria-label={view === 'events' ? '刷新事件' : '刷新'}><RefreshCw className={view !== 'events' && loading ? 'spinning' : ''}/></button>}{view !== 'diagnostics' && <button className="primary compact" onClick={() => { setPresetProvider(null); setPresetExample(null); setDrawerOpen(true) }}><Plus/>新建任务</button>}</div>
       </header>
 
-      {view === 'dashboard' ? <Dashboard data={data} loading={loading} error={error} retry={() => void load()} openNew={() => { setPresetProvider(null); setPresetExample(null); setDrawerOpen(true) }} probeProvider={(provider) => { setPresetExample(null); setPresetProvider(provider); setDrawerOpen(true) }} referenceExample={(example) => { setPresetProvider(null); setPresetExample(example); setDrawerOpen(true) }} openJob={openJob}/> : view === 'schedules' ? <SchedulesView providers={data?.providers ?? []} defaultOptions={jobDefaults}/> : view === 'events' ? <EventsView providers={data?.providers ?? []} refreshToken={eventsRefreshToken}/> : <SettingsView/>}
+      {view === 'dashboard' ? <Dashboard data={data} loading={loading} error={error} retry={() => void load()} openNew={() => { setPresetProvider(null); setPresetExample(null); setDrawerOpen(true) }} probeProvider={(provider) => { setPresetExample(null); setPresetProvider(provider); setDrawerOpen(true) }} referenceExample={(example) => { setPresetProvider(null); setPresetExample(example); setDrawerOpen(true) }} openJob={openJob}/> : view === 'schedules' ? <SchedulesView providers={data?.providers ?? []} defaultOptions={jobDefaults}/> : view === 'events' ? <EventsView providers={data?.providers ?? []} refreshToken={eventsRefreshToken}/> : view === 'diagnostics' ? <DiagnosticsView/> : <SettingsView/>}
     </main>
     {mobileNav && <div className="nav-scrim" onClick={() => setMobileNav(false)}/>} 
     {drawerOpen && <NewJobDrawer providers={data?.providers ?? []} initialProvider={presetProvider} initialExample={presetExample} defaultOptions={jobDefaults} close={() => { setDrawerOpen(false); setPresetProvider(null); setPresetExample(null) }} onStarted={onStarted}/>} 
@@ -186,8 +186,13 @@ function EventsView({ providers, refreshToken }: { providers: Provider[]; refres
   const [events, setEvents] = useState<OperationalEvent[]>([])
   const [total, setTotal] = useState(0)
   const [type, setType] = useState('')
+  const [level, setLevel] = useState('')
   const [providerId, setProviderId] = useState('')
+  const [jobId, setJobId] = useState('')
+  const [since, setSince] = useState('')
+  const [until, setUntil] = useState('')
   const [limit, setLimit] = useState(100)
+  const [offset, setOffset] = useState(0)
   const [loading, setLoading] = useState(true)
   const [clearing, setClearing] = useState(false)
   const [error, setError] = useState('')
@@ -202,8 +207,17 @@ function EventsView({ providers, refreshToken }: { providers: Provider[]; refres
     setLoading(true)
     setError('')
     try {
-      const result = await api.events({ limit, type: type || undefined, providerId: providerId || undefined })
+      const result = await api.events({
+        limit, offset, type: type || undefined, level: level || undefined,
+        providerId: providerId || undefined, jobId: jobId.trim() || undefined,
+        since: since ? new Date(since).toISOString() : undefined,
+        until: until ? new Date(until).toISOString() : undefined,
+      })
       if (sequence !== requestSequence.current) return
+      if (result.total > 0 && offset >= result.total) {
+        setOffset(Math.floor((result.total - 1) / limit) * limit)
+        return
+      }
       setEvents(result.events)
       setTotal(result.total)
     } catch (e) {
@@ -212,7 +226,7 @@ function EventsView({ providers, refreshToken }: { providers: Provider[]; refres
     } finally {
       if (sequence === requestSequence.current) setLoading(false)
     }
-  }, [limit, providerId, type])
+  }, [jobId, level, limit, offset, providerId, since, type, until])
 
   useEffect(() => { void loadEvents() }, [loadEvents, refreshToken])
   useEffect(() => {
@@ -256,6 +270,13 @@ function EventsView({ providers, refreshToken }: { providers: Provider[]; refres
   const typeOptions = useMemo(() => Array.from(new Set([...Object.keys(eventTypeLabels), ...events.map(event => event.type)])).sort(), [events])
   const errorCount = events.filter(event => event.level === 'error' || event.level === 'fatal').length
   const newest = events[0]?.at
+  const page = Math.floor(offset / limit) + 1
+  const pageCount = Math.max(1, Math.ceil(total / limit))
+  const rangeStart = total === 0 ? 0 : offset + 1
+  const rangeEnd = Math.min(offset + events.length, total)
+  const resetFilters = () => {
+    setType(''); setLevel(''); setProviderId(''); setJobId(''); setSince(''); setUntil(''); setLimit(100); setOffset(0)
+  }
 
   return <div className="page events-page">
     <section className="page-heading events-heading"><div><span className="eyebrow"><History/>运行审计</span><h1>结构化事件记录</h1><p>查看任务、供应商与运行时生命周期信号。事件受保留策略约束，不包含原始 CLI 输出、Prompt 或凭证。</p></div><button ref={clearButtonRef} className="danger-button events-clear" disabled={loading || clearing || total === 0} onClick={() => setConfirmOpen(true)}><Trash2/>清空事件</button></section>
@@ -268,11 +289,15 @@ function EventsView({ providers, refreshToken }: { providers: Provider[]; refres
     </section>
 
     <section className="panel event-filter-panel" aria-label="事件过滤器">
-      <div className="event-filter-title"><div><Filter/><span><strong>过滤事件</strong><small>筛选由服务端执行</small></span></div><button className="secondary" disabled={loading} onClick={() => { setType(''); setProviderId(''); setLimit(100) }}><RotateCcw/>重置</button></div>
+      <div className="event-filter-title"><div><Filter/><span><strong>过滤事件</strong><small>筛选由服务端执行，时间按当前设备时区输入</small></span></div><button className="secondary" disabled={loading} onClick={resetFilters}><RotateCcw/>重置</button></div>
       <div className="event-filters">
-        <label><span>事件类型</span><select value={type} onChange={event => setType(event.target.value)}><option value="">全部类型</option>{typeOptions.map(option => <option key={option} value={option}>{eventTypeLabel(option)}</option>)}</select></label>
-        <label><span>供应商</span><select value={providerId} onChange={event => setProviderId(event.target.value)}><option value="">全部供应商</option>{providers.filter(provider => provider.id).map(provider => <option key={`${provider.cli}-${provider.id}`} value={provider.id}>{cliLabel(provider.cli)} · {provider.name}</option>)}</select></label>
-        <label><span>显示数量</span><select value={limit} onChange={event => setLimit(Number(event.target.value))}>{[50, 100, 200, 500].map(value => <option key={value} value={value}>{value} 条</option>)}</select></label>
+        <label><span>事件类型</span><select value={type} onChange={event => { setType(event.target.value); setOffset(0) }}><option value="">全部类型</option>{typeOptions.map(option => <option key={option} value={option}>{eventTypeLabel(option)}</option>)}</select></label>
+        <label><span>级别</span><select value={level} onChange={event => { setLevel(event.target.value); setOffset(0) }}><option value="">全部级别</option><option value="info">信息</option><option value="success">成功</option><option value="warning">警告</option><option value="error">错误</option><option value="fatal">严重错误</option></select></label>
+        <label><span>供应商</span><select value={providerId} onChange={event => { setProviderId(event.target.value); setOffset(0) }}><option value="">全部供应商</option>{providers.filter(provider => provider.id).map(provider => <option key={`${provider.cli}-${provider.id}`} value={provider.id}>{cliLabel(provider.cli)} · {provider.name}</option>)}</select></label>
+        <label><span>任务 ID</span><input value={jobId} onChange={event => { setJobId(event.target.value); setOffset(0) }} placeholder="完整任务 ID" spellCheck={false}/></label>
+        <label><span>开始时间</span><input type="datetime-local" step="1" value={since} max={until || undefined} onChange={event => { setSince(event.target.value); setOffset(0) }}/></label>
+        <label><span>结束时间</span><input type="datetime-local" step="1" value={until} min={since || undefined} onChange={event => { setUntil(event.target.value); setOffset(0) }}/></label>
+        <label><span>每页数量</span><select value={limit} onChange={event => { setLimit(Number(event.target.value)); setOffset(0) }}>{[50, 100, 200, 500].map(value => <option key={value} value={value}>{value} 条</option>)}</select></label>
       </div>
     </section>
 
@@ -283,8 +308,9 @@ function EventsView({ providers, refreshToken }: { providers: Provider[]; refres
       <div className="panel-title"><div><h2>事件信号流</h2><p>只展示可持久化的结构化摘要</p></div><span className="event-retention"><ShieldCheck/>有界保留</span></div>
       {loading ? <div className="event-loading"><LoaderCircle className="spinning"/><span>正在读取事件记录</span></div> : events.length ? <ol className="event-list">{events.map(event => {
         const level = event.level || 'info'
-        return <li key={event.id} className={`event-item level-${level}`}><div className="event-rail"><i/></div><div className="event-content"><header><span className={`event-level level-${level}`}>{eventLevelLabel(level)}</span><strong>{eventTypeLabel(event.type)}</strong><time dateTime={event.at}>{new Date(event.at).toLocaleString('zh-CN', { hour12: false })}</time></header><p>{event.message || '记录了一次结构化运行事件。'}</p><footer>{event.providerId && <span><Database/>{providerNames.get(event.providerId) || event.providerId}</span>}{event.jobId && <span><Activity/>任务 {event.jobId.slice(0, 12)}</span>}<code>#{event.id}</code></footer></div></li>
+        return <li key={event.id} className={`event-item level-${level}`}><div className="event-rail"><i/></div><div className="event-content"><header><span className={`event-level level-${level}`}>{eventLevelLabel(level)}</span><strong>{eventTypeLabel(event.type)}</strong><time dateTime={event.at}>{new Date(event.at).toLocaleString('zh-CN', { hour12: false })}</time></header><p>{event.message || '记录了一次结构化运行事件。'}</p><footer>{event.providerId && <span><Database/>{providerNames.get(event.providerId) || event.providerId}</span>}{event.jobId && <span title={event.jobId}><Activity/>任务 {event.jobId}</span>}<code>#{event.id}</code></footer></div></li>
       })}</ol> : <EmptyState icon={<History/>} title="没有匹配的事件" detail="调整过滤条件，或等待新的任务与运行时事件写入。"/>}
+      {!loading && total > 0 && <nav className="event-pagination" aria-label="事件分页"><span>第 {page} / {pageCount} 页 · 显示 {rangeStart}–{rangeEnd}，共 {total} 条</span><div><button className="secondary" disabled={offset === 0} onClick={() => setOffset(current => Math.max(0, current - limit))}><ChevronLeft/>上一页</button><button className="secondary" disabled={offset + limit >= total} onClick={() => setOffset(current => current + limit)}>下一页<ChevronRight/></button></div></nav>}
     </section>
 
     {confirmOpen && <div className="event-confirm-overlay"><button className="event-confirm-scrim" aria-label="取消清空事件" onClick={closeConfirm}/><section ref={confirmRef} className="event-confirm" role="dialog" aria-modal="true" aria-labelledby="clear-events-title"><div className="event-confirm-icon"><Trash2/></div><h2 id="clear-events-title">清空全部事件记录？</h2><p>这会删除所有结构化运行事件，而不仅是当前筛选结果。任务摘要、设置和供应商配置不会被删除，此操作无法撤销。</p><div><button className="secondary" autoFocus disabled={clearing} onClick={closeConfirm}>取消</button><button className="danger-button" disabled={clearing} onClick={() => void clearEvents()}>{clearing ? <LoaderCircle className="spinning"/> : <Trash2/>}{clearing ? '正在清空' : '确认清空'}</button></div></section></div>}

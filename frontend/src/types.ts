@@ -130,13 +130,56 @@ export interface OperationalEvent {
 
 export interface EventQuery {
   limit: number
+  offset?: number
   type?: string
+  level?: string
   providerId?: string
+  jobId?: string
+  since?: string
+  until?: string
 }
 
 export interface EventListResult {
   events: OperationalEvent[]
   total: number
+}
+
+export interface DiagnosticCLI {
+  id: 'codex' | 'claude'
+  name: string
+  available: boolean
+  pathLabel?: string
+  version?: string
+  checkState: 'ok' | 'unavailable' | 'timeout' | 'version_unreadable'
+}
+
+export interface DiagnosticConfigField {
+  key: string
+  label: string
+  description: string
+}
+
+export interface SystemDiagnostics {
+  status: 'ok' | 'degraded'
+  generatedAt: string
+  clis: DiagnosticCLI[]
+  sqlite: {
+    available: boolean
+    schemaVersion: number
+    logicalBytes: number
+    eventCount: number
+    scheduleCount: number
+  }
+  runtime: {
+    activeJobs: number
+    activeJobsLimit: number
+    directoryEntries: number
+    directoryReady: boolean
+  }
+  config: {
+    hotReload: DiagnosticConfigField[]
+    restartRequired: DiagnosticConfigField[]
+  }
 }
 
 export type ScheduleLastStatus = JobStatus | 'idle' | 'skipped'

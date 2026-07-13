@@ -526,6 +526,13 @@ func (m *Manager) List() []domain.Job {
 	}
 	return out
 }
+
+func (m *Manager) ActiveCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.jobs)
+}
+
 func view(j domain.Job) domain.Job {
 	if j.EndedAt == nil {
 		j.ElapsedMillis = time.Since(j.StartedAt).Milliseconds()

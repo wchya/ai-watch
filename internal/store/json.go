@@ -84,6 +84,13 @@ type RetentionResult struct {
 	Bytes   int64 `json:"bytes"`
 }
 
+type Diagnostics struct {
+	SchemaVersion int
+	LogicalBytes  int64
+	EventCount    int64
+	ScheduleCount int64
+}
+
 func New(dir string) *JSON {
 	s := &JSON{dir: dir, dbPath: filepath.Join(dir, databaseName)}
 	s.initErr = s.open()
@@ -1178,6 +1185,37 @@ func (s *JSON) CountEvents(filter EventFilter) (int64, error) {
 		return 0, fmt.Errorf("count events: %w", err)
 	}
 	return count, nil
+}
+
+// Diagnostics returns a bounded, read-only snapshot of SQLite metadata. It
+// intentionally exposes neither the database path nor any stored row content.
+func (s *JSON) Diagnostics() (Diagnostics, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ready(); err != nil {
+		return Diagnostics{}, err
+	}
+	var result Diagnostics
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&result.SchemaVersion); err != nil {
+		return Diagnostics{}, fmt.Errorf("read schema version: %w", err)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&result.EventCount); err != nil {
+		return Diagnostics{}, fmt.Errorf("count diagnostic events: %w", err)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM schedules`).Scan(&result.ScheduleCount); err != nil {
+		return Diagnostics{}, fmt.Errorf("count diagnostic schedules: %w", err)
+	}
+	var pageCount, pageSize int64
+	if err := s.db.QueryRow(`PRAGMA page_count`).Scan(&pageCount); err != nil {
+		return Diagnostics{}, fmt.Errorf("read sqlite page count: %w", err)
+	}
+	if err := s.db.QueryRow(`PRAGMA page_size`).Scan(&pageSize); err != nil {
+		return Diagnostics{}, fmt.Errorf("read sqlite page size: %w", err)
+	}
+	if pageCount > 0 && pageSize > 0 && pageCount <= (1<<63-1)/pageSize {
+		result.LogicalBytes = pageCount * pageSize
+	}
+	return result, nil
 }
 
 func (s *JSON) ClearEvents() (int64, error) {

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -59,6 +60,36 @@ func TestHealthAndSPAFallback(t *testing.T) {
 	}
 }
 
+func TestDiagnosticsIsReadOnlyAndDoesNotExposeSensitivePathsOrOutput(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "codex-safe")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf 'codex-cli 0.144.3\\n'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeDir := filepath.Join(root, "runtime")
+	if err := os.MkdirAll(filepath.Join(runtimeDir, "jobs", "temporary-secret-name"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AI_WATCH_RUNTIME_DIR", runtimeDir)
+	st := store.New(filepath.Join(root, "data"))
+	defer st.Close()
+	scanner := &configscan.Scanner{CodexBin: bin, ClaudeBin: filepath.Join(root, "missing-claude")}
+	h := New(scanner, nil, "", st).Handler()
+
+	r := httptest.NewRequest(http.MethodGet, "/api/diagnostics", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, `"schemaVersion":7`) || !strings.Contains(body, `"pathLabel":"codex-safe"`) || !strings.Contains(body, `"directoryEntries":1`) {
+		t.Fatalf("diagnostics status=%d body=%s", w.Code, body)
+	}
+	for _, forbidden := range []string{root, "temporary-secret-name", "webhook", "apiKey", "DINGTALK_WEBHOOK_URL"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("diagnostics exposed %q: %s", forbidden, body)
+		}
+	}
+}
+
 func TestNotificationTestAndStatusReuseConfiguredNotifier(t *testing.T) {
 	st := store.New(t.TempDir())
 	defer st.Close()
@@ -84,9 +115,11 @@ func TestNotificationTestAndStatusReuseConfiguredNotifier(t *testing.T) {
 func TestEventsListFilterAndClear(t *testing.T) {
 	st := store.New(t.TempDir())
 	defer st.Close()
+	base := time.Date(2026, 7, 13, 6, 0, 0, 0, time.UTC)
 	for _, event := range []store.Event{
-		{At: time.Now().UTC(), Type: "job_state", Level: "info", ProviderID: "p1", JobID: "j1", Message: "started"},
-		{At: time.Now().UTC(), Type: "classification", Level: "success", ProviderID: "p2", JobID: "j2", Message: "success"},
+		{At: base, Type: "job_state", Level: "info", ProviderID: "p1", JobID: "j1", Message: "started"},
+		{At: base.Add(time.Minute), Type: "classification", Level: "success", ProviderID: "p1", JobID: "j1", Message: "success"},
+		{At: base.Add(2 * time.Minute), Type: "cleanup", Level: "info", ProviderID: "p2", JobID: "j2", Message: "cleaned"},
 	} {
 		if err := st.SaveEvent(event); err != nil {
 			t.Fatal(err)
@@ -94,7 +127,7 @@ func TestEventsListFilterAndClear(t *testing.T) {
 	}
 	h := New(configscan.New(), nil, "", st).Handler()
 
-	r := httptest.NewRequest(http.MethodGet, "/api/events?providerId=p1&limit=50", nil)
+	r := httptest.NewRequest(http.MethodGet, "/api/events?providerId=p1&jobId=j1&level=info&since=2026-07-13T05:59:00Z&until=2026-07-13T06:01:00Z&limit=1&offset=0", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"total":1`) || !strings.Contains(w.Body.String(), `"providerId":"p1"`) {
@@ -104,8 +137,42 @@ func TestEventsListFilterAndClear(t *testing.T) {
 	r = httptest.NewRequest(http.MethodDelete, "/api/events", nil)
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"deleted":2`) {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"deleted":3`) {
 		t.Fatalf("clear events: status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestEventsListPaginationAndValidation(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	base := time.Date(2026, 7, 13, 6, 0, 0, 0, time.UTC)
+	for index := 0; index < 3; index++ {
+		if err := st.SaveEvent(store.Event{At: base.Add(time.Duration(index) * time.Minute), Type: "job_state", Level: "info", JobID: fmt.Sprintf("j%d", index)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := New(configscan.New(), nil, "", st).Handler()
+
+	r := httptest.NewRequest(http.MethodGet, "/api/events?limit=1&offset=1", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"total":3`) || !strings.Contains(w.Body.String(), `"jobId":"j1"`) {
+		t.Fatalf("paged events: status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	for _, path := range []string{
+		"/api/events?limit=501",
+		"/api/events?offset=-1",
+		"/api/events?since=not-a-time",
+		"/api/events?until=not-a-time",
+		"/api/events?since=2026-07-13T07:00:00Z&until=2026-07-13T06:00:00Z",
+	} {
+		r = httptest.NewRequest(http.MethodGet, path, nil)
+		w = httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status=%d body=%s", path, w.Code, w.Body.String())
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ import type {
   AppSettings, BulkJobRequest, BulkJobResult, DashboardData, EventListResult, EventQuery,
   JobEvent, JobPhase, JobStatus, JobSummary, OperationalEvent, Provider, ProviderExample,
   ProviderExampleWriteRequest, Schedule, ScheduleListResult, ScheduleWriteRequest, StartJobRequest,
+  SystemDiagnostics,
 } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '/api'
@@ -176,6 +177,7 @@ export function normalizeEvent(raw: unknown): JobEvent {
 }
 
 export const api = {
+  diagnostics: () => request<SystemDiagnostics>('/diagnostics'),
   async dashboard(): Promise<DashboardData> {
     const [health, config, rawProviders, rawJobs] = await Promise.all([
       request<{ status: string; version?: string }>('/health'),
@@ -252,8 +254,13 @@ export const api = {
   },
   async events(query: EventQuery): Promise<EventListResult> {
     const params = new URLSearchParams({ limit: String(query.limit) })
+    if (query.offset != null) params.set('offset', String(query.offset))
     if (query.type) params.set('type', query.type)
+    if (query.level) params.set('level', query.level)
     if (query.providerId) params.set('providerId', query.providerId)
+    if (query.jobId) params.set('jobId', query.jobId)
+    if (query.since) params.set('since', query.since)
+    if (query.until) params.set('until', query.until)
     const raw = await request<RawOperationalEvent[] | { events?: RawOperationalEvent[]; items?: RawOperationalEvent[]; total?: number; count?: number }>(`/events?${params}`)
     const items = Array.isArray(raw) ? raw : raw.events || raw.items || []
     return {

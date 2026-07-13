@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ai-watch/internal/configscan"
+	"ai-watch/internal/diagnostics"
 	"ai-watch/internal/domain"
 	"ai-watch/internal/jobs"
 	"ai-watch/internal/store"
@@ -39,6 +40,8 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case p == "/api/health" && r.Method == http.MethodGet:
 		s.health(w)
+	case p == "/api/diagnostics" && r.Method == http.MethodGet:
+		writeJSON(w, http.StatusOK, diagnostics.New(s.scanner, s.jobs, s.store, "").Snapshot(r.Context()))
 	case p == "/api/config/status" && r.Method == http.MethodGet:
 		writeJSON(w, 200, s.scanner.Status())
 	case p == "/api/providers" && r.Method == http.MethodGet:
@@ -344,11 +347,41 @@ func (s *Server) operationalEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "events_unavailable", "event store is unavailable")
 		return
 	}
-	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
-	if err != nil || limit <= 0 {
-		limit = 100
+	query := r.URL.Query()
+	limit, err := parseBoundedQueryInt(query.Get("limit"), 100, 1, 500)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_event_limit", "limit must be an integer between 1 and 500")
+		return
 	}
-	filter := store.EventFilter{ProviderID: r.URL.Query().Get("providerId"), JobID: r.URL.Query().Get("jobId"), Type: r.URL.Query().Get("type"), Level: r.URL.Query().Get("level"), Limit: limit}
+	offset, err := parseBoundedQueryInt(query.Get("offset"), 0, 0, 1_000_000)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_event_offset", "offset must be an integer between 0 and 1000000")
+		return
+	}
+	since, err := parseEventTime(query.Get("since"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_event_since", "since must be an RFC3339 timestamp")
+		return
+	}
+	until, err := parseEventTime(query.Get("until"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_event_until", "until must be an RFC3339 timestamp")
+		return
+	}
+	if !since.IsZero() && !until.IsZero() && since.After(until) {
+		writeError(w, http.StatusBadRequest, "invalid_event_range", "since must not be after until")
+		return
+	}
+	filter := store.EventFilter{
+		ProviderID: strings.TrimSpace(query.Get("providerId")),
+		JobID:      strings.TrimSpace(query.Get("jobId")),
+		Type:       strings.TrimSpace(query.Get("type")),
+		Level:      strings.TrimSpace(query.Get("level")),
+		Since:      since,
+		Until:      until,
+		Limit:      limit,
+		Offset:     offset,
+	}
 	events, err := s.store.ListEvents(filter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "events_read_failed", err.Error())
@@ -360,6 +393,28 @@ func (s *Server) operationalEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": events, "total": total})
+}
+
+func parseBoundedQueryInt(raw string, fallback, min, max int) (int, error) {
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < min || value > max {
+		return 0, errors.New("query integer is outside the allowed range")
+	}
+	return value, nil
+}
+
+func parseEventTime(raw string) (time.Time, error) {
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	value, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return value.UTC(), nil
 }
 
 func (s *Server) clearEvents(w http.ResponseWriter) {

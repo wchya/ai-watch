@@ -617,6 +617,30 @@ func TestDatabaseReopenPreservesEvents(t *testing.T) {
 	}
 }
 
+func TestDiagnosticsReturnsCountsWithoutStoredContent(t *testing.T) {
+	st := New(t.TempDir())
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.SaveEvent(Event{Type: "job_state", Message: "safe summary"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertSchedule(domain.Schedule{
+		ID: "diagnostic-schedule", Name: "Diagnostic", Enabled: true,
+		CLI: domain.CLICodex, ProviderID: "provider", Mode: domain.ModeProbe,
+		Timezone: "UTC", WeekdaysMask: 127, StartMinute: 0, EndMinute: 1439,
+		UntilSuccess: true, TimeoutSeconds: 15, RetryIntervalSeconds: 2,
+		KeepaliveIntervalSeconds: 120, FailureThreshold: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := st.Diagnostics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.SchemaVersion < 7 || stats.LogicalBytes <= 0 || stats.EventCount != 1 || stats.ScheduleCount != 1 {
+		t.Fatalf("unexpected diagnostics: %+v", stats)
+	}
+}
+
 func writeJSONFile(t *testing.T, file string, value any) {
 	t.Helper()
 	b, err := json.Marshal(value)
