@@ -1,18 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity, AlertCircle, Bell, BookOpen, Bot, Boxes, Check, CheckCircle2, ChevronDown, ChevronLeft,
+  Activity, AlertCircle, Bell, BookOpen, Bot, Boxes, CalendarClock, Check, CheckCircle2, ChevronDown, ChevronLeft,
   ChevronRight, CircleDot, Clock3, Command, Copy, Database, ExternalLink, Eye,
   EyeOff, Filter, Gauge, History, KeyRound, LoaderCircle, Menu, Pause, Play, Plus, RefreshCw,
   RotateCcw, Save, Server, Settings, ShieldCheck, Sparkles, Square, Terminal,
   TimerReset, Trash2, Wifi, WifiOff, X, Zap,
 } from 'lucide-react'
 import { api, normalizeEvent } from './api'
+import { SchedulesView } from './SchedulesView'
 import type {
   AppSettings, Cli, DashboardData, JobEvent, JobMode, JobOptions, JobStatus,
   JobSummary, OperationalEvent, Provider, ProviderExample, StartJobRequest,
 } from './types'
 
-type View = 'dashboard' | 'events' | 'settings'
+type View = 'dashboard' | 'schedules' | 'events' | 'settings'
 
 const DEFAULT_OPTIONS: JobOptions = {
   timeoutSeconds: 15,
@@ -110,7 +111,7 @@ export function App() {
 
   const openJob = (job: JobSummary) => { setDetailJob(job); setMobileNav(false) }
   const onStarted = (job: JobSummary, notifyOnComplete: boolean) => { setDrawerOpen(false); setDetailJob(job); if (notifyOnComplete) setNotificationJobs(current => new Set(current).add(job.id)); void load(true) }
-  const viewLabel = view === 'dashboard' ? '总览' : view === 'events' ? '事件' : '设置与通知'
+  const viewLabel = view === 'dashboard' ? '总览' : view === 'schedules' ? '计划任务' : view === 'events' ? '事件' : '设置与通知'
 
   return <div className="app-shell">
     <div className="ambient ambient-a"/><div className="ambient ambient-b"/>
@@ -118,6 +119,7 @@ export function App() {
       <div className="sidebar-top"><Logo/><button className="icon-button mobile-close" onClick={() => setMobileNav(false)} aria-label="关闭菜单"><X/></button></div>
       <nav>
         <button className={view === 'dashboard' ? 'active' : ''} aria-current={view === 'dashboard' ? 'page' : undefined} onClick={() => { setView('dashboard'); setMobileNav(false) }}><Gauge/><span>总览</span></button>
+        <button className={view === 'schedules' ? 'active' : ''} aria-current={view === 'schedules' ? 'page' : undefined} onClick={() => { setView('schedules'); setMobileNav(false) }}><CalendarClock/><span>计划任务</span></button>
         <button className={view === 'events' ? 'active' : ''} aria-current={view === 'events' ? 'page' : undefined} onClick={() => { setView('events'); setMobileNav(false) }}><History/><span>事件记录</span></button>
         <button className={view === 'settings' ? 'active' : ''} aria-current={view === 'settings' ? 'page' : undefined} onClick={() => { setView('settings'); setMobileNav(false) }}><Settings/><span>设置与通知</span></button>
       </nav>
@@ -132,10 +134,10 @@ export function App() {
       <header className="topbar">
         <button className="icon-button menu-button" onClick={() => setMobileNav(true)} aria-label="打开菜单"><Menu/></button>
         <div className="crumb"><span>AI Watch</span><ChevronRight/><strong>{viewLabel}</strong></div>
-        <div className="top-actions"><button className="icon-button" onClick={() => view === 'events' ? setEventsRefreshToken(current => current + 1) : void load()} aria-label={view === 'events' ? '刷新事件' : '刷新'}><RefreshCw className={view !== 'events' && loading ? 'spinning' : ''}/></button><button className="primary compact" onClick={() => { setPresetProvider(null); setPresetExample(null); setDrawerOpen(true) }}><Plus/>新建任务</button></div>
+        <div className="top-actions">{view !== 'schedules' && <button className="icon-button" onClick={() => view === 'events' ? setEventsRefreshToken(current => current + 1) : void load()} aria-label={view === 'events' ? '刷新事件' : '刷新'}><RefreshCw className={view !== 'events' && loading ? 'spinning' : ''}/></button>}<button className="primary compact" onClick={() => { setPresetProvider(null); setPresetExample(null); setDrawerOpen(true) }}><Plus/>新建任务</button></div>
       </header>
 
-      {view === 'dashboard' ? <Dashboard data={data} loading={loading} error={error} retry={() => void load()} openNew={() => { setPresetProvider(null); setPresetExample(null); setDrawerOpen(true) }} probeProvider={(provider) => { setPresetExample(null); setPresetProvider(provider); setDrawerOpen(true) }} referenceExample={(example) => { setPresetProvider(null); setPresetExample(example); setDrawerOpen(true) }} openJob={openJob}/> : view === 'events' ? <EventsView providers={data?.providers ?? []} refreshToken={eventsRefreshToken}/> : <SettingsView/>}
+      {view === 'dashboard' ? <Dashboard data={data} loading={loading} error={error} retry={() => void load()} openNew={() => { setPresetProvider(null); setPresetExample(null); setDrawerOpen(true) }} probeProvider={(provider) => { setPresetExample(null); setPresetProvider(provider); setDrawerOpen(true) }} referenceExample={(example) => { setPresetProvider(null); setPresetExample(example); setDrawerOpen(true) }} openJob={openJob}/> : view === 'schedules' ? <SchedulesView providers={data?.providers ?? []} defaultOptions={jobDefaults}/> : view === 'events' ? <EventsView providers={data?.providers ?? []} refreshToken={eventsRefreshToken}/> : <SettingsView/>}
     </main>
     {mobileNav && <div className="nav-scrim" onClick={() => setMobileNav(false)}/>} 
     {drawerOpen && <NewJobDrawer providers={data?.providers ?? []} initialProvider={presetProvider} initialExample={presetExample} defaultOptions={jobDefaults} close={() => { setDrawerOpen(false); setPresetProvider(null); setPresetExample(null) }} onStarted={onStarted}/>} 

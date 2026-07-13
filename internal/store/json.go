@@ -1,7 +1,9 @@
 package store
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,12 +24,16 @@ const (
 	databaseName      = "ai-watch.db"
 	maxEventMessage   = 4 << 10
 	maxEventDataBytes = 32 << 10
+	maxSchedules      = 200
 )
+
+var ErrScheduleLimit = errors.New("schedule limit reached")
 
 var (
 	forbiddenEventKey = regexp.MustCompile(`(?i)(^|[_-])(api[_-]?key|auth|authorization|credential|output|prompt|secret|token|webhook)([_-]|$)`)
 	credentialValue   = regexp.MustCompile(`(?i)(sk-[a-z0-9_-]{8,}|access_token=|bearer\s+[a-z0-9._~+/=-]{8,})`)
 	providerExampleID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+	scheduleID        = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 )
 
 // JSON keeps the original public type name so the jobs manager remains source
@@ -174,29 +180,91 @@ func (s *JSON) migrate() error {
 		return fmt.Errorf("create migration table: %w", err)
 	}
 
-	var version int
-	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
-		return fmt.Errorf("read schema version: %w", err)
+	rows, err := s.db.Query(`SELECT version FROM schema_migrations`)
+	if err != nil {
+		return fmt.Errorf("read schema versions: %w", err)
 	}
-	if version < 1 {
+	applied := map[int]bool{}
+	for rows.Next() {
+		var version int
+		if err = rows.Scan(&version); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan schema version: %w", err)
+		}
+		applied[version] = true
+	}
+	if err = rows.Close(); err != nil {
+		return fmt.Errorf("close schema versions: %w", err)
+	}
+	if !applied[1] {
 		if err := s.applySchemaV1(); err != nil {
 			return err
 		}
 	}
-	if version < 2 {
+	if !applied[2] {
 		if err := s.migrateLegacyJSON(); err != nil {
 			return err
 		}
 	}
-	if version < 3 {
+	if !applied[3] {
 		if err := s.applySettingsRetentionV3(); err != nil {
 			return err
 		}
 	}
-	if version < 4 {
+	if !applied[4] {
 		if err := s.applyProviderExamplesV4(); err != nil {
 			return err
 		}
+	}
+	if !applied[5] {
+		if err := s.applySchedulesV5(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *JSON) applySchedulesV5() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin schedules migration: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`CREATE TABLE IF NOT EXISTS schedules (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		enabled INTEGER NOT NULL DEFAULT 1,
+		cli TEXT NOT NULL CHECK (cli IN ('codex', 'claude')),
+		provider_id TEXT NOT NULL,
+		mode TEXT NOT NULL CHECK (mode IN ('probe', 'keepalive')),
+		timezone TEXT NOT NULL,
+		weekdays_mask INTEGER NOT NULL,
+		start_minute INTEGER NOT NULL,
+		end_minute INTEGER NOT NULL,
+		until_success INTEGER NOT NULL DEFAULT 1,
+		timeout_seconds INTEGER NOT NULL,
+		retry_interval_seconds INTEGER NOT NULL,
+		keepalive_interval_seconds INTEGER NOT NULL,
+		failure_threshold INTEGER NOT NULL,
+		model TEXT NOT NULL DEFAULT '',
+		fallback_model TEXT NOT NULL DEFAULT '',
+		last_occurrence_key TEXT NOT NULL DEFAULT '',
+		last_status TEXT NOT NULL DEFAULT '',
+		last_job_id TEXT NOT NULL DEFAULT '',
+		last_run_at_ns INTEGER,
+		created_at_ns INTEGER NOT NULL,
+		updated_at_ns INTEGER NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create schedules table: %w", err)
+	}
+	if _, err = tx.Exec(`CREATE INDEX IF NOT EXISTS idx_schedules_enabled_mode ON schedules(enabled, mode, cli, provider_id)`); err != nil {
+		return fmt.Errorf("index schedules: %w", err)
+	}
+	if _, err = tx.Exec(`INSERT INTO schema_migrations(version, applied_at_ns) VALUES(5, ?)`, time.Now().UTC().UnixNano()); err != nil {
+		return fmt.Errorf("record schedules migration: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit schedules migration: %w", err)
 	}
 	return nil
 }
@@ -600,6 +668,238 @@ func upsertProviderExampleDB(exec sqlExecer, example domain.ProviderExample) err
 		return fmt.Errorf("save provider example: %w", err)
 	}
 	return nil
+}
+
+const scheduleSelect = `SELECT id, name, enabled, cli, provider_id, mode, timezone,
+	weekdays_mask, start_minute, end_minute, until_success, timeout_seconds,
+	retry_interval_seconds, keepalive_interval_seconds, failure_threshold, model,
+	fallback_model, last_occurrence_key, last_status, last_job_id, last_run_at_ns,
+	created_at_ns, updated_at_ns FROM schedules`
+
+func (s *JSON) ListSchedules() ([]domain.Schedule, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ready(); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(scheduleSelect + ` ORDER BY enabled DESC, name, id`)
+	if err != nil {
+		return nil, fmt.Errorf("list schedules: %w", err)
+	}
+	defer rows.Close()
+	values := make([]domain.Schedule, 0)
+	for rows.Next() {
+		value, err := scanSchedule(rows)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate schedules: %w", err)
+	}
+	return values, nil
+}
+
+func (s *JSON) GetSchedule(id string) (domain.Schedule, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ready(); err != nil {
+		return domain.Schedule{}, err
+	}
+	value, err := scanSchedule(s.db.QueryRow(scheduleSelect+` WHERE id = ?`, strings.TrimSpace(id)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Schedule{}, sql.ErrNoRows
+	}
+	return value, err
+}
+
+func (s *JSON) UpsertSchedule(value domain.Schedule) (domain.Schedule, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ready(); err != nil {
+		return domain.Schedule{}, err
+	}
+	var err error
+	if value, err = normalizeSchedule(value); err != nil {
+		return domain.Schedule{}, err
+	}
+	now := time.Now().UTC()
+	if value.ID == "" {
+		value.ID = "schedule-" + randomHex(8)
+	}
+	var createdAt int64
+	err = s.db.QueryRow(`SELECT created_at_ns FROM schedules WHERE id = ?`, value.ID).Scan(&createdAt)
+	if err == nil {
+		value.CreatedAt = time.Unix(0, createdAt).UTC()
+	} else if errors.Is(err, sql.ErrNoRows) {
+		var count int
+		if err = s.db.QueryRow(`SELECT COUNT(*) FROM schedules`).Scan(&count); err != nil {
+			return domain.Schedule{}, fmt.Errorf("count schedules: %w", err)
+		}
+		if count >= maxSchedules {
+			return domain.Schedule{}, ErrScheduleLimit
+		}
+		value.CreatedAt = now
+	} else {
+		return domain.Schedule{}, fmt.Errorf("read schedule creation time: %w", err)
+	}
+	value.UpdatedAt = now
+	_, err = s.db.Exec(`INSERT INTO schedules(
+		id, name, enabled, cli, provider_id, mode, timezone, weekdays_mask,
+		start_minute, end_minute, until_success, timeout_seconds,
+		retry_interval_seconds, keepalive_interval_seconds, failure_threshold,
+		model, fallback_model, last_occurrence_key, last_status, last_job_id,
+		last_run_at_ns, created_at_ns, updated_at_ns
+	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		name = excluded.name, enabled = excluded.enabled, cli = excluded.cli,
+		provider_id = excluded.provider_id, mode = excluded.mode,
+		timezone = excluded.timezone, weekdays_mask = excluded.weekdays_mask,
+		start_minute = excluded.start_minute, end_minute = excluded.end_minute,
+		until_success = excluded.until_success, timeout_seconds = excluded.timeout_seconds,
+		retry_interval_seconds = excluded.retry_interval_seconds,
+		keepalive_interval_seconds = excluded.keepalive_interval_seconds,
+		failure_threshold = excluded.failure_threshold, model = excluded.model,
+		fallback_model = excluded.fallback_model, updated_at_ns = excluded.updated_at_ns`,
+		value.ID, value.Name, boolInt(value.Enabled), string(value.CLI), value.ProviderID,
+		string(value.Mode), value.Timezone, value.WeekdaysMask, value.StartMinute,
+		value.EndMinute, boolInt(value.UntilSuccess), value.TimeoutSeconds,
+		value.RetryIntervalSeconds, value.KeepaliveIntervalSeconds,
+		value.FailureThreshold, value.Model, value.FallbackModel,
+		value.LastOccurrenceKey, value.LastStatus, value.LastJobID,
+		nullTimeNS(value.LastOccurrenceAt), value.CreatedAt.UnixNano(), value.UpdatedAt.UnixNano(),
+	)
+	if err != nil {
+		return domain.Schedule{}, fmt.Errorf("save schedule: %w", err)
+	}
+	s.ensurePrivateFiles()
+	return scanSchedule(s.db.QueryRow(scheduleSelect+` WHERE id = ?`, value.ID))
+}
+
+func (s *JSON) DeleteSchedule(id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ready(); err != nil {
+		return false, err
+	}
+	id = strings.TrimSpace(id)
+	if !scheduleID.MatchString(id) {
+		return false, errors.New("invalid schedule id")
+	}
+	result, err := s.db.Exec(`DELETE FROM schedules WHERE id = ?`, id)
+	if err != nil {
+		return false, fmt.Errorf("delete schedule: %w", err)
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
+}
+
+// MarkScheduleRun overwrites the single runtime snapshot for a schedule. It
+// intentionally does not create a per-run history table.
+func (s *JSON) MarkScheduleRun(id, occurrence, status, jobID string, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ready(); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`UPDATE schedules SET last_occurrence_key = ?, last_status = ?,
+		last_job_id = ?, last_run_at_ns = ? WHERE id = ?`, occurrence, status, jobID,
+		at.UTC().UnixNano(), id)
+	if err != nil {
+		return fmt.Errorf("mark schedule run: %w", err)
+	}
+	return nil
+}
+
+func scanSchedule(row rowScanner) (domain.Schedule, error) {
+	var value domain.Schedule
+	var enabled, untilSuccess int
+	var cli, mode string
+	var lastRun sql.NullInt64
+	var createdAt, updatedAt int64
+	if err := row.Scan(&value.ID, &value.Name, &enabled, &cli, &value.ProviderID,
+		&mode, &value.Timezone, &value.WeekdaysMask, &value.StartMinute,
+		&value.EndMinute, &untilSuccess, &value.TimeoutSeconds,
+		&value.RetryIntervalSeconds, &value.KeepaliveIntervalSeconds,
+		&value.FailureThreshold, &value.Model, &value.FallbackModel,
+		&value.LastOccurrenceKey, &value.LastStatus, &value.LastJobID, &lastRun,
+		&createdAt, &updatedAt); err != nil {
+		return domain.Schedule{}, err
+	}
+	value.Enabled = enabled != 0
+	value.CLI = domain.CLI(cli)
+	value.Mode = domain.Mode(mode)
+	value.UntilSuccess = untilSuccess != 0
+	value.LastOccurrenceAt = timePtr(lastRun)
+	value.CreatedAt = time.Unix(0, createdAt).UTC()
+	value.UpdatedAt = time.Unix(0, updatedAt).UTC()
+	return value, nil
+}
+
+func normalizeSchedule(value domain.Schedule) (domain.Schedule, error) {
+	value.ID = strings.TrimSpace(value.ID)
+	value.Name = strings.TrimSpace(value.Name)
+	value.ProviderID = strings.TrimSpace(value.ProviderID)
+	value.Timezone = strings.TrimSpace(value.Timezone)
+	value.Model = strings.TrimSpace(value.Model)
+	value.FallbackModel = strings.TrimSpace(value.FallbackModel)
+	if value.ID != "" && !scheduleID.MatchString(value.ID) {
+		return domain.Schedule{}, errors.New("invalid schedule id")
+	}
+	if value.Name == "" || len(value.Name) > 128 {
+		return domain.Schedule{}, errors.New("schedule name is required and must not exceed 128 bytes")
+	}
+	if value.CLI != domain.CLICodex && value.CLI != domain.CLIClaude {
+		return domain.Schedule{}, errors.New("schedule cli must be codex or claude")
+	}
+	if value.ProviderID == "" || len(value.ProviderID) > 256 {
+		return domain.Schedule{}, errors.New("schedule providerId is required and must not exceed 256 bytes")
+	}
+	if value.Mode != domain.ModeProbe && value.Mode != domain.ModeKeepalive {
+		return domain.Schedule{}, errors.New("schedule mode must be probe or keepalive")
+	}
+	if value.Timezone == "" {
+		value.Timezone = "Asia/Shanghai"
+	}
+	if _, err := time.LoadLocation(value.Timezone); err != nil {
+		return domain.Schedule{}, errors.New("invalid schedule timezone")
+	}
+	if value.WeekdaysMask < 1 || value.WeekdaysMask > 127 {
+		return domain.Schedule{}, errors.New("weekdaysMask must be 1..127")
+	}
+	if value.StartMinute < 0 || value.StartMinute > 1439 || value.EndMinute < 1 || value.EndMinute > 1440 || value.StartMinute == value.EndMinute {
+		return domain.Schedule{}, errors.New("invalid schedule time window")
+	}
+	if value.TimeoutSeconds < 1 || value.TimeoutSeconds > 3600 {
+		return domain.Schedule{}, errors.New("timeoutSeconds must be 1..3600")
+	}
+	if value.RetryIntervalSeconds < 1 || value.RetryIntervalSeconds > 86400 || value.KeepaliveIntervalSeconds < 1 || value.KeepaliveIntervalSeconds > 86400 {
+		return domain.Schedule{}, errors.New("schedule intervals must be 1..86400")
+	}
+	if value.FailureThreshold < 1 || value.FailureThreshold > 100 {
+		return domain.Schedule{}, errors.New("failureThreshold must be 1..100")
+	}
+	if len(value.Model) > 128 || len(value.FallbackModel) > 128 {
+		return domain.Schedule{}, errors.New("schedule model names must not exceed 128 bytes")
+	}
+	for label, text := range map[string]string{
+		"name": value.Name, "providerId": value.ProviderID,
+		"model": value.Model, "fallbackModel": value.FallbackModel,
+	} {
+		if strings.Contains(text, "://") || credentialValue.MatchString(text) {
+			return domain.Schedule{}, fmt.Errorf("schedule %s contains connection or credential data", label)
+		}
+	}
+	return value, nil
+}
+
+func randomHex(bytes int) string {
+	buffer := make([]byte, bytes)
+	if _, err := rand.Read(buffer); err != nil {
+		return fmt.Sprintf("%x", time.Now().UTC().UnixNano())
+	}
+	return hex.EncodeToString(buffer)
 }
 
 func (s *JSON) LoadSummaries() ([]domain.Summary, error) {

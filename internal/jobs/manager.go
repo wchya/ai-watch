@@ -22,8 +22,12 @@ import (
 var ErrLockConflict = errors.New("equivalent target already has a running job")
 var ErrNotFound = errors.New("job not found")
 var ErrShuttingDown = errors.New("job manager is shutting down")
+var ErrActiveLimit = errors.New("active job limit reached")
 
-const minRetryIntervalSeconds = 1
+const (
+	minRetryIntervalSeconds = 1
+	maxActiveJobs           = 8
+)
 
 type Resolver interface {
 	Resolve(domain.CLI, string) (domain.ResolvedConfig, error)
@@ -54,6 +58,8 @@ type Manager struct {
 	eventQueue     chan eventWrite
 	eventWG        sync.WaitGroup
 	persistenceErr atomic.Value
+	scheduleJobs   map[string]string
+	scheduleWake   chan struct{}
 }
 
 type runtime struct {
@@ -68,6 +74,8 @@ type runtime struct {
 	subscribers         map[chan domain.Event]struct{}
 	consecutiveFailures int
 	closed              bool
+	scheduleID          string
+	occurrenceKey       string
 }
 
 type eventWrite struct {
@@ -86,14 +94,20 @@ func New(res Resolver, exec Executor, st *store.JSON, notifier ...Notifier) *Man
 		n = notifier[0]
 	}
 	settings.DingTalkConfigured = n != nil && n.Configured()
-	m := &Manager{resolver: res, executor: exec, store: st, jobs: map[string]*runtime{}, locks: map[string]string{}, history: history, settings: settings, notifier: n, ctx: ctx, cancel: cancel, eventQueue: make(chan eventWrite, 256)}
+	m := &Manager{resolver: res, executor: exec, store: st, jobs: map[string]*runtime{}, locks: map[string]string{}, history: history, settings: settings, notifier: n, ctx: ctx, cancel: cancel, eventQueue: make(chan eventWrite, 256), scheduleJobs: map[string]string{}, scheduleWake: make(chan struct{}, 1)}
 	m.persistenceErr.Store("")
 	m.eventWG.Add(1)
 	go m.persistEvents()
+	m.wg.Add(1)
+	go m.scheduleLoop()
 	return m
 }
 
 func (m *Manager) Start(opts domain.JobOptions) (domain.Job, error) {
+	return m.start(opts, "", "")
+}
+
+func (m *Manager) start(opts domain.JobOptions, scheduleID, occurrenceKey string) (domain.Job, error) {
 	if opts.Mode != domain.ModeProbe && opts.Mode != domain.ModeKeepalive {
 		return domain.Job{}, errors.New("mode must be probe or keepalive")
 	}
@@ -142,12 +156,17 @@ func (m *Manager) Start(opts domain.JobOptions) (domain.Job, error) {
 		phase = domain.JobPhaseKeepalive
 	}
 	job := domain.Job{ID: id, Mode: opts.Mode, CLI: opts.CLI, ProviderID: cfg.ProviderID, ProviderName: cfg.ProviderName, Provider: cfg.Provider, Target: sanitizeTarget(cfg.BaseURL), Model: first(opts.Model, cfg.Model), MaskedKey: security.Mask(cfg.APIKey), Status: domain.JobQueued, Phase: phase, StartedAt: now}
-	rt := &runtime{job: job, opts: opts, cfg: cfg, lock: lock, ctx: ctx, cancel: cancel, subscribers: map[chan domain.Event]struct{}{}}
+	rt := &runtime{job: job, opts: opts, cfg: cfg, lock: lock, ctx: ctx, cancel: cancel, subscribers: map[chan domain.Event]struct{}{}, scheduleID: scheduleID, occurrenceKey: occurrenceKey}
 	m.mu.Lock()
 	if m.closing {
 		m.mu.Unlock()
 		cancel()
 		return domain.Job{}, ErrShuttingDown
+	}
+	if len(m.jobs) >= maxActiveJobs {
+		m.mu.Unlock()
+		cancel()
+		return domain.Job{}, ErrActiveLimit
 	}
 	if other, ok := m.locks[lock]; ok {
 		m.mu.Unlock()
@@ -156,9 +175,17 @@ func (m *Manager) Start(opts domain.JobOptions) (domain.Job, error) {
 	}
 	m.locks[lock] = id
 	m.jobs[id] = rt
+	if scheduleID != "" {
+		m.scheduleJobs[scheduleID] = id
+	}
 	m.publishLocked(rt, "job_state", "任务已排队", map[string]any{"status": domain.JobQueued})
 	m.wg.Add(1)
 	m.mu.Unlock()
+	if scheduleID != "" {
+		if err := m.store.MarkScheduleRun(scheduleID, occurrenceKey, string(domain.JobQueued), id, now); err != nil {
+			m.persistenceErr.Store(err.Error())
+		}
+	}
 	go func() {
 		defer m.wg.Done()
 		m.run(rt)
@@ -304,6 +331,8 @@ func (m *Manager) finish(rt *runtime, status domain.JobStatus, attempt domain.At
 	m.publishLocked(rt, "job_state", message, map[string]any{"status": status})
 	summary := rt.job
 	mode := rt.opts.Mode
+	scheduleID := rt.scheduleID
+	occurrenceKey := rt.occurrenceKey
 	m.history = append([]domain.Summary{summary}, m.history...)
 	limit := m.settings.HistoryLimit
 	if limit > 0 && len(m.history) > limit {
@@ -312,6 +341,9 @@ func (m *Manager) finish(rt *runtime, status domain.JobStatus, attempt domain.At
 	rt.closed = true
 	if current, ok := m.jobs[rt.job.ID]; ok && current == rt {
 		delete(m.jobs, rt.job.ID)
+	}
+	if current := m.scheduleJobs[scheduleID]; scheduleID != "" && current == rt.job.ID {
+		delete(m.scheduleJobs, scheduleID)
 	}
 	for ch := range rt.subscribers {
 		close(ch)
@@ -324,12 +356,20 @@ func (m *Manager) finish(rt *runtime, status domain.JobStatus, attempt domain.At
 	rt.cancel = nil
 	rt.events = nil
 	rt.subscribers = nil
+	rt.scheduleID = ""
+	rt.occurrenceKey = ""
 	m.mu.Unlock()
 	if err := m.store.SaveSummary(summary, limit); err != nil {
 		m.persistenceErr.Store(err.Error())
 	}
 	if mode == domain.ModeProbe && (status == domain.JobSuccess || status == domain.JobFatal) {
 		m.notify(summary, attempt)
+	}
+	if scheduleID != "" {
+		if err := m.store.MarkScheduleRun(scheduleID, occurrenceKey, string(status), summary.ID, now); err != nil {
+			m.persistenceErr.Store(err.Error())
+		}
+		m.wakeSchedules()
 	}
 }
 

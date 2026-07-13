@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -170,7 +171,7 @@ func TestLegacyJSONMigrationRunsOnce(t *testing.T) {
 	if err = reopened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 4 {
+	if versions != 5 {
 		t.Fatalf("got %d migration records", versions)
 	}
 }
@@ -303,6 +304,101 @@ func TestProviderExamplesV4MigrationAndSeedsAreOneTime(t *testing.T) {
 	}
 	if len(examples) != 1 || examples[0].CLI != domain.CLIClaude {
 		t.Fatalf("deleted seed was unexpectedly recreated: %+v", examples)
+	}
+}
+
+func TestSchedulesV5CRUDIsBoundedAndContainsNoSecretColumns(t *testing.T) {
+	dir := t.TempDir()
+	st := New(dir)
+	now := time.Date(2026, 7, 13, 6, 0, 0, 0, time.UTC)
+	value, err := st.UpsertSchedule(domain.Schedule{
+		ID: "workday-codex", Name: "工作日 Codex 保活", Enabled: true,
+		CLI: domain.CLICodex, ProviderID: "provider-1", Mode: domain.ModeKeepalive,
+		Timezone: "Asia/Shanghai", WeekdaysMask: 62, StartMinute: 9 * 60, EndMinute: 18 * 60,
+		UntilSuccess: true, TimeoutSeconds: 15, RetryIntervalSeconds: 2,
+		KeepaliveIntervalSeconds: 120, FailureThreshold: 3, Model: "gpt-test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.ID != "workday-codex" || value.CreatedAt.IsZero() || value.UpdatedAt.IsZero() {
+		t.Fatalf("unexpected saved schedule: %+v", value)
+	}
+	if err = st.MarkScheduleRun(value.ID, "occurrence-1", string(domain.JobSuccess), "job-1", now); err != nil {
+		t.Fatal(err)
+	}
+	value.Name = "更新后的名称"
+	updated, err := st.UpsertSchedule(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != value.Name || updated.LastOccurrenceKey != "occurrence-1" || updated.LastJobID != "job-1" || updated.LastOccurrenceAt == nil || !updated.LastOccurrenceAt.Equal(now) {
+		t.Fatalf("schedule runtime snapshot was not preserved: %+v", updated)
+	}
+
+	rows, err := st.db.Query(`SELECT name FROM pragma_table_info('schedules')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var columns []string
+	for rows.Next() {
+		var column string
+		if err = rows.Scan(&column); err != nil {
+			t.Fatal(err)
+		}
+		columns = append(columns, column)
+	}
+	rows.Close()
+	joined := strings.Join(columns, " ")
+	for _, forbidden := range []string{"api_key", "base_url", "prompt", "expected", "env", "auth", "webhook", "secret", "output"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("schedule schema contains forbidden column %q: %s", forbidden, joined)
+		}
+	}
+	if err = st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := New(dir)
+	t.Cleanup(func() { _ = reopened.Close() })
+	values, err := reopened.ListSchedules()
+	if err != nil || len(values) != 1 || values[0].ID != value.ID {
+		t.Fatalf("schedule did not survive reopen: values=%+v err=%v", values, err)
+	}
+}
+
+func TestScheduleLimitAndValidation(t *testing.T) {
+	st := New(t.TempDir())
+	t.Cleanup(func() { _ = st.Close() })
+	base := domain.Schedule{
+		Name: "Rule", Enabled: true, CLI: domain.CLICodex, ProviderID: "provider",
+		Mode: domain.ModeProbe, Timezone: "UTC", WeekdaysMask: 127,
+		StartMinute: 0, EndMinute: 1440, UntilSuccess: true,
+		TimeoutSeconds: 15, RetryIntervalSeconds: 2,
+		KeepaliveIntervalSeconds: 120, FailureThreshold: 3,
+	}
+	for index := 0; index < maxSchedules; index++ {
+		value := base
+		value.ID = fmt.Sprintf("schedule-%03d", index)
+		if _, err := st.UpsertSchedule(value); err != nil {
+			t.Fatalf("save schedule %d: %v", index, err)
+		}
+	}
+	value := base
+	value.ID = "schedule-over-limit"
+	if _, err := st.UpsertSchedule(value); !errors.Is(err, ErrScheduleLimit) {
+		t.Fatalf("got %v, want schedule limit", err)
+	}
+	value = base
+	value.ID = "invalid-timezone"
+	value.Timezone = "Not/A_Real_Zone"
+	if _, err := st.UpsertSchedule(value); err == nil {
+		t.Fatal("invalid timezone was accepted")
+	}
+	value = base
+	value.ID = "leaky-model"
+	value.Model = "sk-abcdefghijklmnop"
+	if _, err := st.UpsertSchedule(value); err == nil {
+		t.Fatal("credential-looking schedule value was accepted")
 	}
 }
 

@@ -1,6 +1,7 @@
 import type {
-  AppSettings, DashboardData, EventListResult, EventQuery, JobEvent, JobPhase, JobStatus,
-  JobSummary, OperationalEvent, Provider, ProviderExample, StartJobRequest,
+  AppSettings, BulkJobRequest, BulkJobResult, DashboardData, EventListResult, EventQuery,
+  JobEvent, JobPhase, JobStatus, JobSummary, OperationalEvent, Provider, ProviderExample,
+  Schedule, ScheduleListResult, ScheduleWriteRequest, StartJobRequest,
 } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '/api'
@@ -47,6 +48,49 @@ interface RawOperationalEvent {
   job_id?: string
   message?: string
 }
+interface RawSchedule {
+  id: string
+  name: string
+  enabled: boolean
+  cli: 'codex' | 'claude'
+  providerId?: string
+  provider_id?: string
+  providerName?: string
+  provider_name?: string
+  mode: 'probe' | 'keepalive'
+  timezone: string
+  weekdaysMask?: number
+  weekdays_mask?: number
+  startMinute?: number
+  start_minute?: number
+  endMinute?: number
+  end_minute?: number
+  untilSuccess?: boolean
+  until_success?: boolean
+  timeoutSeconds?: number
+  timeout_seconds?: number
+  retryIntervalSeconds?: number
+  retry_interval_seconds?: number
+  keepaliveIntervalSeconds?: number
+  keepalive_interval_seconds?: number
+  failureThreshold?: number
+  failure_threshold?: number
+  model?: string
+  fallbackModel?: string
+  fallback_model?: string
+  lastOccurrenceAt?: string
+  last_occurrence_at?: string
+  lastStatus?: Schedule['lastStatus']
+  last_status?: Schedule['lastStatus']
+  lastJobId?: string
+  last_job_id?: string
+  nextRunAt?: string
+  next_run_at?: string
+  createdAt?: string
+  created_at?: string
+  updatedAt?: string
+  updated_at?: string
+}
 
 const normalizeStatus = (status: string): JobStatus => status === 'queued' ? 'starting' : status as JobStatus
 const normalizeJob = (job: RawJob): JobSummary => ({
@@ -66,6 +110,32 @@ const normalizeOperationalEvent = (event: RawOperationalEvent): OperationalEvent
   providerId: event.providerId || event.provider_id,
   jobId: event.jobId || event.job_id,
   message: event.message,
+})
+const normalizeSchedule = (schedule: RawSchedule): Schedule => ({
+  id: schedule.id,
+  name: schedule.name,
+  enabled: schedule.enabled,
+  cli: schedule.cli,
+  providerId: schedule.providerId ?? schedule.provider_id ?? '',
+  providerName: schedule.providerName ?? schedule.provider_name,
+  mode: schedule.mode,
+  timezone: schedule.timezone || 'Asia/Shanghai',
+  weekdaysMask: schedule.weekdaysMask ?? schedule.weekdays_mask ?? 127,
+  startMinute: schedule.startMinute ?? schedule.start_minute ?? 0,
+  endMinute: schedule.endMinute ?? schedule.end_minute ?? 1439,
+  untilSuccess: schedule.untilSuccess ?? schedule.until_success ?? true,
+  timeoutSeconds: schedule.timeoutSeconds ?? schedule.timeout_seconds ?? 15,
+  retryIntervalSeconds: schedule.retryIntervalSeconds ?? schedule.retry_interval_seconds ?? 3,
+  keepaliveIntervalSeconds: schedule.keepaliveIntervalSeconds ?? schedule.keepalive_interval_seconds ?? 120,
+  failureThreshold: schedule.failureThreshold ?? schedule.failure_threshold ?? 3,
+  model: schedule.model,
+  fallbackModel: schedule.fallbackModel ?? schedule.fallback_model,
+  lastOccurrenceAt: schedule.lastOccurrenceAt ?? schedule.last_occurrence_at,
+  lastStatus: schedule.lastStatus ?? schedule.last_status,
+  lastJobId: schedule.lastJobId ?? schedule.last_job_id,
+  nextRunAt: schedule.nextRunAt ?? schedule.next_run_at,
+  createdAt: schedule.createdAt ?? schedule.created_at,
+  updatedAt: schedule.updatedAt ?? schedule.updated_at,
 })
 const readLocalPrefs = () => {
   try { return JSON.parse(localStorage.getItem('ai-watch-ui-settings') || '{}') as Partial<AppSettings> }
@@ -170,6 +240,46 @@ export const api = {
     return result?.deleted ?? 0
   },
   providerExamples: () => request<ProviderExample[]>('/provider-examples'),
+  async schedules(): Promise<ScheduleListResult> {
+    const raw = await request<RawSchedule[] | { schedules?: RawSchedule[]; items?: RawSchedule[]; total?: number; limit?: number }>('/schedules')
+    const items = Array.isArray(raw) ? raw : raw.schedules || raw.items || []
+    return {
+      schedules: items.map(normalizeSchedule),
+      total: Array.isArray(raw) ? items.length : raw.total ?? items.length,
+      limit: Array.isArray(raw) ? undefined : raw.limit,
+    }
+  },
+  async createSchedule(body: ScheduleWriteRequest): Promise<Schedule> {
+    return normalizeSchedule(await request<RawSchedule>('/schedules', { method: 'POST', body: JSON.stringify(body) }))
+  },
+  async updateSchedule(id: string, body: ScheduleWriteRequest): Promise<Schedule> {
+    return normalizeSchedule(await request<RawSchedule>(`/schedules/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }))
+  },
+  async deleteSchedule(id: string): Promise<void> {
+    await request<unknown>(`/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  },
+  async bulkJobs(body: BulkJobRequest): Promise<BulkJobResult> {
+    if (!body.items.length || body.items.length > 50) throw new ApiError('批量操作一次只能处理 1–50 个目标', 400, 'invalid_bulk_size')
+    const raw = await request<{
+      results?: Array<{ targetId?: string; target_id?: string; ok?: boolean; job?: RawJob; error?: string; code?: string }>
+      items?: Array<{ targetId?: string; target_id?: string; ok?: boolean; job?: RawJob; error?: string; code?: string }>
+      accepted?: number
+      failed?: number
+    }>('/jobs/bulk', { method: 'POST', body: JSON.stringify(body) })
+    const items = raw.results || raw.items || []
+    const results = items.map(item => ({
+      targetId: item.targetId || item.target_id || '',
+      ok: item.ok ?? !item.error,
+      job: item.job ? normalizeJob(item.job) : undefined,
+      error: item.error,
+      code: item.code,
+    }))
+    return {
+      results,
+      accepted: raw.accepted ?? results.filter(item => item.ok).length,
+      failed: raw.failed ?? results.filter(item => !item.ok).length,
+    }
+  },
   testDingTalk: () => request<{ sent: boolean }>('/notifications/test', { method: 'POST' }),
   eventsUrl: (id: string) => `${API_BASE}/jobs/${encodeURIComponent(id)}/events`,
 }

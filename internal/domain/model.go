@@ -112,6 +112,37 @@ type ProviderExample struct {
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
+// Schedule is a non-sensitive rule that points at an already discovered
+// provider. Connection details and runtime input deliberately do not belong in
+// this model: the jobs manager resolves them only when an occurrence starts.
+type Schedule struct {
+	ID                       string     `json:"id"`
+	Name                     string     `json:"name"`
+	Enabled                  bool       `json:"enabled"`
+	CLI                      CLI        `json:"cli"`
+	ProviderID               string     `json:"providerId"`
+	ProviderName             string     `json:"providerName,omitempty"`
+	Mode                     Mode       `json:"mode"`
+	Timezone                 string     `json:"timezone"`
+	WeekdaysMask             int        `json:"weekdaysMask"`
+	StartMinute              int        `json:"startMinute"`
+	EndMinute                int        `json:"endMinute"`
+	UntilSuccess             bool       `json:"untilSuccess"`
+	TimeoutSeconds           int        `json:"timeoutSeconds"`
+	RetryIntervalSeconds     int        `json:"retryIntervalSeconds"`
+	KeepaliveIntervalSeconds int        `json:"keepaliveIntervalSeconds"`
+	FailureThreshold         int        `json:"failureThreshold"`
+	Model                    string     `json:"model,omitempty"`
+	FallbackModel            string     `json:"fallbackModel,omitempty"`
+	LastOccurrenceKey        string     `json:"lastOccurrenceKey,omitempty"`
+	LastStatus               string     `json:"lastStatus,omitempty"`
+	LastJobID                string     `json:"lastJobId,omitempty"`
+	LastOccurrenceAt         *time.Time `json:"lastOccurrenceAt,omitempty"`
+	NextRunAt                *time.Time `json:"nextRunAt,omitempty"`
+	CreatedAt                time.Time  `json:"createdAt"`
+	UpdatedAt                time.Time  `json:"updatedAt"`
+}
+
 type ConfigStatus struct {
 	CodexCLI     bool   `json:"codexCli"`
 	ClaudeCLI    bool   `json:"claudeCli"`

@@ -131,4 +131,77 @@ export interface EventListResult {
   total: number
 }
 
+export type ScheduleLastStatus = JobStatus | 'idle' | 'skipped'
+
+export interface Schedule {
+  id: string
+  name: string
+  enabled: boolean
+  cli: Cli
+  providerId: string
+  providerName?: string
+  mode: JobMode
+  timezone: string
+  weekdaysMask: number
+  startMinute: number
+  endMinute: number
+  untilSuccess: boolean
+  timeoutSeconds: number
+  retryIntervalSeconds: number
+  keepaliveIntervalSeconds: number
+  failureThreshold: number
+  model?: string
+  fallbackModel?: string
+  lastOccurrenceAt?: string
+  lastStatus?: ScheduleLastStatus
+  lastJobId?: string
+  nextRunAt?: string
+  createdAt?: string
+  updatedAt?: string
+}
+
+export type ScheduleWriteRequest = Omit<Schedule,
+  'id' | 'providerName' | 'lastOccurrenceAt' | 'lastStatus' | 'lastJobId' |
+  'nextRunAt' | 'createdAt' | 'updatedAt'>
+
+export interface ScheduleListResult {
+  schedules: Schedule[]
+  total: number
+  limit?: number
+}
+
+export type BulkJobAction = 'probe' | 'keepalive' | 'stop'
+
+export interface BulkJobTarget {
+  targetId: string
+  scheduleId?: string
+  cli: Cli
+  providerId: string
+  timeoutSeconds?: number
+  retryIntervalSeconds?: number
+  keepaliveIntervalSeconds?: number
+  failureThreshold?: number
+  model?: string
+  fallbackModel?: string
+}
+
+export interface BulkJobRequest {
+  action: BulkJobAction
+  items: BulkJobTarget[]
+}
+
+export interface BulkJobItemResult {
+  targetId: string
+  ok: boolean
+  job?: JobSummary
+  error?: string
+  code?: string
+}
+
+export interface BulkJobResult {
+  results: BulkJobItemResult[]
+  accepted: number
+  failed: number
+}
+
 export interface ApiErrorBody { error?: string; message?: string; code?: string }

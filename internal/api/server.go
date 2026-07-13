@@ -55,8 +55,16 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, s.jobs.List())
 	case p == "/api/jobs" && r.Method == http.MethodPost:
 		s.start(w, r)
+	case p == "/api/jobs/bulk" && r.Method == http.MethodPost:
+		s.bulkJobs(w, r)
 	case strings.HasPrefix(p, "/api/jobs/"):
 		s.jobRoute(w, r)
+	case p == "/api/schedules" && r.Method == http.MethodGet:
+		s.schedules(w)
+	case p == "/api/schedules" && r.Method == http.MethodPost:
+		s.createSchedule(w, r)
+	case strings.HasPrefix(p, "/api/schedules/"):
+		s.scheduleRoute(w, r)
 	case p == "/api/settings" && r.Method == http.MethodGet:
 		writeJSON(w, 200, s.jobs.Settings())
 	case p == "/api/settings" && r.Method == http.MethodPut:
@@ -71,6 +79,205 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "not_found", "API endpoint not found")
 	default:
 		s.web(w, r)
+	}
+}
+
+type scheduleInput struct {
+	Name                     string      `json:"name"`
+	Enabled                  bool        `json:"enabled"`
+	CLI                      domain.CLI  `json:"cli"`
+	ProviderID               string      `json:"providerId"`
+	Mode                     domain.Mode `json:"mode"`
+	Timezone                 string      `json:"timezone"`
+	WeekdaysMask             int         `json:"weekdaysMask"`
+	StartMinute              int         `json:"startMinute"`
+	EndMinute                int         `json:"endMinute"`
+	UntilSuccess             bool        `json:"untilSuccess"`
+	TimeoutSeconds           int         `json:"timeoutSeconds"`
+	RetryIntervalSeconds     int         `json:"retryIntervalSeconds"`
+	KeepaliveIntervalSeconds int         `json:"keepaliveIntervalSeconds"`
+	FailureThreshold         int         `json:"failureThreshold"`
+	Model                    string      `json:"model"`
+	FallbackModel            string      `json:"fallbackModel"`
+}
+
+func (v scheduleInput) schedule(id string) domain.Schedule {
+	return domain.Schedule{
+		ID: id, Name: v.Name, Enabled: v.Enabled, CLI: v.CLI, ProviderID: v.ProviderID,
+		Mode: v.Mode, Timezone: v.Timezone, WeekdaysMask: v.WeekdaysMask,
+		StartMinute: v.StartMinute, EndMinute: v.EndMinute, UntilSuccess: v.UntilSuccess,
+		TimeoutSeconds: v.TimeoutSeconds, RetryIntervalSeconds: v.RetryIntervalSeconds,
+		KeepaliveIntervalSeconds: v.KeepaliveIntervalSeconds,
+		FailureThreshold:         v.FailureThreshold, Model: v.Model, FallbackModel: v.FallbackModel,
+	}
+}
+
+func (s *Server) schedules(w http.ResponseWriter) {
+	if s.jobs == nil {
+		writeError(w, http.StatusServiceUnavailable, "schedules_unavailable", "schedule manager is unavailable")
+		return
+	}
+	values, err := s.jobs.ListSchedules()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "schedules_read_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, values)
+}
+
+func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request) {
+	if s.jobs == nil {
+		writeError(w, http.StatusServiceUnavailable, "schedules_unavailable", "schedule manager is unavailable")
+		return
+	}
+	var input scheduleInput
+	if !decode(w, r, &input) {
+		return
+	}
+	value, err := s.jobs.UpsertSchedule(input.schedule(""))
+	if err != nil {
+		scheduleError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, value)
+}
+
+func (s *Server) scheduleRoute(w http.ResponseWriter, r *http.Request) {
+	if s.jobs == nil {
+		writeError(w, http.StatusServiceUnavailable, "schedules_unavailable", "schedule manager is unavailable")
+		return
+	}
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/schedules/"), "/")
+	if id == "" || strings.Contains(id, "/") {
+		writeError(w, http.StatusNotFound, "schedule_not_found", "schedule not found")
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		var input scheduleInput
+		if !decode(w, r, &input) {
+			return
+		}
+		value, err := s.jobs.UpsertSchedule(input.schedule(id))
+		if err != nil {
+			scheduleError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, value)
+	case http.MethodDelete:
+		deleted, err := s.jobs.DeleteSchedule(id)
+		if err != nil {
+			scheduleError(w, err)
+			return
+		}
+		if !deleted {
+			writeError(w, http.StatusNotFound, "schedule_not_found", "schedule not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "id": id})
+	default:
+		writeError(w, http.StatusNotFound, "schedule_not_found", "schedule endpoint not found")
+	}
+}
+
+func scheduleError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrScheduleLimit) {
+		writeError(w, http.StatusConflict, "schedule_limit", err.Error())
+		return
+	}
+	writeError(w, http.StatusBadRequest, "invalid_schedule", err.Error())
+}
+
+type bulkJobItem struct {
+	TargetID                 string     `json:"targetId"`
+	ScheduleID               string     `json:"scheduleId"`
+	CLI                      domain.CLI `json:"cli"`
+	ProviderID               string     `json:"providerId"`
+	TimeoutSeconds           int        `json:"timeoutSeconds"`
+	RetryIntervalSeconds     int        `json:"retryIntervalSeconds"`
+	KeepaliveIntervalSeconds int        `json:"keepaliveIntervalSeconds"`
+	FailureThreshold         int        `json:"failureThreshold"`
+	Model                    string     `json:"model"`
+	FallbackModel            string     `json:"fallbackModel"`
+}
+
+type bulkJobResult struct {
+	TargetID string      `json:"targetId"`
+	OK       bool        `json:"ok"`
+	Job      *domain.Job `json:"job,omitempty"`
+	Error    string      `json:"error,omitempty"`
+	Code     string      `json:"code,omitempty"`
+}
+
+func (s *Server) bulkJobs(w http.ResponseWriter, r *http.Request) {
+	if s.jobs == nil {
+		writeError(w, http.StatusServiceUnavailable, "jobs_unavailable", "job manager is unavailable")
+		return
+	}
+	var request struct {
+		Action string        `json:"action"`
+		Items  []bulkJobItem `json:"items"`
+	}
+	if !decode(w, r, &request) {
+		return
+	}
+	if len(request.Items) == 0 || len(request.Items) > 50 {
+		writeError(w, http.StatusBadRequest, "invalid_bulk_items", "items must contain 1..50 entries")
+		return
+	}
+	if request.Action != "probe" && request.Action != "keepalive" && request.Action != "stop" {
+		writeError(w, http.StatusBadRequest, "invalid_bulk_action", "action must be probe, keepalive, or stop")
+		return
+	}
+	results := make([]bulkJobResult, 0, len(request.Items))
+	accepted := 0
+	for _, item := range request.Items {
+		result := bulkJobResult{TargetID: item.TargetID}
+		var err error
+		if request.Action == "stop" {
+			err = s.jobs.StopTarget(item.CLI, item.ProviderID, item.ScheduleID)
+		} else {
+			mode := domain.ModeProbe
+			if request.Action == "keepalive" {
+				mode = domain.ModeKeepalive
+			}
+			job, startErr := s.jobs.Start(domain.JobOptions{
+				Mode: mode, CLI: item.CLI, ProviderID: item.ProviderID,
+				TimeoutSeconds:           item.TimeoutSeconds,
+				RetryIntervalSeconds:     item.RetryIntervalSeconds,
+				KeepaliveIntervalSeconds: item.KeepaliveIntervalSeconds,
+				FailureThreshold:         item.FailureThreshold, Model: item.Model,
+				FallbackModel: item.FallbackModel,
+			})
+			err = startErr
+			if err == nil {
+				result.Job = &job
+			}
+		}
+		if err == nil {
+			result.OK = true
+			accepted++
+		} else {
+			result.Error = err.Error()
+			result.Code = bulkJobErrorCode(err)
+		}
+		results = append(results, result)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results, "accepted": accepted, "failed": len(results) - accepted})
+}
+
+func bulkJobErrorCode(err error) string {
+	switch {
+	case errors.Is(err, jobs.ErrLockConflict):
+		return "lock_conflict"
+	case errors.Is(err, jobs.ErrActiveLimit):
+		return "active_limit"
+	case errors.Is(err, jobs.ErrNotFound):
+		return "not_found"
+	case errors.Is(err, jobs.ErrShuttingDown):
+		return "shutting_down"
+	default:
+		return "invalid_job"
 	}
 }
 
@@ -203,6 +410,9 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(e, jobs.ErrLockConflict) {
 			code = 409
 			kind = "lock_conflict"
+		} else if errors.Is(e, jobs.ErrActiveLimit) {
+			code = http.StatusTooManyRequests
+			kind = "active_limit"
 		}
 		writeError(w, code, kind, e.Error())
 		return
