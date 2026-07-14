@@ -160,6 +160,19 @@ button { touch-action: manipulation; }
   cursor: pointer;
 }
 .provider-mini-list>div>button:hover { background: rgba(89, 219, 211, .13); border-color: rgba(89, 219, 211, .42); }
+.provider-mini-item .provider-mini-main { min-width: 150px; }
+.provider-mini-meta { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 5px 9px; }
+.provider-mini-meta em { display: inline-flex; align-items: center; gap: 4px; padding: 0; color: #71899c; background: transparent; font-size: 9px; }
+.provider-mini-meta svg { width: 11px; height: 11px; }
+.provider-runtime-state { flex: none !important; display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 999px; font-size: 9px; white-space: nowrap; }
+.provider-runtime-state i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.provider-runtime-state.running { color: var(--cyan); background: rgba(89, 219, 211, .08); }
+.provider-runtime-state.running i { animation: pulse 1.6s infinite; }
+.provider-runtime-state.success { color: var(--green); background: rgba(99, 221, 165, .08); }
+.provider-runtime-state.warning { color: var(--amber); background: rgba(255, 201, 120, .08); }
+.provider-runtime-state.danger { color: var(--danger); background: rgba(255, 101, 119, .08); }
+.provider-runtime-state.muted { color: #7c91a2; background: rgba(124, 145, 162, .08); }
+.provider-current { flex: none; }
 .provider-examples { border-top: 1px solid rgba(137, 180, 203, .14); background: rgba(4, 14, 22, .36); }
 .provider-examples>summary { min-height: 68px; padding: 12px 16px; display: flex; align-items: center; gap: 11px; color: inherit; cursor: pointer; list-style: none; transition: background .2s ease; }
 .provider-examples>summary::-webkit-details-marker { display: none; }

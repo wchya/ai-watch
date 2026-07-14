@@ -66,7 +66,7 @@ func (r *Runner) Run(ctx context.Context, jobID string, opts domain.JobOptions, 
 		}
 		args = append(args, opts.Prompt)
 		cmd = exec.Command(r.CodexBin, args...)
-		cmd.Env = replaceEnv(os.Environ(), map[string]string{"CODEX_HOME": temp, "OPENAI_API_KEY": cfg.APIKey})
+		cmd.Env = commandEnv(map[string]string{"HOME": temp, "CODEX_HOME": temp, "OPENAI_API_KEY": cfg.APIKey})
 	} else if opts.CLI == domain.CLIClaude {
 		args := []string{"--print", "--output-format", "text", "--no-session-persistence", "--safe-mode", "--permission-mode", "dontAsk", "--name", opts.SessionName, "--tools", ""}
 		if opts.Model != "" {
@@ -89,13 +89,14 @@ func (r *Runner) Run(ctx context.Context, jobID string, opts domain.JobOptions, 
 			vars["ANTHROPIC_AUTH_TOKEN"] = cfg.APIKey
 			vars["ANTHROPIC_API_KEY"] = cfg.APIKey
 		}
-		cmd.Env = replaceEnv(os.Environ(), vars)
+		vars["HOME"] = temp
+		cmd.Env = commandEnv(vars)
 		cmd.Stdin = strings.NewReader(opts.Prompt + "\n")
 	} else {
 		return Result{}, errors.New("unsupported cli")
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	collector := &streamWriter{limit: r.MaxOutputBytes, secret: cfg.APIKey, callback: output}
+	collector := &streamWriter{limit: r.MaxOutputBytes, secrets: sensitiveEnvValues(cmd.Env), callback: output}
 	cmd.Stdout = collector
 	cmd.Stderr = collector
 	if err := cmd.Start(); err != nil {
@@ -196,11 +197,18 @@ func (r *Runner) prepare(jobID string, cli domain.CLI, cfg domain.ResolvedConfig
 	return dir, nil
 }
 
-func replaceEnv(base []string, values map[string]string) []string {
+func commandEnv(values map[string]string) []string {
 	m := map[string]string{}
-	for _, v := range base {
-		if p := strings.SplitN(v, "=", 2); len(p) == 2 {
-			m[p[0]] = p[1]
+	for _, key := range []string{
+		"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR",
+		"SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+		"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_REGION", "AWS_PROFILE",
+		"GOOGLE_APPLICATION_CREDENTIALS", "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_PROJECT_ID",
+		"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+	} {
+		if value, ok := os.LookupEnv(key); ok && value != "" {
+			m[key] = value
 		}
 	}
 	for k, v := range values {
@@ -213,6 +221,21 @@ func replaceEnv(base []string, values map[string]string) []string {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+func sensitiveEnvValues(environment []string) []string {
+	values := make([]string, 0)
+	for _, entry := range environment {
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) != 2 || parts[1] == "" {
+			continue
+		}
+		name := strings.ToUpper(parts[0])
+		if strings.Contains(name, "KEY") || strings.Contains(name, "TOKEN") || strings.Contains(name, "SECRET") || strings.Contains(name, "PASSWORD") || strings.Contains(name, "CREDENTIAL") || strings.Contains(name, "AUTH") {
+			values = append(values, parts[1])
+		}
+	}
+	return values
 }
 
 func firstNonEmpty(values ...string) string {
@@ -228,7 +251,7 @@ type streamWriter struct {
 	mu       sync.Mutex
 	buf      []byte
 	limit    int
-	secret   string
+	secrets  []string
 	callback func(string)
 	pending  []byte
 }
@@ -239,7 +262,7 @@ func (w *streamWriter) Write(p []byte) (int, error) {
 	lastNewline := strings.LastIndexByte(string(w.pending), '\n')
 	var clean string
 	if lastNewline >= 0 {
-		clean = security.Redact(string(w.pending[:lastNewline+1]), w.secret)
+		clean = security.Redact(string(w.pending[:lastNewline+1]), w.secrets...)
 		w.pending = append([]byte(nil), w.pending[lastNewline+1:]...)
 		w.appendCleanLocked(clean)
 	} else if len(w.pending) > w.limit {
@@ -254,7 +277,7 @@ func (w *streamWriter) Write(p []byte) (int, error) {
 
 func (w *streamWriter) Flush() {
 	w.mu.Lock()
-	clean := security.Redact(string(w.pending), w.secret)
+	clean := security.Redact(string(w.pending), w.secrets...)
 	w.pending = nil
 	w.appendCleanLocked(clean)
 	w.mu.Unlock()

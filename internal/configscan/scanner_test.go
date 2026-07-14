@@ -44,9 +44,46 @@ func TestCCSwitchQueryUsesNativeReadOnlySQLite(t *testing.T) {
 	if err = db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	s := &Scanner{CCSwitchDB: database}
+	s := &Scanner{CCSwitchDB: database, RuntimeDir: t.TempDir()}
 	out, err := s.queryCCSwitch("SELECT id, name FROM providers")
 	if err != nil || !strings.Contains(string(out), `"id":"p1"`) {
 		t.Fatalf("native query failed: output=%q err=%v", out, err)
+	}
+}
+
+func TestProvidersFallBackToLastSanitizedCCSwitchSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	database := filepath.Join(dir, "cc-switch.db")
+	db, err := sql.Open("sqlite3", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE providers(
+		id TEXT, name TEXT, is_current BOOLEAN, settings_config TEXT,
+		app_type TEXT, sort_index INTEGER, created_at INTEGER
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"config":"model='gpt-test'\nmodel_provider='openai'","auth":{"OPENAI_API_KEY":"sk-cache-secret"}}`
+	if _, err = db.Exec(`INSERT INTO providers VALUES(?, ?, ?, ?, ?, ?, ?)`, "provider-1", "Cached Provider", true, settings, "codex", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s := &Scanner{CCSwitchDB: database, RuntimeDir: filepath.Join(dir, "runtime"), providerCache: map[domain.CLI][]domain.Provider{}}
+	providers, err := s.Providers(domain.CLICodex)
+	if err != nil || len(providers) != 1 || providers[0].Name != "Cached Provider" || strings.Contains(providers[0].MaskedKey, "cache-secret") {
+		t.Fatalf("initial providers=%+v err=%v", providers, err)
+	}
+	if err = os.WriteFile(database, []byte("not a sqlite database"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.queryMu.Lock()
+	s.queryCache = map[string]ccQueryCache{}
+	s.queryMu.Unlock()
+	providers, err = s.Providers(domain.CLICodex)
+	if err != nil || len(providers) != 1 || providers[0].Name != "Cached Provider" || s.CCSwitchWarning() == "" {
+		t.Fatalf("cached providers=%+v warning=%q err=%v", providers, s.CCSwitchWarning(), err)
 	}
 }

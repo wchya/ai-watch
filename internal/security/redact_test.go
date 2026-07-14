@@ -7,9 +7,14 @@ import (
 
 func TestRedact(t *testing.T) {
 	secret := "sk-supersecret1234"
-	got := Redact("Authorization: Bearer "+secret+" api_key="+secret, secret)
+	got := Redact("Authorization: Bearer "+secret+" api_key="+secret+" access_token=oauth-value refresh_token=refresh-value AWS_SECRET_ACCESS_KEY=aws-value", secret)
 	if strings.Contains(got, secret) {
 		t.Fatal("secret leaked")
+	}
+	for _, value := range []string{"oauth-value", "refresh-value", "aws-value"} {
+		if strings.Contains(got, value) {
+			t.Fatalf("credential leaked: %s", got)
+		}
 	}
 }
 func TestMask(t *testing.T) {

@@ -197,3 +197,33 @@ func TestGlobalActiveJobLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestScheduleResolveFailureIsVisibleAndRetryable(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	schedule, err := st.UpsertSchedule(domain.Schedule{
+		ID: "missing-provider", Name: "Missing", Enabled: true, CLI: domain.CLICodex,
+		ProviderID: "missing", Mode: domain.ModeProbe, Timezone: "UTC", WeekdaysMask: 127,
+		StartMinute: 0, EndMinute: 1440, UntilSuccess: true, TimeoutSeconds: 10,
+		RetryIntervalSeconds: 1, KeepaliveIntervalSeconds: 60, FailureThreshold: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(resolverFunc(func(domain.CLI, string) (domain.ResolvedConfig, error) {
+		return domain.ResolvedConfig{}, errors.New("provider source unavailable")
+	}), execFunc(nil), st)
+	defer m.Shutdown()
+	m.reconcileSchedules(time.Now().UTC())
+	current, err := st.GetSchedule(schedule.ID)
+	if err != nil || current.LastStatus != "resolve_failed" || current.LastOccurrenceAt == nil {
+		t.Fatalf("resolve failure was not recorded: schedule=%+v err=%v", current, err)
+	}
+	if err = m.FlushEvents(); err != nil {
+		t.Fatal(err)
+	}
+	events, err := st.ListEvents(store.EventFilter{Type: "schedule_resolve_failed", Limit: 10})
+	if err != nil || len(events) != 1 || events[0].ProviderID != "missing" {
+		t.Fatalf("resolve failure event missing: events=%+v err=%v", events, err)
+	}
+}

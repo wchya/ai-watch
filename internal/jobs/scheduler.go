@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"ai-watch/internal/domain"
+	"ai-watch/internal/store"
 )
 
 const scheduleReconcileInterval = 15 * time.Second
@@ -163,6 +164,12 @@ func (m *Manager) reconcileSchedules(now time.Time) {
 		}
 		cfg, resolveErr := m.resolver.Resolve(schedule.CLI, schedule.ProviderID)
 		if resolveErr != nil {
+			if schedule.LastStatus != "resolve_failed" || schedule.LastOccurrenceAt == nil || now.Sub(*schedule.LastOccurrenceAt) >= 5*time.Minute {
+				if markErr := m.store.MarkScheduleRun(schedule.ID, occurrence, "resolve_failed", "", now); markErr != nil {
+					m.persistenceErr.Store(markErr.Error())
+				}
+				m.recordOperationalEvent(store.Event{At: now, Type: "schedule_resolve_failed", Level: "error", ProviderID: schedule.ProviderID, Message: "计划任务暂时无法解析 Provider，将自动重试"})
+			}
 			continue
 		}
 		identity := cfg.LockIdentity

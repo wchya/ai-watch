@@ -29,6 +29,22 @@ export interface Provider {
   maskedApiKey?: string
   source?: 'current' | 'cc-switch'
   available?: boolean
+  state?: ProviderState
+}
+
+export interface ProviderState {
+  status: 'idle' | 'queued' | 'running' | 'recovering' | JobStatus
+  phase?: JobPhase
+  latestAttempt?: AttemptStatus
+  activeJobId?: string
+  attempts: number
+  consecutiveFailures?: number
+  lastSuccessAt?: string
+  lastFailureAt?: string
+  scheduleEnabled: boolean
+  scheduleName?: string
+  scheduleMode?: JobMode
+  nextScheduledAt?: string
 }
 
 export interface ProviderExample {

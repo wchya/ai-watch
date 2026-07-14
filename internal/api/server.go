@@ -452,6 +452,17 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "provider_discovery", e.Error())
 		return
 	}
+	if s.jobs != nil {
+		states := s.jobs.ProviderStates()
+		for index := range v {
+			if state, ok := jobs.ProviderStateFor(states, v[index].CLI, v[index].ID); ok {
+				v[index].State = &state
+			}
+		}
+	}
+	if s.scanner.CCSwitchWarning() != "" {
+		w.Header().Set("X-AI-Watch-Warning", "cc-switch-degraded")
+	}
 	writeJSON(w, 200, v)
 }
 func (s *Server) start(w http.ResponseWriter, r *http.Request) {

@@ -485,6 +485,27 @@ func (m *Manager) publishLocked(rt *runtime, typ, msg string, data map[string]an
 		}
 	}
 }
+
+func (m *Manager) recordOperationalEvent(event store.Event) {
+	m.mu.RLock()
+	if m.closing {
+		m.mu.RUnlock()
+		return
+	}
+	settings := m.settings
+	m.mu.RUnlock()
+	item := eventWrite{
+		event: event,
+		retention: store.EventRetention{
+			MaxAge:  time.Duration(settings.EventRetentionDays) * 24 * time.Hour,
+			MaxRows: settings.EventRetentionRows, MaxBytes: settings.EventRetentionBytes,
+		},
+	}
+	select {
+	case m.eventQueue <- item:
+	case <-m.ctx.Done():
+	}
+}
 func (m *Manager) clearOutput(rt *runtime) { m.mu.Lock(); m.clearOutputLocked(rt); m.mu.Unlock() }
 func (m *Manager) clearOutputLocked(rt *runtime) {
 	kept := rt.events[:0]

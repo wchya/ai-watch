@@ -6,7 +6,7 @@ import (
 )
 
 var credentialPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)(api[_ -]?key|auth[_ -]?token|authorization)(\s*[=:]\s*|\s+bearer\s+)[^\s"']+`),
+	regexp.MustCompile(`(?i)(api[_ -]?key|auth[_ -]?token|access[_ -]?token|refresh[_ -]?token|authorization|aws[_ -]?secret[_ -]?access[_ -]?key|client[_ -]?secret|password|webhook)(\s*[=:]\s*|\s+bearer\s+)[^\s"']+`),
 	regexp.MustCompile(`(?i)bearer\s+[a-z0-9._~+/=-]{8,}`),
 	regexp.MustCompile(`\b(sk-[A-Za-z0-9_-]{8,})\b`),
 }

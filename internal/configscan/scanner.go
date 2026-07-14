@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"ai-watch/internal/domain"
@@ -23,12 +25,23 @@ import (
 )
 
 type Scanner struct {
-	CodexDir   string
-	ClaudeDir  string
-	CCSwitchDB string
-	CodexBin   string
-	ClaudeBin  string
-	SQLiteBin  string
+	CodexDir        string
+	ClaudeDir       string
+	CCSwitchDB      string
+	CodexBin        string
+	ClaudeBin       string
+	SQLiteBin       string
+	RuntimeDir      string
+	mu              sync.RWMutex
+	queryMu         sync.Mutex
+	queryCache      map[string]ccQueryCache
+	providerCache   map[domain.CLI][]domain.Provider
+	ccSwitchWarning string
+}
+
+type ccQueryCache struct {
+	value []byte
+	at    time.Time
 }
 
 func New() *Scanner {
@@ -38,6 +51,7 @@ func New() *Scanner {
 		ClaudeDir:  value("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude")),
 		CCSwitchDB: value("CCSWITCH_DB", filepath.Join(home, ".cc-switch", "cc-switch.db")),
 		CodexBin:   value("CODEX_BIN", "codex"), ClaudeBin: value("CLAUDE_BIN", "claude"), SQLiteBin: value("SQLITE_BIN", "sqlite3"),
+		RuntimeDir: value("AI_WATCH_RUNTIME_DIR", "/run/ai-watch"), providerCache: map[domain.CLI][]domain.Provider{}, queryCache: map[string]ccQueryCache{},
 	}
 }
 
@@ -75,12 +89,15 @@ func (s *Scanner) Providers(cli domain.CLI) ([]domain.Provider, error) {
 		providers = append(providers, domain.Provider{ID: "", Name: "当前 CLI 配置", CLI: cli, Current: true})
 	}
 	if !exists(s.CCSwitchDB) {
-		return providers, nil
+		return append(providers, s.cachedProviders(cli)...), nil
 	}
 	q := fmt.Sprintf(`SELECT id, name, is_current, settings_config FROM providers WHERE app_type='%s' ORDER BY COALESCE(sort_index,999999), created_at, id;`, sqlQuote(string(cli)))
 	out, err := s.queryCCSwitch(q)
 	if err != nil {
-		return nil, fmt.Errorf("query cc switch: %w", err)
+		s.mu.Lock()
+		s.ccSwitchWarning = err.Error()
+		s.mu.Unlock()
+		return append(providers, s.cachedProviders(cli)...), nil
 	}
 	var rows []struct {
 		ID       string `json:"id"`
@@ -91,6 +108,7 @@ func (s *Scanner) Providers(cli domain.CLI) ([]domain.Provider, error) {
 	if err := json.Unmarshal(out, &rows); err != nil {
 		return nil, fmt.Errorf("decode cc switch rows: %w", err)
 	}
+	ccProviders := make([]domain.Provider, 0, len(rows))
 	for _, row := range rows {
 		var raw struct {
 			Config string            `json:"config"`
@@ -108,9 +126,28 @@ func (s *Scanner) Providers(cli domain.CLI) ([]domain.Provider, error) {
 			p.BaseURL = raw.Env["ANTHROPIC_BASE_URL"]
 			p.MaskedKey = security.Mask(first(raw.Env["ANTHROPIC_AUTH_TOKEN"], raw.Env["ANTHROPIC_API_KEY"], raw.Env["OPENROUTER_API_KEY"], raw.Env["GOOGLE_API_KEY"]))
 		}
-		providers = append(providers, p)
+		ccProviders = append(ccProviders, p)
 	}
-	return providers, nil
+	s.mu.Lock()
+	if s.providerCache == nil {
+		s.providerCache = map[domain.CLI][]domain.Provider{}
+	}
+	s.providerCache[cli] = append([]domain.Provider(nil), ccProviders...)
+	s.ccSwitchWarning = ""
+	s.mu.Unlock()
+	return append(providers, ccProviders...), nil
+}
+
+func (s *Scanner) CCSwitchWarning() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ccSwitchWarning
+}
+
+func (s *Scanner) cachedProviders(cli domain.CLI) []domain.Provider {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]domain.Provider(nil), s.providerCache[cli]...)
 }
 
 func sqliteBool(value any) bool {
@@ -202,12 +239,30 @@ func (s *Scanner) ccProvider(cli domain.CLI, id string) (domain.ResolvedConfig, 
 
 func (s *Scanner) queryCCSwitch(query string) ([]byte, error) {
 	const attempts = 3
+	s.queryMu.Lock()
+	defer s.queryMu.Unlock()
+	if cached, ok := s.queryCache[query]; ok && time.Since(cached.at) < 2*time.Second {
+		return append([]byte(nil), cached.value...), nil
+	}
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
+		snapshot, snapshotErr := s.copyCCSwitchSnapshot()
+		if snapshotErr != nil {
+			lastErr = sanitizeSQLiteError(snapshotErr, s.CCSwitchDB)
+			if attempt+1 < attempts {
+				time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+			}
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		out, err := querySQLiteJSON(ctx, s.CCSwitchDB, query)
+		out, err := querySQLiteJSON(ctx, snapshot, query)
 		cancel()
+		_ = os.Remove(snapshot)
 		if err == nil {
+			if s.queryCache == nil {
+				s.queryCache = map[string]ccQueryCache{}
+			}
+			s.queryCache[query] = ccQueryCache{value: append([]byte(nil), out...), at: time.Now()}
 			return out, nil
 		}
 		if ctx.Err() != nil {
@@ -222,11 +277,60 @@ func (s *Scanner) queryCCSwitch(query string) ([]byte, error) {
 	return nil, lastErr
 }
 
+func (s *Scanner) copyCCSwitchSnapshot() (string, error) {
+	runtimeDir := s.RuntimeDir
+	if runtimeDir == "" {
+		runtimeDir = os.TempDir()
+	}
+	dir := filepath.Join(runtimeDir, "cc-switch-snapshot")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("prepare CC Switch snapshot directory: %w", err)
+	}
+	before, err := os.Stat(s.CCSwitchDB)
+	if err != nil {
+		return "", err
+	}
+	source, err := os.Open(s.CCSwitchDB)
+	if err != nil {
+		return "", err
+	}
+	defer source.Close()
+	target, err := os.CreateTemp(dir, "cc-switch-*.db")
+	if err != nil {
+		return "", err
+	}
+	name := target.Name()
+	keep := false
+	defer func() {
+		_ = target.Close()
+		if !keep {
+			_ = os.Remove(name)
+		}
+	}()
+	if err = target.Chmod(0600); err != nil {
+		return "", err
+	}
+	written, err := io.Copy(target, source)
+	if err != nil {
+		return "", err
+	}
+	if err = target.Close(); err != nil {
+		return "", err
+	}
+	after, err := os.Stat(s.CCSwitchDB)
+	if err != nil {
+		return "", err
+	}
+	if written != before.Size() || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) || !os.SameFile(before, after) {
+		return "", errors.New("CC Switch database changed while creating snapshot")
+	}
+	keep = true
+	return name, nil
+}
+
 func querySQLiteJSON(ctx context.Context, databasePath, query string) ([]byte, error) {
-	// Docker Desktop bind mounts do not reliably forward SQLite file locks from
-	// macOS into the Linux VM. CC Switch uses DELETE journaling and replaces the
-	// database atomically, so immutable read-only snapshots avoid cross-VM lock
-	// waits; the outer retry handles the brief replacement window.
+	// The caller provides a private stable copy in the runtime tmpfs. Immutable
+	// mode avoids lock operations against that disposable snapshot.
 	dsn := (&url.URL{Scheme: "file", Path: databasePath, RawQuery: "mode=ro&immutable=1&_query_only=true"}).String()
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {

@@ -90,13 +90,29 @@ type ResolvedConfig struct {
 }
 
 type Provider struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	CLI       CLI    `json:"cli"`
-	Current   bool   `json:"current"`
-	Model     string `json:"model,omitempty"`
-	BaseURL   string `json:"baseUrl,omitempty"`
-	MaskedKey string `json:"maskedKey,omitempty"`
+	ID        string         `json:"id"`
+	Name      string         `json:"name"`
+	CLI       CLI            `json:"cli"`
+	Current   bool           `json:"current"`
+	Model     string         `json:"model,omitempty"`
+	BaseURL   string         `json:"baseUrl,omitempty"`
+	MaskedKey string         `json:"maskedKey,omitempty"`
+	State     *ProviderState `json:"state,omitempty"`
+}
+
+type ProviderState struct {
+	Status              string        `json:"status"`
+	Phase               JobPhase      `json:"phase,omitempty"`
+	LatestAttempt       AttemptStatus `json:"latestAttempt,omitempty"`
+	ActiveJobID         string        `json:"activeJobId,omitempty"`
+	Attempts            int           `json:"attempts"`
+	ConsecutiveFailures int           `json:"consecutiveFailures,omitempty"`
+	LastSuccessAt       *time.Time    `json:"lastSuccessAt,omitempty"`
+	LastFailureAt       *time.Time    `json:"lastFailureAt,omitempty"`
+	ScheduleEnabled     bool          `json:"scheduleEnabled"`
+	ScheduleName        string        `json:"scheduleName,omitempty"`
+	ScheduleMode        Mode          `json:"scheduleMode,omitempty"`
+	NextScheduledAt     *time.Time    `json:"nextScheduledAt,omitempty"`
 }
 
 // ProviderExample is a non-sensitive connection template. Credentials are

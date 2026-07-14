@@ -2,6 +2,7 @@ package runner
 
 import (
 	"ai-watch/internal/domain"
+	"ai-watch/internal/security"
 	"context"
 	"os"
 	"path/filepath"
@@ -53,8 +54,7 @@ func TestCodexRunPassesRequestedModel(t *testing.T) {
 	root := t.TempDir()
 	bin := filepath.Join(root, "codex")
 	argsFile := filepath.Join(root, "args.txt")
-	t.Setenv("AI_WATCH_TEST_ARGS", argsFile)
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$AI_WATCH_TEST_ARGS\"\nprintf 'READY'\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + argsFile + "'\nprintf 'READY'\n"
 	if err := os.WriteFile(bin, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestCleanupRuntimeJobsRemovesOnlyStaleJobs(t *testing.T) {
 func TestStreamWriterRedactsSecretAcrossWrites(t *testing.T) {
 	secret := "sk-super-secret-cross-chunk"
 	var streamed strings.Builder
-	w := &streamWriter{limit: 4096, secret: secret, callback: func(value string) { streamed.WriteString(value) }}
+	w := &streamWriter{limit: 4096, secrets: []string{secret}, callback: func(value string) { streamed.WriteString(value) }}
 	_, _ = w.Write([]byte("token=" + secret[:9]))
 	_, _ = w.Write([]byte(secret[9:] + " READY\nnext=" + secret[:7]))
 	_, _ = w.Write([]byte(secret[7:]))
@@ -137,5 +137,23 @@ func TestStreamWriterRedactsSecretAcrossWrites(t *testing.T) {
 		if !strings.Contains(output, "[REDACTED]") {
 			t.Fatalf("redaction marker missing: %q", output)
 		}
+	}
+}
+
+func TestCommandEnvExcludesUnrelatedServiceSecretsAndRedactsAllowedSecrets(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	t.Setenv("DINGTALK_WEBHOOK_URL", "https://example.test/robot?access_token=service-secret")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret-value")
+	environment := commandEnv(map[string]string{"HOME": "/tmp/job", "ANTHROPIC_AUTH_TOKEN": "provider-secret"})
+	joined := strings.Join(environment, "\n")
+	if strings.Contains(joined, "DINGTALK_WEBHOOK_URL") || strings.Contains(joined, "service-secret") {
+		t.Fatalf("unrelated service secret reached CLI environment: %s", joined)
+	}
+	if !strings.Contains(joined, "AWS_SECRET_ACCESS_KEY=aws-secret-value") || !strings.Contains(joined, "ANTHROPIC_AUTH_TOKEN=provider-secret") {
+		t.Fatalf("provider environment was not preserved: %s", joined)
+	}
+	redacted := security.Redact("aws-secret-value provider-secret", sensitiveEnvValues(environment)...)
+	if strings.Contains(redacted, "aws-secret-value") || strings.Contains(redacted, "provider-secret") {
+		t.Fatalf("allowed provider secret was not redacted: %s", redacted)
 	}
 }

@@ -25,7 +25,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
-interface RawProvider { id: string; name: string; cli: 'codex' | 'claude'; current: boolean; model?: string; baseUrl?: string; maskedKey?: string }
+interface RawProvider { id: string; name: string; cli: 'codex' | 'claude'; current: boolean; model?: string; baseUrl?: string; maskedKey?: string; state?: Provider['state'] }
 interface RawJob {
   id: string; mode: 'probe' | 'keepalive'; cli: 'codex' | 'claude'; providerId?: string;
   runOnce?: boolean;
