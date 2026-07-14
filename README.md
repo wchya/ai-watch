@@ -1,6 +1,6 @@
 # AI Watch
 
-AI Watch 是 `ai-watch.sh` 的 Docker Web 客户端。它在容器内运行 Codex 和 Claude CLI，提供测活、保活、当前配置与 CC Switch Provider 选择、任务停止、实时状态、通知和设置等操作。
+AI Watch 是 `ai-watch.sh` 的 Docker Web 客户端。它在容器内运行 Codex 和 Claude CLI，使用同一 Compose 网络中的 Redis 保存热配置、事件和运行元数据，提供测活、保活、当前配置与 CC Switch Provider 选择、任务停止、实时状态、通知和设置等操作。
 
 Web 界面默认只允许本机访问：<http://127.0.0.1:8787>。
 
@@ -78,6 +78,11 @@ CC_SWITCH_CONFIG_DIR=/Users/your-name/.cc-switch
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `AI_WATCH_PORT` | `8787` | 宿主机本地端口，仍只绑定 `127.0.0.1` |
+| `AI_WATCH_REDIS_URL` | `redis://redis:6379/0` | AI Watch 使用的 Redis 地址；生产 Compose 中为必填依赖，不映射到宿主机 |
+| `AI_WATCH_REDIS_REQUIRED` | `true` | Redis 不可用时阻止 AI Watch 进入就绪状态 |
+| `REDIS_IMAGE` | `redis:7-alpine` | Redis 镜像，可替换为内部镜像仓库地址 |
+| `REDIS_MEM_LIMIT` | `512m` | Redis 容器的 Docker 内存上限 |
+| `REDIS_MAX_MEMORY` | `384mb` | Redis `maxmemory`，低于容器上限以留出 AOF/运行开销 |
 | `CODEX_CONFIG_DIR` | `${HOME}/.codex` | Codex 配置绝对路径 |
 | `CLAUDE_CONFIG_DIR` | `${HOME}/.claude` | Claude 配置绝对路径 |
 | `CC_SWITCH_CONFIG_DIR` | `${HOME}/.cc-switch` | CC Switch 配置绝对路径 |
@@ -102,12 +107,34 @@ docker compose up -d
 - 运行期间只在受限大小的内存缓冲中保存实时日志，用于 SSE 推送和短暂断线重连。
 - 每轮分类完成后清空对应输出；整个任务结束后立即销毁剩余内存日志。
 - `/run/ai-watch` 是 64 MiB 的 `tmpfs`。任务临时配置、凭据副本和运行文件只存在内存中，容器停止后必然消失。
-- `/data/ai-watch.db` 使用内嵌 SQLite 保存热更新设置、脱敏任务摘要、非敏感供应商示例和有界结构化事件，不保存 Prompt、API Key、Webhook 或 CLI 原始输出。
+- Redis 使用 AOF `everysec` 保存热更新设置、脱敏任务摘要、非敏感供应商示例和有界结构化事件，不保存 Prompt、API Key、Webhook 或 CLI 原始输出；SQLite 仅作为升级迁移的本地备份来源。
 - 结构化事件默认最多保留 30 天、5000 条和 8 MiB 逻辑内容，三项上限可在“设置与通知”中热更新。
 - “事件记录”页面支持筛选和手动清空；清空事件不会删除设置、供应商示例或任务摘要。
 - 从旧版本升级时，`settings.json` 和 `summaries.json` 会一次性导入 SQLite，成功后自动删除旧文件，避免重复数据长期残留。
 - Codex、Claude 和 CC Switch 的宿主机目录均为只读挂载。
 - 服务端口固定映射到 `127.0.0.1`，不会默认暴露到局域网或公网。
+- Redis 没有 `ports` 映射，仅能通过 Compose 内部网络访问；AOF 数据保存在独立的 `ai-watch-redis-data` volume。
+
+### Redis 启动顺序与持久化
+
+Compose 会先启动 `redis:7-alpine`，等待 `redis-cli ping` 健康检查通过后才启动 AI Watch。AI Watch 的存储层随后连接 Redis、执行一次性命名空间初始化/旧 SQLite 迁移，并预热设置、Provider、计划任务和有界事件索引；预热失败时不会把 HTTP 服务标记为可用。
+
+Redis 使用 AOF `appendfsync everysec`，并设置 `noeviction`：配置和运行元数据不会因为内存压力被静默淘汰。应用层仍负责事件、摘要和计划运行快照的数量/时间/字节上限；Redis 容器本身限制为 512 MiB（默认），AOF 文件位于命名卷中。
+
+查看 Redis 状态（不暴露端口，仅通过 Compose exec）：
+
+```bash
+docker compose ps redis
+docker compose exec redis redis-cli ping
+docker compose logs --tail=100 redis
+```
+
+删除 Redis 持久化数据前请确认已完成备份：
+
+```bash
+docker compose down
+docker volume rm ai-watch_ai-watch-redis-data
+```
 
 ## 容器结构
 

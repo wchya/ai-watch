@@ -1,6 +1,42 @@
 name: ai-watch
 
 services:
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: ${REDIS_MEM_LIMIT:-512m}
+    pids_limit: 128
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - ${REDIS_MAX_MEMORY:-384mb}
+      - --maxmemory-policy
+      - noeviction
+      - --save
+      - ""
+    volumes:
+      - ai-watch-redis-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      start_period: 5s
+      retries: 12
+
   ai-watch:
     build:
       context: .
@@ -13,6 +49,9 @@ services:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
     image: ai-watch:local
     restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
     stop_grace_period: 30s
     pids_limit: 256
     mem_limit: 2g
@@ -28,6 +67,8 @@ services:
       AI_WATCH_DATA_DIR: /data
       AI_WATCH_RUNTIME_DIR: /run/ai-watch
       AI_WATCH_WEB_DIR: /app/web
+      AI_WATCH_REDIS_URL: ${AI_WATCH_REDIS_URL:-redis://redis:6379/0}
+      AI_WATCH_REDIS_REQUIRED: "true"
       DINGTALK_WEBHOOK_URL: ${DINGTALK_WEBHOOK_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       CODEX_API_KEY: ${CODEX_API_KEY:-}
@@ -81,3 +122,4 @@ services:
 
 volumes:
   ai-watch-data:
+  ai-watch-redis-data:
