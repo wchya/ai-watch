@@ -129,6 +129,45 @@ type ProviderExample struct {
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
+// ManualProvider is a user-managed provider configuration. APIKey is available
+// only inside the trusted resolver/store boundary and is never serialized.
+type ManualProvider struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	CLI       CLI       `json:"cli"`
+	BaseURL   string    `json:"baseUrl"`
+	Model     string    `json:"model,omitempty"`
+	Provider  string    `json:"provider,omitempty"`
+	APIKey    string    `json:"-"`
+	HasAPIKey bool      `json:"hasApiKey"`
+	MaskedKey string    `json:"maskedKey,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type ManualProviderWrite struct {
+	Name        string `json:"name"`
+	CLI         CLI    `json:"cli"`
+	BaseURL     string `json:"baseUrl"`
+	Model       string `json:"model,omitempty"`
+	Provider    string `json:"provider,omitempty"`
+	APIKey      string `json:"apiKey,omitempty"`
+	ClearAPIKey bool   `json:"clearApiKey,omitempty"`
+}
+
+type DingTalkConfig struct {
+	WebhookURL    string     `json:"-"`
+	Configured    bool       `json:"configured"`
+	Source        string     `json:"source"`
+	MaskedWebhook string     `json:"maskedWebhook,omitempty"`
+	UpdatedAt     *time.Time `json:"updatedAt,omitempty"`
+}
+
+type DingTalkConfigWrite struct {
+	WebhookURL  string `json:"webhookUrl,omitempty"`
+	ClearStored bool   `json:"clearStored,omitempty"`
+}
+
 // Schedule is a non-sensitive rule that points at an already discovered
 // provider. Connection details and runtime input deliberately do not belong in
 // this model: the jobs manager resolves them only when an occurrence starts.
