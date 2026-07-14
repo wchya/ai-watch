@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"ai-watch/internal/domain"
 )
@@ -83,6 +84,10 @@ func TestProvidersFallBackToLastSanitizedCCSwitchSnapshot(t *testing.T) {
 	s.queryCache = map[string]ccQueryCache{}
 	s.queryMu.Unlock()
 	providers, err = s.Providers(domain.CLICodex)
+	deadline := time.Now().Add(2 * time.Second)
+	for s.CCSwitchWarning() == "" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err != nil || len(providers) != 1 || providers[0].Name != "Cached Provider" || s.CCSwitchWarning() == "" {
 		t.Fatalf("cached providers=%+v warning=%q err=%v", providers, s.CCSwitchWarning(), err)
 	}

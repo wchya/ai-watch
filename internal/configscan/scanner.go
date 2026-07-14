@@ -36,6 +36,7 @@ type Scanner struct {
 	queryMu         sync.Mutex
 	queryCache      map[string]ccQueryCache
 	providerCache   map[domain.CLI][]domain.Provider
+	providerRefresh map[domain.CLI]bool
 	ccSwitchWarning string
 }
 
@@ -51,7 +52,7 @@ func New() *Scanner {
 		ClaudeDir:  value("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude")),
 		CCSwitchDB: value("CCSWITCH_DB", filepath.Join(home, ".cc-switch", "cc-switch.db")),
 		CodexBin:   value("CODEX_BIN", "codex"), ClaudeBin: value("CLAUDE_BIN", "claude"), SQLiteBin: value("SQLITE_BIN", "sqlite3"),
-		RuntimeDir: value("AI_WATCH_RUNTIME_DIR", "/run/ai-watch"), providerCache: map[domain.CLI][]domain.Provider{}, queryCache: map[string]ccQueryCache{},
+		RuntimeDir: value("AI_WATCH_RUNTIME_DIR", "/run/ai-watch"), providerCache: map[domain.CLI][]domain.Provider{}, providerRefresh: map[domain.CLI]bool{}, queryCache: map[string]ccQueryCache{},
 	}
 }
 
@@ -91,13 +92,55 @@ func (s *Scanner) Providers(cli domain.CLI) ([]domain.Provider, error) {
 	if !exists(s.CCSwitchDB) {
 		return append(providers, s.cachedProviders(cli)...), nil
 	}
+	refreshDone := s.refreshProviders(cli)
+	cached := s.cachedProviders(cli)
+	if len(cached) == 0 {
+		select {
+		case <-refreshDone:
+			cached = s.cachedProviders(cli)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	return append(providers, cached...), nil
+}
+
+func (s *Scanner) refreshProviders(cli domain.CLI) <-chan struct{} {
+	done := make(chan struct{})
+	s.mu.Lock()
+	if s.providerRefresh == nil {
+		s.providerRefresh = map[domain.CLI]bool{}
+	}
+	if s.providerRefresh[cli] {
+		s.mu.Unlock()
+		close(done)
+		return done
+	}
+	s.providerRefresh[cli] = true
+	s.mu.Unlock()
+	go func() {
+		defer close(done)
+		providers, err := s.loadCCProviders(cli)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.providerRefresh[cli] = false
+		if err != nil {
+			s.ccSwitchWarning = err.Error()
+			return
+		}
+		if s.providerCache == nil {
+			s.providerCache = map[domain.CLI][]domain.Provider{}
+		}
+		s.providerCache[cli] = append([]domain.Provider(nil), providers...)
+		s.ccSwitchWarning = ""
+	}()
+	return done
+}
+
+func (s *Scanner) loadCCProviders(cli domain.CLI) ([]domain.Provider, error) {
 	q := fmt.Sprintf(`SELECT id, name, is_current, settings_config FROM providers WHERE app_type='%s' ORDER BY COALESCE(sort_index,999999), created_at, id;`, sqlQuote(string(cli)))
 	out, err := s.queryCCSwitch(q)
 	if err != nil {
-		s.mu.Lock()
-		s.ccSwitchWarning = err.Error()
-		s.mu.Unlock()
-		return append(providers, s.cachedProviders(cli)...), nil
+		return nil, err
 	}
 	var rows []struct {
 		ID       string `json:"id"`
@@ -128,14 +171,7 @@ func (s *Scanner) Providers(cli domain.CLI) ([]domain.Provider, error) {
 		}
 		ccProviders = append(ccProviders, p)
 	}
-	s.mu.Lock()
-	if s.providerCache == nil {
-		s.providerCache = map[domain.CLI][]domain.Provider{}
-	}
-	s.providerCache[cli] = append([]domain.Provider(nil), ccProviders...)
-	s.ccSwitchWarning = ""
-	s.mu.Unlock()
-	return append(providers, ccProviders...), nil
+	return ccProviders, nil
 }
 
 func (s *Scanner) CCSwitchWarning() string {
@@ -310,9 +346,26 @@ func (s *Scanner) copyCCSwitchSnapshot() (string, error) {
 	if err = target.Chmod(0600); err != nil {
 		return "", err
 	}
-	written, err := io.Copy(target, source)
-	if err != nil {
-		return "", err
+	type copyResult struct {
+		written int64
+		err     error
+	}
+	copied := make(chan copyResult, 1)
+	go func() {
+		written, copyErr := io.Copy(target, source)
+		copied <- copyResult{written: written, err: copyErr}
+	}()
+	var written int64
+	select {
+	case result := <-copied:
+		written, err = result.written, result.err
+		if err != nil {
+			return "", err
+		}
+	case <-time.After(1500 * time.Millisecond):
+		_ = source.Close()
+		_ = target.Close()
+		return "", errors.New("CC Switch snapshot copy timed out")
 	}
 	if err = target.Close(); err != nil {
 		return "", err
