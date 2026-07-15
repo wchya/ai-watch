@@ -230,6 +230,7 @@ func scheduleJobOptions(schedule domain.Schedule) domain.JobOptions {
 		KeepaliveIntervalSeconds: schedule.KeepaliveIntervalSeconds,
 		FailureThreshold:         schedule.FailureThreshold, Model: schedule.Model,
 		FallbackModel: schedule.FallbackModel,
+		TriggerSource: "scheduler", ClientIP: "scheduler",
 	}
 }
 

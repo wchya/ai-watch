@@ -92,6 +92,23 @@ func TestCodexRunPassesRequestedModel(t *testing.T) {
 	}
 }
 
+func TestCodexRunReadsPromptOnlyFromStdin(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "codex")
+	script := "#!/bin/sh\nlast=''\nfor arg in \"$@\"; do last=\"$arg\"; done\n[ \"$last\" = '-' ] || { printf 'missing-stdin-marker:%s' \"$last\"; exit 8; }\nIFS= read -r value || { printf 'missing-stdin'; exit 9; }\n[ \"$value\" = 'probe' ] || { printf 'wrong-stdin:%s' \"$value\"; exit 10; }\nprintf 'READY'\n"
+	if err := os.WriteFile(bin, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{CodexBin: bin, RuntimeDir: filepath.Join(root, "run"), MaxOutputBytes: 4096}
+	res, err := r.Run(context.Background(), "stdin-prompt", domain.JobOptions{CLI: domain.CLICodex, Prompt: "probe"}, domain.ResolvedConfig{Source: "cc-switch", Provider: "openai", CodexConfig: "model_provider='openai'"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode != 0 || !strings.Contains(res.Output, "READY") {
+		t.Fatalf("codex prompt was not passed via stdin: %+v", res)
+	}
+}
+
 func TestCleanupRuntimeJobsRemovesOnlyStaleJobs(t *testing.T) {
 	root := t.TempDir()
 	runtimeDir := filepath.Join(root, "runtime")
@@ -144,7 +161,7 @@ func TestCommandEnvExcludesUnrelatedServiceSecretsAndRedactsAllowedSecrets(t *te
 	t.Setenv("PATH", "/usr/bin")
 	t.Setenv("DINGTALK_WEBHOOK_URL", "https://example.test/robot?access_token=service-secret")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "aws-secret-value")
-	environment := commandEnv(map[string]string{"HOME": "/tmp/job", "ANTHROPIC_AUTH_TOKEN": "provider-secret"})
+	environment := commandEnv(map[string]string{"HOME": "/tmp/job", "ANTHROPIC_AUTH_TOKEN": "provider-secret"}, domain.ResolvedConfig{})
 	joined := strings.Join(environment, "\n")
 	if strings.Contains(joined, "DINGTALK_WEBHOOK_URL") || strings.Contains(joined, "service-secret") {
 		t.Fatalf("unrelated service secret reached CLI environment: %s", joined)
@@ -156,4 +173,92 @@ func TestCommandEnvExcludesUnrelatedServiceSecretsAndRedactsAllowedSecrets(t *te
 	if strings.Contains(redacted, "aws-secret-value") || strings.Contains(redacted, "provider-secret") {
 		t.Fatalf("allowed provider secret was not redacted: %s", redacted)
 	}
+}
+
+func TestCommandEnvAppliesDefaultDirectAndCustomProxyPolicies(t *testing.T) {
+	for key, value := range map[string]string{
+		"HTTP_PROXY": "http://inherited-upper:8000", "HTTPS_PROXY": "http://inherited-upper:8000",
+		"ALL_PROXY": "socks5://inherited-upper:1080", "NO_PROXY": "localhost,redis",
+		"http_proxy": "http://inherited-lower:8000", "https_proxy": "http://inherited-lower:8000",
+		"all_proxy": "socks5://inherited-lower:1080", "no_proxy": "localhost,redis",
+	} {
+		t.Setenv(key, value)
+	}
+	t.Setenv("AI_WATCH_DEFAULT_PROXY_URL", "http://mihomo:7890")
+
+	defaultEnv := envSliceMap(commandEnv(nil, domain.ResolvedConfig{ProxyMode: domain.ProxyDefault}))
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		if defaultEnv[key] != "http://mihomo:7890" {
+			t.Fatalf("default proxy was not applied to %s: %+v", key, defaultEnv)
+		}
+	}
+	if _, ok := defaultEnv["ALL_PROXY"]; ok {
+		t.Fatalf("default HTTP proxy retained a conflicting ALL_PROXY: %+v", defaultEnv)
+	}
+	if defaultEnv["NO_PROXY"] != "localhost,redis" {
+		t.Fatalf("default proxy should preserve NO_PROXY: %+v", defaultEnv)
+	}
+
+	directEnv := envSliceMap(commandEnv(nil, domain.ResolvedConfig{ProxyMode: domain.ProxyDirect}))
+	for _, key := range routeProxyEnvKeys {
+		if _, ok := directEnv[key]; ok {
+			t.Fatalf("direct mode retained %s: %+v", key, directEnv)
+		}
+	}
+	if directEnv["NO_PROXY"] != "localhost,redis" || directEnv["no_proxy"] != "localhost,redis" {
+		t.Fatalf("direct mode should preserve no-proxy exclusions: %+v", directEnv)
+	}
+
+	customHTTP := envSliceMap(commandEnv(nil, domain.ResolvedConfig{ProxyMode: domain.ProxyCustom, ProxyURL: "http://custom.example:8080"}))
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		if customHTTP[key] != "http://custom.example:8080" {
+			t.Fatalf("custom HTTP proxy was not applied to %s: %+v", key, customHTTP)
+		}
+	}
+	if _, ok := customHTTP["ALL_PROXY"]; ok {
+		t.Fatalf("custom HTTP proxy retained inherited ALL_PROXY: %+v", customHTTP)
+	}
+	if _, ok := customHTTP["all_proxy"]; ok {
+		t.Fatalf("custom HTTP proxy retained inherited all_proxy: %+v", customHTTP)
+	}
+
+	customSOCKS := envSliceMap(commandEnv(nil, domain.ResolvedConfig{ProxyMode: domain.ProxyCustom, ProxyURL: "socks5h://custom.example:1080"}))
+	for _, key := range routeProxyEnvKeys {
+		if customSOCKS[key] != "socks5h://custom.example:1080" {
+			t.Fatalf("custom SOCKS proxy was not applied to %s: %+v", key, customSOCKS)
+		}
+	}
+}
+
+func TestRunRedactsCredentialedCustomProxyURL(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "codex")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s proxy-password READY' \"$HTTPS_PROXY\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{CodexBin: bin, RuntimeDir: filepath.Join(root, "run"), MaxOutputBytes: 4096}
+	proxyURL := "http://proxy-user:proxy-password@proxy.example:8080"
+	res, err := r.Run(context.Background(), "proxy-redaction", domain.JobOptions{
+		CLI: domain.CLICodex, Prompt: "probe",
+	}, domain.ResolvedConfig{
+		Source: "manual", Provider: "openai", CodexConfig: "model_provider='openai'",
+		ProxyMode: domain.ProxyCustom, ProxyURL: proxyURL,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Output, "READY") || strings.Contains(res.Output, proxyURL) || strings.Contains(res.Output, "proxy-password") || !strings.Contains(res.Output, "[REDACTED]") {
+		t.Fatalf("credentialed proxy URL was not redacted: %+v", res)
+	}
+}
+
+func envSliceMap(environment []string) map[string]string {
+	result := make(map[string]string, len(environment))
+	for _, entry := range environment {
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) == 2 {
+			result[parts[0]] = parts[1]
+		}
+	}
+	return result
 }

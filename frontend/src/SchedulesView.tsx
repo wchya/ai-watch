@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity, AlertCircle, Bot, CalendarClock, Check, CheckCircle2, Clock3, Command, Edit3,
+  Activity, AlertCircle, Bot, CalendarClock, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Clock3, Command, Edit3, FileText,
   Gauge, LoaderCircle, PauseCircle, Play, Plus, RefreshCw, ShieldCheck, Square,
   TimerReset, Trash2, X,
 } from 'lucide-react'
 import { api } from './api'
 import type {
-  BulkJobAction, Cli, JobOptions, Provider, Schedule, ScheduleLastStatus,
+  BulkJobAction, Cli, JobOptions, Provider, Schedule, ScheduleLastStatus, OperationalEvent, JobSummary,
   ScheduleWriteRequest,
 } from './types'
 
@@ -49,6 +49,7 @@ const scheduleStatusMeta: Record<ScheduleLastStatus, { label: string; tone: stri
   stopped: { label: '已停止', tone: 'muted' },
   failed: { label: '最近失败', tone: 'warning' },
 }
+const scheduleRunning = (schedule: Schedule) => schedule.lastStatus === 'queued' || schedule.lastStatus === 'starting' || schedule.lastStatus === 'running'
 
 const defaultSchedule = (defaults: JobOptions): ScheduleWriteRequest => ({
   name: '',
@@ -93,7 +94,7 @@ function CliMark({ cli }: { cli: Cli }) {
 }
 
 function ScheduleStatus({ status = 'idle' }: { status?: ScheduleLastStatus }) {
-  const meta = scheduleStatusMeta[status]
+  const meta = scheduleStatusMeta[status] ?? { label: status ? `未知状态 · ${status}` : '等待首次运行', tone: 'muted' }
   return <span className={`status-pill ${meta.tone}`}><i/>{meta.label}</span>
 }
 
@@ -111,6 +112,7 @@ export function SchedulesView({ providers, defaultOptions }: { providers: Provid
   const [deleteTarget, setDeleteTarget] = useState<Schedule | null>(null)
   const [changingId, setChangingId] = useState('')
   const [bulkAction, setBulkAction] = useState<BulkJobAction | null>(null)
+  const [logTarget, setLogTarget] = useState<Schedule | null>(null)
   const requestSequence = useRef(0)
 
   const load = useCallback(async () => {
@@ -133,6 +135,11 @@ export function SchedulesView({ providers, defaultOptions }: { providers: Provid
   }, [])
 
   useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    if (!schedules.some(scheduleRunning)) return
+    const timer = window.setInterval(() => void load(), 3000)
+    return () => window.clearInterval(timer)
+  }, [load, schedules])
 
   const filtered = useMemo(() => schedules.filter(schedule =>
     (cliFilter === 'all' || schedule.cli === cliFilter) &&
@@ -141,7 +148,7 @@ export function SchedulesView({ providers, defaultOptions }: { providers: Provid
   const enabledCount = schedules.filter(schedule => schedule.enabled).length
   const nextSchedule = schedules.filter(schedule => schedule.enabled && schedule.nextRunAt)
     .sort((a, b) => new Date(a.nextRunAt!).getTime() - new Date(b.nextRunAt!).getTime())[0]
-  const selectedSchedules = schedules.filter(schedule => selected.has(schedule.id))
+  const selectedSchedules = schedules.filter(schedule => selected.has(schedule.id) && !scheduleRunning(schedule))
 
   const toggleSelected = (id: string) => setSelected(current => {
     const next = new Set(current)
@@ -177,6 +184,7 @@ export function SchedulesView({ providers, defaultOptions }: { providers: Provid
       setChangingId('')
     }
   }
+
   const remove = async () => {
     if (!deleteTarget) return
     setChangingId(deleteTarget.id)
@@ -245,23 +253,59 @@ export function SchedulesView({ providers, defaultOptions }: { providers: Provid
 
     <section className="panel schedule-list-panel">
       <header className="schedule-list-head"><label className="schedule-check"><input type="checkbox" checked={filtered.length > 0 && filtered.slice(0, 50).every(schedule => selected.has(schedule.id))} onChange={toggleAllVisible}/><i><Check/></i><span>选择当前结果</span></label><span>{filtered.length} 条规则</span></header>
-      {loading ? <div className="schedule-loading"><LoaderCircle className="spinning"/><span>正在读取计划任务</span></div> : filtered.length ? <div className="schedule-list">{filtered.map(schedule => <article className={`schedule-row ${!schedule.enabled ? 'paused' : ''}`} key={schedule.id}>
-        <label className="schedule-check row-check"><input type="checkbox" checked={selected.has(schedule.id)} disabled={!selected.has(schedule.id) && selected.size >= 50} onChange={() => toggleSelected(schedule.id)}/><i><Check/></i><span className="sr-only">选择 {schedule.name}</span></label>
+      {loading ? <div className="schedule-loading"><LoaderCircle className="spinning"/><span>正在读取计划任务</span></div> : filtered.length ? <div className="schedule-list">{filtered.map(schedule => { const running = scheduleRunning(schedule); return <article className={`schedule-row ${!schedule.enabled ? 'paused' : ''} ${running ? 'running' : ''}`} key={schedule.id}>
+        <label className="schedule-check row-check"><input type="checkbox" checked={selected.has(schedule.id)} disabled={running || (!selected.has(schedule.id) && selected.size >= 50)} onChange={() => toggleSelected(schedule.id)}/><i><Check/></i><span className="sr-only">选择 {schedule.name}</span></label>
         <CliMark cli={schedule.cli}/>
-        <div className="schedule-identity"><div><strong>{schedule.name}</strong><ScheduleStatus status={schedule.lastStatus}/></div><span>{schedule.providerName || schedule.providerId || '当前配置'} · {modeLabel(schedule.mode)}</span></div>
+        <div className="schedule-identity"><div><strong>{schedule.name}</strong><ScheduleStatus status={running ? 'running' : schedule.lastStatus}/>{running && <em className="schedule-running-badge">运行中 · 已锁定</em>}</div><span>{schedule.providerName || schedule.providerId || '当前配置'} · {modeLabel(schedule.mode)}</span></div>
         <div className="schedule-window"><span><Clock3/>执行窗口</span><strong>{weekdayLabel(schedule.weekdaysMask)}</strong><small>{minuteToTime(schedule.startMinute)}–{minuteToTime(schedule.endMinute)} · {schedule.timezone}</small></div>
         <div className="schedule-next"><span>下一次 / 最近一次</span><strong>{schedule.enabled ? formatDateTime(schedule.nextRunAt) : '已暂停'}</strong><small>{formatDateTime(schedule.lastOccurrenceAt)}</small></div>
-        <div className="schedule-row-actions"><button className={`schedule-state ${schedule.enabled ? 'on' : ''}`} disabled={changingId === schedule.id} aria-pressed={schedule.enabled} aria-label={`${schedule.enabled ? '暂停' : '启用'}：${schedule.name}`} onClick={() => void toggleEnabled(schedule)}>{changingId === schedule.id ? <LoaderCircle className="spinning"/> : schedule.enabled ? <PauseCircle/> : <Play/>}<span>{schedule.enabled ? '暂停' : '启用'}</span></button><button className="icon-button" aria-label={`编辑：${schedule.name}`} onClick={() => setEditor(schedule)}><Edit3/></button><button className="icon-button danger-icon" aria-label={`删除：${schedule.name}`} onClick={() => setDeleteTarget(schedule)}><Trash2/></button></div>
-      </article>)}</div> : <div className="schedule-empty"><div><CalendarClock/></div><strong>{schedules.length ? '没有匹配的计划任务' : '还没有计划任务'}</strong><p>{schedules.length ? '调整客户端或状态筛选，查看其他规则。' : '创建第一条自动巡检规则，定时观察 Provider 可用性。'}</p>{!schedules.length && <button className="primary" onClick={() => setEditor('new')}><Plus/>新建计划</button>}</div>}
+        <div className="schedule-row-actions"><button className="icon-button schedule-log-button" aria-label={`查看运行日志：${schedule.name}`} title="查看该计划产生的请求日志" onClick={() => setLogTarget(schedule)}><FileText/></button><button className={`schedule-state ${schedule.enabled ? 'on' : ''}`} disabled={running || changingId === schedule.id} aria-pressed={schedule.enabled} aria-label={running ? `运行中，不能操作：${schedule.name}` : `${schedule.enabled ? '暂停' : '启用'}：${schedule.name}`} onClick={() => void toggleEnabled(schedule)}>{running ? <LoaderCircle className="spinning"/> : changingId === schedule.id ? <LoaderCircle className="spinning"/> : schedule.enabled ? <PauseCircle/> : <Play/>}<span>{running ? '运行中' : schedule.enabled ? '暂停' : '启用'}</span></button><button className="icon-button schedule-edit-button" disabled={running} aria-label={`编辑：${schedule.name}`} onClick={() => setEditor(schedule)}><Edit3/></button><button className="icon-button danger-icon schedule-delete-button" disabled={running} aria-label={`删除：${schedule.name}`} onClick={() => setDeleteTarget(schedule)}><Trash2/></button></div>
+      </article>})}</div> : <div className="schedule-empty"><div><CalendarClock/></div><strong>{schedules.length ? '没有匹配的计划任务' : '还没有计划任务'}</strong><p>{schedules.length ? '调整客户端或状态筛选，查看其他规则。' : '创建第一条自动巡检规则，定时观察 Provider 可用性。'}</p>{!schedules.length && <button className="primary" onClick={() => setEditor('new')}><Plus/>新建计划</button>}</div>}
     </section>
 
     <div className="schedule-safety"><ShieldCheck/><span><strong>规则只保存非敏感参数</strong><small>运行时从本地 Provider 解析连接信息；每个目标最多保留一个活跃任务，避免重复探测。</small></span></div>
 
-    {selected.size > 0 && <div className="bulk-bar" role="region" aria-label="批量操作"><div><span>{selected.size}</span><strong>已选择计划</strong><small>批量操作会逐项返回结果</small></div><div className="bulk-actions"><button className="secondary" disabled={Boolean(bulkAction)} onClick={() => void runBulk('probe_once')}>{bulkAction === 'probe_once' ? <LoaderCircle className="spinning"/> : <Gauge/>}一次测活</button><button className="secondary" disabled={Boolean(bulkAction)} onClick={() => void runBulk('probe')}>{bulkAction === 'probe' ? <LoaderCircle className="spinning"/> : <RefreshCw/>}持续测活</button><button className="secondary" disabled={Boolean(bulkAction)} onClick={() => void runBulk('keepalive_once')}>{bulkAction === 'keepalive_once' ? <LoaderCircle className="spinning"/> : <Activity/>}一次保活</button><button className="secondary" disabled={Boolean(bulkAction)} onClick={() => void runBulk('keepalive')}>{bulkAction === 'keepalive' ? <LoaderCircle className="spinning"/> : <TimerReset/>}持续保活</button><button className="danger-button" disabled={Boolean(bulkAction)} onClick={() => void runBulk('stop')}>{bulkAction === 'stop' ? <LoaderCircle className="spinning"/> : <Square/>}停止目标</button><button className="icon-button" aria-label="取消选择" onClick={() => setSelected(new Set())}><X/></button></div></div>}
+    {selected.size > 0 && <div className="bulk-bar" role="region" aria-label="批量操作"><div><span>{selectedSchedules.length}</span><strong>已选择可运行计划</strong><small>{selected.size !== selectedSchedules.length ? '运行中的规则已自动锁定' : '批量操作会逐项返回结果'}</small></div><div className="bulk-actions"><button className="secondary" disabled={Boolean(bulkAction) || !selectedSchedules.length} onClick={() => void runBulk('probe_once')}>{bulkAction === 'probe_once' ? <LoaderCircle className="spinning"/> : <Gauge/>}一次测活</button><button className="secondary" disabled={Boolean(bulkAction) || !selectedSchedules.length} onClick={() => void runBulk('probe')}>{bulkAction === 'probe' ? <LoaderCircle className="spinning"/> : <RefreshCw/>}持续测活</button><button className="secondary" disabled={Boolean(bulkAction) || !selectedSchedules.length} onClick={() => void runBulk('keepalive_once')}>{bulkAction === 'keepalive_once' ? <LoaderCircle className="spinning"/> : <Activity/>}一次保活</button><button className="secondary" disabled={Boolean(bulkAction) || !selectedSchedules.length} onClick={() => void runBulk('keepalive')}>{bulkAction === 'keepalive' ? <LoaderCircle className="spinning"/> : <TimerReset/>}持续保活</button><button className="danger-button" disabled={Boolean(bulkAction) || !selectedSchedules.length} onClick={() => void runBulk('stop')}>{bulkAction === 'stop' ? <LoaderCircle className="spinning"/> : <Square/>}停止目标</button><button className="icon-button" aria-label="取消选择" onClick={() => setSelected(new Set())}><X/></button></div></div>}
 
     {editor && <ScheduleEditor key={editor === 'new' ? 'new' : editor.id} providers={providers} defaults={defaultOptions} schedule={editor === 'new' ? null : editor} close={() => setEditor(null)} save={save}/>} 
     {deleteTarget && <DeleteScheduleConfirm schedule={deleteTarget} busy={changingId === deleteTarget.id} close={() => setDeleteTarget(null)} confirm={() => void remove()}/>} 
+    {logTarget && <ScheduleLogDrawer schedule={logTarget} close={() => setLogTarget(null)}/>}
   </div>
+}
+
+function ScheduleLogDrawer({ schedule, close }: { schedule: Schedule; close: () => void }) {
+  const [events, setEvents] = useState<OperationalEvent[]>([])
+  const [total, setTotal] = useState(0)
+  const [offset, setOffset] = useState(0)
+  const [status, setStatus] = useState('all')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [legacyFallback, setLegacyFallback] = useState(false)
+  const load = useCallback(async () => {
+    setLoading(true); setError('')
+    try {
+      let result = await api.events({ scheduleId: schedule.id, type: 'request_end', limit: 50, offset })
+      let fallback = false
+      if (offset === 0 && result.total === 0 && schedule.lastJobId) {
+        result = await api.events({ jobId: schedule.lastJobId, type: 'request_end', limit: 50, offset: 0 })
+        fallback = result.total > 0
+      }
+      setLegacyFallback(fallback); setEvents(result.events); setTotal(result.total)
+    }
+    catch (e) { setError(e instanceof Error ? e.message : '无法读取计划运行日志') }
+    finally { setLoading(false) }
+  }, [offset, schedule.id, schedule.lastJobId])
+  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') close() }
+    window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key)
+  }, [close])
+  const records = useMemo(() => {
+    return events.filter(event => event.type === 'request_end').map(event => ({ id: String(event.data?.requestId || `${event.jobId || 'job'}-${event.id}`), end: event })).filter(record => status === 'all' || String(record.end.data?.status || 'completed') === status)
+  }, [events, status])
+  const page = Math.floor(offset / 50) + 1
+  const pages = Math.max(1, Math.ceil(total / 50))
+  return <div className="overlay schedule-log-overlay"><button className="overlay-scrim" aria-label="关闭计划运行日志" onClick={close}/><aside className="drawer schedule-log-drawer" role="dialog" aria-modal="true" aria-labelledby="schedule-log-title"><div className="drawer-header"><div><span>计划请求时间线 · 最新在前</span><h2 id="schedule-log-title">{schedule.name}</h2></div><button className="icon-button" aria-label="关闭计划运行日志" onClick={close}><X/></button></div><div className="schedule-log-toolbar"><select aria-label="按请求状态筛选" value={status} onChange={event => setStatus(event.target.value)}><option value="all">全部状态</option><option value="success">成功</option><option value="timeout">超时</option><option value="failed">失败</option><option value="start_failed">启动失败</option></select><span>{total} 次请求{legacyFallback ? ' · 旧数据仅显示最近一次运行' : ''}</span><button className="secondary" disabled={loading} onClick={() => void load()}><RefreshCw className={loading ? 'spinning' : ''}/>刷新</button></div><div className="drawer-body schedule-log-body">{error ? <div className="error-banner" role="alert"><AlertCircle/><div><strong>日志读取失败</strong><span>{error}</span></div><button onClick={() => void load()}>重试</button></div> : loading && !events.length ? <div className="schedule-loading"><LoaderCircle className="spinning"/><span>正在读取请求时间线</span></div> : records.length ? <div className="schedule-request-timeline">{records.map(record => { const event = record.end; const data = event.data || {}; const requestStatus = String(data.status || 'completed'); return <article key={record.id} className={`schedule-request-entry status-${requestStatus}`}><header><span><i/><time>{new Date(event.at).toLocaleString('zh-CN', { hour12: false })}</time></span><em>{requestStatus}</em></header><div><strong>{String(data.cli || schedule.cli)} · {schedule.providerName || schedule.providerId || '当前配置'}</strong><small>第 {String(data.attempt || '—')} 次 · {data.durationMillis != null ? `${String(data.durationMillis)} ms` : '—'} · Job {event.jobId || '—'}</small></div><details><summary>查看供应商返回与脱敏详情<ChevronDown/></summary><pre>{String(data.responseExcerpt || data.error || data.classification || '暂无供应商返回信息')}</pre><dl><div><dt>Request ID</dt><dd>{record.id}</dd></div><div><dt>模型</dt><dd>{String(data.model || schedule.model || '跟随配置')}</dd></div><div><dt>分类</dt><dd>{String(data.classification || '—')}</dd></div><div><dt>退出码</dt><dd>{String(data.exitCode ?? '—')}</dd></div></dl></details></article> })}</div> : <div className="schedule-empty"><div><FileText/></div><strong>{schedule.lastOccurrenceAt ? '现存日志已被保留策略清理' : '该计划尚未运行'}</strong><p>{status !== 'all' ? '当前页没有符合状态筛选的请求记录。' : '计划运行后，脱敏供应商返回和请求结果会显示在这里。'}</p></div>}</div><div className="drawer-footer schedule-log-footer"><span>第 {page} / {pages} 页 · 日志受事件保留策略约束</span><div><button className="secondary" disabled={loading || legacyFallback || offset === 0} onClick={() => setOffset(value => Math.max(0, value - 50))}><ChevronLeft/>上一页</button><button className="secondary" disabled={loading || legacyFallback || offset + 50 >= total} onClick={() => setOffset(value => value + 50)}>下一页<ChevronRight/></button></div></div></aside></div>
 }
 
 function ScheduleEditor({ providers, defaults, schedule, close, save }: { providers: Provider[]; defaults: JobOptions; schedule: Schedule | null; close: () => void; save: (body: ScheduleWriteRequest) => Promise<void> }) {
@@ -269,7 +313,7 @@ function ScheduleEditor({ providers, defaults, schedule, close, save }: { provid
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const drawerRef = useRef<HTMLElement>(null)
-  const filteredProviders = useMemo(() => providers.filter(provider => provider.cli === draft.cli), [draft.cli, providers])
+  const filteredProviders = useMemo(() => providers.filter(provider => provider.cli === draft.cli && provider.enabled !== false && provider.available !== false), [draft.cli, providers])
   const selectedProvider = filteredProviders.find(provider => provider.id === draft.providerId)
 
   const patch = <K extends keyof ScheduleWriteRequest>(key: K, value: ScheduleWriteRequest[K]) => setDraft(current => ({ ...current, [key]: value }))
@@ -282,7 +326,7 @@ function ScheduleEditor({ providers, defaults, schedule, close, save }: { provid
     const focusable = () => Array.from(drawerRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? [])
     focusable()[0]?.focus()
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close()
+      if (event.key === 'Escape' && !busy) close()
       if (event.key !== 'Tab') return
       const items = focusable(); if (!items.length) return
       const first = items[0]; const last = items[items.length - 1]
@@ -291,7 +335,7 @@ function ScheduleEditor({ providers, defaults, schedule, close, save }: { provid
     }
     window.addEventListener('keydown', onKeyDown)
     return () => { window.removeEventListener('keydown', onKeyDown); previousFocus?.focus() }
-  }, [close])
+  }, [busy, close])
 
   const toggleDay = (bit: number) => patch('weekdaysMask', draft.weekdaysMask & bit ? draft.weekdaysMask & ~bit : draft.weekdaysMask | bit)
   const submit = async () => {
@@ -305,11 +349,11 @@ function ScheduleEditor({ providers, defaults, schedule, close, save }: { provid
     finally { setBusy(false) }
   }
 
-  return <div className="overlay"><button className="overlay-scrim" aria-label="关闭计划编辑" onClick={close}/><aside ref={drawerRef} className="drawer schedule-drawer" role="dialog" aria-modal="true" aria-labelledby="schedule-editor-title">
-    <div className="drawer-header"><div><span>{schedule ? '编辑自动巡检' : '创建自动巡检'}</span><h2 id="schedule-editor-title">{schedule ? schedule.name : '新建计划任务'}</h2></div><button className="icon-button" onClick={close} aria-label="关闭计划编辑"><X/></button></div>
+  return <div className="overlay"><button className="overlay-scrim" aria-label="关闭计划编辑" disabled={busy} onClick={close}/><aside ref={drawerRef} className="drawer schedule-drawer" role="dialog" aria-modal="true" aria-labelledby="schedule-editor-title">
+    <div className="drawer-header"><div><span>{schedule ? '编辑自动巡检' : '创建自动巡检'}</span><h2 id="schedule-editor-title">{schedule ? schedule.name : '新建计划任务'}</h2></div><button className="icon-button" disabled={busy} onClick={close} aria-label="关闭计划编辑"><X/></button></div>
     <div className="drawer-body schedule-editor-body">
       <div className="schedule-editor-note"><ShieldCheck/><span>这里只保存 CLI、Provider ID 与非敏感运行参数。连接地址、密钥、Prompt 和 Webhook 不会写入计划规则。</span></div>
-      <section className="form-section"><div className="form-section-title"><h3>规则与目标</h3><p>为计划命名，并选择要巡检的本地配置</p></div><label className="field"><span>计划名称</span><input autoComplete="off" value={draft.name} onChange={event => patch('name', event.target.value)} placeholder="例如：工作日 Codex 主线路"/></label><div className="field-grid"><label className="field"><span>客户端</span><select value={draft.cli} onChange={event => { const cli = event.target.value as Cli; setDraft(current => ({ ...current, cli, providerId: providers.find(provider => provider.cli === cli && provider.current)?.id ?? providers.find(provider => provider.cli === cli)?.id ?? '', fallbackModel: cli === 'claude' ? current.fallbackModel : '' })) }}><option value="codex">Codex CLI</option><option value="claude">Claude Code CLI</option></select></label><label className="field"><span>本地 Provider</span><select value={draft.providerId} onChange={event => patch('providerId', event.target.value)}>{filteredProviders.length ? filteredProviders.map(provider => <option key={`${provider.cli}-${provider.id || 'current'}`} value={provider.id}>{provider.name}{provider.current ? '（当前）' : ''}</option>) : <option value="">未发现可用 Provider</option>}</select></label></div>{selectedProvider?.current && <p className="field-help">“当前配置”会在每次运行时重新读取，适合跟随本机当前 Provider。</p>}</section>
+      <section className="form-section"><div className="form-section-title"><h3>规则与目标</h3><p>为计划命名，并选择要巡检的本地配置</p></div><label className="field"><span>计划名称</span><input autoComplete="off" value={draft.name} onChange={event => patch('name', event.target.value)} placeholder="例如：工作日 Codex 主线路"/></label><div className="field-grid"><label className="field"><span>客户端</span><select value={draft.cli} onChange={event => { const cli = event.target.value as Cli; setDraft(current => ({ ...current, cli, providerId: providers.find(provider => provider.cli === cli && provider.enabled !== false && provider.available !== false && provider.current)?.id ?? providers.find(provider => provider.cli === cli && provider.enabled !== false && provider.available !== false)?.id ?? '', fallbackModel: cli === 'claude' ? current.fallbackModel : '' })) }}><option value="codex">Codex CLI</option><option value="claude">Claude Code CLI</option></select></label><label className="field"><span>本地 Provider</span><select value={draft.providerId} onChange={event => patch('providerId', event.target.value)}>{filteredProviders.length ? filteredProviders.map(provider => <option key={`${provider.cli}-${provider.id || 'current'}`} value={provider.id}>{provider.name}{provider.current ? '（当前）' : ''}</option>) : <option value="">未发现可用 Provider</option>}</select></label></div>{selectedProvider?.current && <p className="field-help">“当前配置”会在每次运行时重新读取，适合跟随本机当前 Provider。</p>}</section>
       <section className="form-section"><div className="form-section-title"><h3>执行日历</h3><p>时间按所选时区解释，调度器会计算下一次执行</p></div><div className="field"><span>执行日</span><div className="weekday-picker">{WEEKDAYS.map(day => <button key={day.bit} className={draft.weekdaysMask & day.bit ? 'active' : ''} aria-pressed={Boolean(draft.weekdaysMask & day.bit)} aria-label={day.long} onClick={() => toggleDay(day.bit)}>{day.label}</button>)}</div></div><div className="field-grid"><label className="field"><span>开始时间</span><input type="time" value={minuteToTime(draft.startMinute)} onChange={event => patch('startMinute', timeToMinute(event.target.value))}/></label><label className="field"><span>结束时间</span><input type="time" value={minuteToTime(draft.endMinute)} onChange={event => patch('endMinute', timeToMinute(event.target.value))}/></label></div><label className="field"><span>时区</span><select value={draft.timezone} onChange={event => patch('timezone', event.target.value)}>{timezoneOptions.map(timezone => <option key={timezone} value={timezone}>{timezone}{timezone === localTimezone ? '（本机）' : ''}</option>)}</select></label></section>
       <section className="form-section"><div className="form-section-title"><h3>运行策略</h3><p>计划只负责节奏，实际凭证仍由 Provider 在运行时提供</p></div><div className="schedule-mode-grid"><button className={draft.mode === 'probe' ? 'active' : ''} aria-pressed={draft.mode === 'probe'} onClick={() => patch('mode', 'probe')}><Gauge/><span><strong>测活</strong><small>窗口内验证直至成功</small></span></button><button className={draft.mode === 'keepalive' ? 'active' : ''} aria-pressed={draft.mode === 'keepalive'} onClick={() => patch('mode', 'keepalive')}><TimerReset/><span><strong>保活</strong><small>按固定间隔持续观测</small></span></button></div>{draft.mode === 'probe' && <label className="schedule-toggle-row"><span><strong>失败后继续尝试</strong><small>在当前时间窗口内按重试间隔继续测活</small></span><input type="checkbox" checked={draft.untilSuccess} onChange={event => patch('untilSuccess', event.target.checked)}/><i/></label>}<div className="field-grid"><NumberInput label="单次超时" value={draft.timeoutSeconds} min={5} suffix="秒" change={value => patch('timeoutSeconds', value)}/>{draft.mode === 'probe' ? <NumberInput label="重试间隔" value={draft.retryIntervalSeconds} min={1} suffix="秒" change={value => patch('retryIntervalSeconds', value)}/> : <NumberInput label="保活间隔" value={draft.keepaliveIntervalSeconds} min={10} suffix="秒" change={value => patch('keepaliveIntervalSeconds', value)}/>}</div>{draft.mode === 'keepalive' && <div className="field-grid"><NumberInput label="失败转恢复测活" value={draft.failureThreshold} min={1} suffix="次" change={value => patch('failureThreshold', value)}/><div/></div>}</section>
       <details className="schedule-advanced"><summary>模型覆盖（可选）</summary><div><label className="field"><span>模型</span><input value={draft.model || ''} onChange={event => patch('model', event.target.value)} placeholder="跟随 Provider 配置"/></label>{draft.cli === 'claude' && <label className="field"><span>Fallback 模型</span><input value={draft.fallbackModel || ''} onChange={event => patch('fallbackModel', event.target.value)} placeholder="可留空"/></label>}</div></details>

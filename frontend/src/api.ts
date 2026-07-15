@@ -1,8 +1,10 @@
 import type {
   AppSettings, BulkJobRequest, BulkJobResult, DashboardData, EventListResult, EventQuery,
-  JobEvent, JobPhase, JobStatus, JobSummary, OperationalEvent, Provider, ProviderExample,
+  DingTalkConfig, DingTalkConfigWrite, JobEvent, JobPhase, JobStatus, JobSummary, ManualProvider, ManualProviderWrite, OperationalEvent, Provider, ProviderExample,
   ProviderExampleWriteRequest, Schedule, ScheduleListResult, ScheduleWriteRequest, StartJobRequest,
-  SystemDiagnostics,
+  SystemDiagnostics, RedisKeyDetail, RedisKeyListResult, RedisMutationInput, RedisMutationResult,
+  RedisOverview, RedisPrewarmResult,
+  ReliabilityData, ReliabilityRange,
 } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '/api'
@@ -12,9 +14,17 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method || 'GET').toUpperCase()
+  const headers = new Headers({ 'Content-Type': 'application/json', ...init?.headers })
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !headers.has('Idempotency-Key')) {
+    const key = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `ui-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    headers.set('Idempotency-Key', key)
+  }
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
+    headers,
   })
   if (!response.ok) {
     const body = await response.json().catch(() => ({})) as { message?: string; code?: string; error?: string | { message?: string; code?: string } }
@@ -25,7 +35,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
-interface RawProvider { id: string; name: string; cli: 'codex' | 'claude'; current: boolean; model?: string; baseUrl?: string; maskedKey?: string; state?: Provider['state'] }
+interface RawProvider { id: string; name: string; cli: 'codex' | 'claude'; current: boolean; enabled?: boolean; model?: string; baseUrl?: string; maskedKey?: string; proxyMode?: Provider['proxyMode']; hasProxyUrl?: boolean; maskedProxyUrl?: string; state?: Provider['state'] }
 interface RawJob {
   id: string; mode: 'probe' | 'keepalive'; cli: 'codex' | 'claude'; providerId?: string;
   runOnce?: boolean;
@@ -44,7 +54,16 @@ interface RawSettings {
   keepaliveSummarySuccesses?: number
   probeProgressSeconds?: number
   recoveryMergeSeconds?: number
+  reliabilityAlertEnabled?: boolean
+  reliabilityAlertMinSamples?: number
+  reliabilityAlertSuccessRate?: number
+  reliabilityAlertConsecutiveFailures?: number
+  reliabilityAlertP95Millis?: number
+  reliabilityAlertCooldownSeconds?: number
+  reliabilityAlertRecoverySuccesses?: number
+  reliabilityAlertRecoveryEnabled?: boolean
   dingTalkConfigured?: boolean
+  uiTheme?: AppSettings['uiTheme']
 }
 interface RawConfigStatus {
   codexCli: boolean; claudeCli: boolean; sqliteCli: boolean; codexConfig: boolean;
@@ -61,7 +80,10 @@ interface RawOperationalEvent {
   provider_id?: string
   jobId?: string
   job_id?: string
+  scheduleId?: string
+  schedule_id?: string
   message?: string
+  data?: Record<string, unknown>
 }
 interface RawSchedule {
   id: string
@@ -115,7 +137,7 @@ const normalizeJob = (job: RawJob): JobSummary => ({
   nextAttemptAt: job.nextAttemptAt, elapsedMs: job.elapsedMillis,
 })
 const normalizeProvider = (provider: RawProvider): Provider => ({
-  ...provider, source: provider.id === '' ? 'current' : 'cc-switch', maskedApiKey: provider.maskedKey,
+  ...provider, source: provider.id === '' ? 'current' : provider.id.startsWith('manual:') ? 'manual' : 'cc-switch', maskedApiKey: provider.maskedKey,
 })
 const normalizeOperationalEvent = (event: RawOperationalEvent): OperationalEvent => ({
   id: String(event.id),
@@ -124,7 +146,9 @@ const normalizeOperationalEvent = (event: RawOperationalEvent): OperationalEvent
   level: event.level,
   providerId: event.providerId || event.provider_id,
   jobId: event.jobId || event.job_id,
+  scheduleId: event.scheduleId || event.schedule_id,
   message: event.message,
+  data: event.data,
 })
 const normalizeSchedule = (schedule: RawSchedule): Schedule => ({
   id: schedule.id,
@@ -164,7 +188,7 @@ export function normalizeEvent(raw: unknown): JobEvent {
   const event = raw as RawEvent
   const data = event.data || {}
   const rawJob = data.job as RawJob | undefined
-  const type: JobEvent['type'] = event.type === 'output' || event.type === 'error'
+  const type: JobEvent['type'] = event.type === 'output' || event.type === 'request_log' || event.type === 'error'
     ? 'log' : event.type === 'cleanup' ? 'cleanup' : event.type === 'attempt_start' || event.type === 'classification'
       ? 'attempt' : 'state'
   return {
@@ -172,12 +196,13 @@ export function normalizeEvent(raw: unknown): JobEvent {
     timestamp: event.at, message: event.message,
     level: (data.level as JobEvent['level'] | undefined) || (event.type === 'output' ? 'info' : event.type === 'error' ? 'error' : event.type === 'classification' && data.status === 'success' ? 'success' : undefined),
     attemptStatus: data.status as JobEvent['attemptStatus'] | undefined,
-    job: rawJob ? normalizeJob(rawJob) : undefined,
+    job: rawJob ? normalizeJob(rawJob) : undefined, data, rawType: event.type,
   }
 }
 
 export const api = {
   diagnostics: () => request<SystemDiagnostics>('/diagnostics'),
+  reliability: (range: ReliabilityRange) => request<ReliabilityData>(`/reliability?range=${encodeURIComponent(range)}`),
   async dashboard(): Promise<DashboardData> {
     const [health, config, rawProviders, rawJobs] = await Promise.all([
       request<{ status: string; version?: string }>('/health'),
@@ -199,8 +224,8 @@ export const api = {
           { id: 'claude-cli', name: 'Claude CLI', available: config.claudeCli, description: config.claudePath || '容器内命令' },
           { id: 'codex-config', name: 'Codex 配置', available: config.codexConfig, description: config.codexConfig ? '只读挂载可用' : '未发现配置' },
           { id: 'claude-config', name: 'Claude 配置', available: config.claudeConfig, description: config.claudeConfig ? '只读挂载可用' : '未发现配置' },
-          { id: 'cc-switch', name: 'CC Switch', available: config.ccSwitchDb, description: config.ccSwitchPath || '未挂载数据库' },
-          { id: 'sqlite', name: 'SQLite', available: config.sqliteCli, description: 'Provider 读取依赖' },
+          { id: 'cc-switch', name: 'CC Switch 启动同步源', available: config.ccSwitchDb, description: config.ccSwitchDb ? '启动时导入 Redis；运行期使用最后成功快照' : '未挂载启动同步源；运行期继续使用 Redis 快照' },
+          { id: 'sqlite', name: 'SQLite 启动同步工具', available: config.sqliteCli, description: '仅应用启动时读取 CC Switch，不参与任务运行' },
         ],
       }, providers, runningJobs, recentJobs,
     }
@@ -232,8 +257,17 @@ export const api = {
       keepaliveSummarySuccesses: raw.keepaliveSummarySuccesses ?? 0,
       probeProgressSeconds: raw.probeProgressSeconds ?? 3600,
       recoveryMergeSeconds: raw.recoveryMergeSeconds ?? 0,
+      reliabilityAlertEnabled: raw.reliabilityAlertEnabled ?? false,
+      reliabilityAlertMinSamples: raw.reliabilityAlertMinSamples ?? 5,
+      reliabilityAlertSuccessRate: raw.reliabilityAlertSuccessRate ?? 90,
+      reliabilityAlertConsecutiveFailures: raw.reliabilityAlertConsecutiveFailures ?? 3,
+      reliabilityAlertP95Millis: raw.reliabilityAlertP95Millis ?? 0,
+      reliabilityAlertCooldownSeconds: raw.reliabilityAlertCooldownSeconds ?? 1800,
+      reliabilityAlertRecoverySuccesses: raw.reliabilityAlertRecoverySuccesses ?? 2,
+      reliabilityAlertRecoveryEnabled: raw.reliabilityAlertRecoveryEnabled ?? true,
       browserNotifications: local.browserNotifications ?? false,
       dingTalkConfigured: raw.dingTalkConfigured ?? false,
+      uiTheme: raw.uiTheme ?? 'deep-ocean',
     }
   },
   async saveSettings(body: AppSettings): Promise<AppSettings> {
@@ -247,6 +281,15 @@ export const api = {
         keepaliveSummarySuccesses: body.keepaliveSummarySuccesses,
         probeProgressSeconds: body.probeProgressSeconds,
         recoveryMergeSeconds: body.recoveryMergeSeconds,
+        reliabilityAlertEnabled: body.reliabilityAlertEnabled,
+        reliabilityAlertMinSamples: body.reliabilityAlertMinSamples,
+        reliabilityAlertSuccessRate: body.reliabilityAlertSuccessRate,
+        reliabilityAlertConsecutiveFailures: body.reliabilityAlertConsecutiveFailures,
+        reliabilityAlertP95Millis: body.reliabilityAlertP95Millis,
+        reliabilityAlertCooldownSeconds: body.reliabilityAlertCooldownSeconds,
+        reliabilityAlertRecoverySuccesses: body.reliabilityAlertRecoverySuccesses,
+        reliabilityAlertRecoveryEnabled: body.reliabilityAlertRecoveryEnabled,
+        uiTheme: body.uiTheme,
       }),
     })
     storeLocalPrefs(body)
@@ -259,6 +302,7 @@ export const api = {
     if (query.level) params.set('level', query.level)
     if (query.providerId) params.set('providerId', query.providerId)
     if (query.jobId) params.set('jobId', query.jobId)
+    if (query.scheduleId) params.set('scheduleId', query.scheduleId)
     if (query.since) params.set('since', query.since)
     if (query.until) params.set('until', query.until)
     const raw = await request<RawOperationalEvent[] | { events?: RawOperationalEvent[]; items?: RawOperationalEvent[]; total?: number; count?: number }>(`/events?${params}`)
@@ -275,6 +319,15 @@ export const api = {
   providerExamples: () => request<ProviderExample[]>('/provider-examples'),
   saveProviderExample: (body: ProviderExampleWriteRequest) => request<ProviderExample>('/provider-examples', { method: 'POST', body: JSON.stringify(body) }),
   deleteProviderExample: (id: string) => request<{ deleted: boolean; id: string }>(`/provider-examples?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  manualProviders: () => request<ManualProvider[]>('/manual-providers'),
+  createManualProvider: (body: ManualProviderWrite) => request<ManualProvider>('/manual-providers', { method: 'POST', body: JSON.stringify(body) }),
+  updateManualProvider: (id: string, body: ManualProviderWrite) => {
+    const { id: _ignored, ...payload } = body
+    return request<ManualProvider>(`/manual-providers/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) })
+  },
+  deleteManualProvider: (id: string) => request<{ deleted: boolean; id: string }>(`/manual-providers/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  dingTalkConfig: () => request<DingTalkConfig>('/notifications/dingtalk/config'),
+  saveDingTalkConfig: (body: DingTalkConfigWrite) => request<DingTalkConfig>('/notifications/dingtalk/config', { method: 'PUT', body: JSON.stringify(body) }),
   async schedules(): Promise<ScheduleListResult> {
     const raw = await request<RawSchedule[] | { schedules?: RawSchedule[]; items?: RawSchedule[]; total?: number; limit?: number }>('/schedules')
     const items = Array.isArray(raw) ? raw : raw.schedules || raw.items || []
@@ -317,5 +370,20 @@ export const api = {
   },
   testDingTalk: () => request<{ sent: boolean }>('/notifications/test', { method: 'POST' }),
   sendDingTalkStatus: () => request<{ sent: boolean }>('/notifications/status', { method: 'POST' }),
+  redisOverview: () => request<RedisOverview>('/redis/overview'),
+  redisKeys: (query: { pattern?: string; type?: string; cursor?: string; limit?: number }) => {
+    const params = new URLSearchParams()
+    if (query.pattern) params.set('pattern', query.pattern)
+    if (query.type && query.type !== 'all') params.set('type', query.type)
+    if (query.cursor) params.set('cursor', query.cursor)
+    if (query.limit) params.set('limit', String(query.limit))
+    return request<RedisKeyListResult>(`/redis/keys?${params}`)
+  },
+  redisKeyDetail: (key: string, cursor = '0', limit = 50) => request<RedisKeyDetail>(`/redis/keys/detail?key=${encodeURIComponent(key)}&cursor=${encodeURIComponent(cursor)}&limit=${limit}`),
+  mutateRedisKey: (body: RedisMutationInput) => request<RedisMutationResult>('/redis/keys/value', { method: 'PUT', body: JSON.stringify(body) }),
+  updateRedisTTL: (body: { key: string; version: string; confirmKey: string; ttlSeconds?: number }) => request<RedisMutationResult>('/redis/keys/ttl', { method: 'PUT', body: JSON.stringify(body) }),
+  renameRedisKey: (body: { key: string; newKey: string; version: string; confirmKey: string }) => request<RedisMutationResult>('/redis/keys/rename', { method: 'POST', body: JSON.stringify(body) }),
+  deleteRedisKey: (body: { key: string; version: string; confirmKey: string }) => request<{ deleted: boolean; key: string }>('/redis/keys', { method: 'DELETE', body: JSON.stringify(body) }),
+  prewarmRedis: () => request<RedisPrewarmResult>('/redis/prewarm', { method: 'POST' }),
   eventsUrl: (id: string) => `${API_BASE}/jobs/${encodeURIComponent(id)}/events`,
 }

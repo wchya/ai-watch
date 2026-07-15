@@ -2,6 +2,7 @@ package diagnostics
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 )
 
 func TestSnapshotReturnsOnlyBoundedDiagnosticMetadata(t *testing.T) {
+	t.Setenv("AI_WATCH_DEFAULT_PROXY_URL", "")
 	root := t.TempDir()
 	binDir := filepath.Join(root, "bin")
 	runtimeDir := filepath.Join(root, "runtime")
@@ -42,11 +44,26 @@ func TestSnapshotReturnsOnlyBoundedDiagnosticMetadata(t *testing.T) {
 	if snapshot.CLIs[0].PathLabel != "codex-test" || snapshot.CLIs[0].Version != "codex-cli 0.144.3" {
 		t.Fatalf("unexpected Codex metadata: %+v", snapshot.CLIs[0])
 	}
-	if strings.Contains(snapshot.CLIs[0].PathLabel, root) || snapshot.SQLite.SchemaVersion < 7 || snapshot.SQLite.EventCount != 1 {
-		t.Fatalf("diagnostics exposed a path or missed SQLite metadata: %+v", snapshot)
+	if strings.Contains(snapshot.CLIs[0].PathLabel, root) || snapshot.Storage.SchemaVersion < 7 || snapshot.Storage.EventCount != 1 {
+		t.Fatalf("diagnostics exposed a path or missed storage metadata: %+v", snapshot)
 	}
 	if snapshot.Runtime.DirectoryEntries != 1 || !snapshot.Runtime.DirectoryReady {
 		t.Fatalf("unexpected runtime metadata: %+v", snapshot.Runtime)
+	}
+}
+
+func TestProxyCheckReportsOnlySafeEndpointMetadata(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	status := checkProxy(context.Background(), "http://proxy-user:proxy-secret@"+listener.Addr().String())
+	if !status.Configured || !status.Available || status.CheckState != "ok" {
+		t.Fatalf("unexpected proxy status: %+v", status)
+	}
+	if strings.Contains(status.Endpoint, "proxy-user") || strings.Contains(status.Endpoint, "proxy-secret") {
+		t.Fatalf("proxy credentials leaked: %+v", status)
 	}
 }
 

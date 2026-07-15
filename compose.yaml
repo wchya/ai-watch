@@ -13,6 +13,12 @@ services:
       - "yes"
       - --appendfsync
       - everysec
+      - --aof-use-rdb-preamble
+      - "yes"
+      - --auto-aof-rewrite-percentage
+      - "100"
+      - --auto-aof-rewrite-min-size
+      - 16mb
       - --maxmemory
       - ${REDIS_MAX_MEMORY:-384mb}
       - --maxmemory-policy
@@ -21,10 +27,17 @@ services:
       - ""
     volumes:
       - ai-watch-redis-data:/data
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
     logging:
       driver: json-file
       options:
@@ -36,6 +49,34 @@ services:
       timeout: 3s
       start_period: 5s
       retries: 12
+
+  mihomo:
+    image: ${MIHOMO_IMAGE:-metacubex/mihomo:latest}
+    restart: unless-stopped
+    stop_grace_period: 15s
+    mem_limit: ${MIHOMO_MEM_LIMIT:-256m}
+    pids_limit: 128
+    volumes:
+      - ai-watch-mihomo-data:/root/.config/mihomo
+      - type: bind
+        source: ${MIHOMO_CONFIG_FILE:-./config/mihomo/config.yaml.example}
+        target: /root/.config/mihomo/config.yaml
+        read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "/mihomo", "-t", "-d", "/root/.config/mihomo"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 6
 
   ai-watch:
     build:
@@ -52,6 +93,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      mihomo:
+        condition: service_healthy
     stop_grace_period: 30s
     pids_limit: 256
     mem_limit: 2g
@@ -67,8 +110,15 @@ services:
       AI_WATCH_DATA_DIR: /data
       AI_WATCH_RUNTIME_DIR: /run/ai-watch
       AI_WATCH_WEB_DIR: /app/web
+      AI_WATCH_CC_SWITCH_SYNC_TIMEOUT_SECONDS: ${AI_WATCH_CC_SWITCH_SYNC_TIMEOUT_SECONDS:-10}
       AI_WATCH_REDIS_URL: ${AI_WATCH_REDIS_URL:-redis://redis:6379/0}
       AI_WATCH_REDIS_REQUIRED: "true"
+      AI_WATCH_MASTER_KEY: ${AI_WATCH_MASTER_KEY:-}
+      AI_WATCH_DEFAULT_PROXY_URL: ${AI_WATCH_DEFAULT_PROXY_URL:-http://mihomo:7890}
+      HTTP_PROXY: ${AI_WATCH_HTTP_PROXY:-http://mihomo:7890}
+      HTTPS_PROXY: ${AI_WATCH_HTTPS_PROXY:-http://mihomo:7890}
+      ALL_PROXY: ${AI_WATCH_ALL_PROXY:-socks5://mihomo:7891}
+      NO_PROXY: ${AI_WATCH_NO_PROXY:-localhost,127.0.0.1,::1,ai-watch,redis,mihomo}
       DINGTALK_WEBHOOK_URL: ${DINGTALK_WEBHOOK_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       CODEX_API_KEY: ${CODEX_API_KEY:-}
@@ -103,6 +153,7 @@ services:
       - type: bind
         source: ${CC_SWITCH_CONFIG_DIR:-${HOME}/.cc-switch}
         target: /home/aiwatch/.cc-switch
+        # Startup-only CC Switch source; runtime Provider reads use Redis snapshots.
         read_only: true
     tmpfs:
       - /run/ai-watch:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0,size=64m
@@ -123,3 +174,4 @@ services:
 volumes:
   ai-watch-data:
   ai-watch-redis-data:
+  ai-watch-mihomo-data:

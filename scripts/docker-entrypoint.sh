@@ -13,4 +13,14 @@ if [ ! -d "${AI_WATCH_RUNTIME_DIR:-/run/ai-watch}" ]; then
   exit 1
 fi
 
+if command -v codex >/dev/null 2>&1; then
+  AI_WATCH_CODEX_CLI_VERSION="$(codex --version 2>/dev/null | tail -n 1 || true)"
+  export AI_WATCH_CODEX_CLI_VERSION
+fi
+
+if command -v claude >/dev/null 2>&1; then
+  AI_WATCH_CLAUDE_CLI_VERSION="$(claude --version 2>/dev/null | tail -n 1 || true)"
+  export AI_WATCH_CLAUDE_CLI_VERSION
+fi
+
 exec "$@"

@@ -5,35 +5,51 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"ai-watch/internal/configscan"
 	"ai-watch/internal/diagnostics"
 	"ai-watch/internal/domain"
 	"ai-watch/internal/jobs"
+	"ai-watch/internal/reliability"
+	"ai-watch/internal/secureconfig"
 	"ai-watch/internal/store"
 )
 
 type Server struct {
-	scanner *configscan.Scanner
-	jobs    *jobs.Manager
-	webDir  string
-	store   *store.JSON
+	scanner       *configscan.Scanner
+	jobs          *jobs.Manager
+	webDir        string
+	store         store.Store
+	redis         *store.Redis
+	redisMu       sync.Mutex
+	secure        *secureconfig.Service
+	idempotencyMu sync.Mutex
+	idempotency   map[string]store.IdempotencyRecord
 }
 
-func New(scanner *configscan.Scanner, manager *jobs.Manager, webDir string, stores ...*store.JSON) *Server {
-	var eventStore *store.JSON
+func New(scanner *configscan.Scanner, manager *jobs.Manager, webDir string, stores ...store.Store) *Server {
+	var eventStore store.Store
 	if len(stores) > 0 {
 		eventStore = stores[0]
 	}
-	return &Server{scanner: scanner, jobs: manager, webDir: webDir, store: eventStore}
+	redisStore, _ := eventStore.(*store.Redis)
+	return &Server{scanner: scanner, jobs: manager, webDir: webDir, store: eventStore, redis: redisStore, idempotency: map[string]store.IdempotencyRecord{}}
 }
-func (s *Server) Handler() http.Handler { return recoverMiddleware(http.HandlerFunc(s.route)) }
+func (s *Server) WithSecureConfig(service *secureconfig.Service) *Server {
+	s.secure = service
+	return s
+}
+func (s *Server) Handler() http.Handler {
+	return recoverMiddleware(s.idempotencyMiddleware(http.HandlerFunc(s.route)))
+}
 
 func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
@@ -42,6 +58,8 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		s.health(w)
 	case p == "/api/diagnostics" && r.Method == http.MethodGet:
 		writeJSON(w, http.StatusOK, diagnostics.New(s.scanner, s.jobs, s.store, "").Snapshot(r.Context()))
+	case strings.HasPrefix(p, "/api/redis/"):
+		s.redisRoute(w, r)
 	case p == "/api/config/status" && r.Method == http.MethodGet:
 		writeJSON(w, 200, s.scanner.Status())
 	case p == "/api/providers" && r.Method == http.MethodGet:
@@ -52,6 +70,12 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		s.upsertProviderExample(w, r)
 	case p == "/api/provider-examples" && r.Method == http.MethodDelete:
 		s.deleteProviderExample(w, r)
+	case p == "/api/manual-providers" && r.Method == http.MethodGet:
+		s.manualProviders(w)
+	case p == "/api/manual-providers" && r.Method == http.MethodPost:
+		s.createManualProvider(w, r)
+	case strings.HasPrefix(p, "/api/manual-providers/"):
+		s.manualProviderRoute(w, r)
 	case p == "/api/jobs" && r.Method == http.MethodGet:
 		writeJSON(w, 200, s.jobs.List())
 	case p == "/api/jobs" && r.Method == http.MethodPost:
@@ -70,6 +94,8 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, s.jobs.Settings())
 	case p == "/api/settings" && r.Method == http.MethodPut:
 		s.settings(w, r)
+	case p == "/api/reliability" && r.Method == http.MethodGet:
+		s.reliability(w, r)
 	case p == "/api/events" && r.Method == http.MethodGet:
 		s.operationalEvents(w, r)
 	case p == "/api/events" && r.Method == http.MethodDelete:
@@ -78,11 +104,77 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		s.notification(w, r)
 	case p == "/api/notifications/status" && r.Method == http.MethodPost:
 		s.notificationStatus(w, r)
+	case p == "/api/notifications/dingtalk/config" && r.Method == http.MethodGet:
+		s.dingTalkConfig(w)
+	case p == "/api/notifications/dingtalk/config" && r.Method == http.MethodPut:
+		s.saveDingTalkConfig(w, r)
 	case strings.HasPrefix(p, "/api/"):
 		writeError(w, 404, "not_found", "API endpoint not found")
 	default:
 		s.web(w, r)
 	}
+}
+
+func (s *Server) reliability(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "reliability_unavailable", "event store is unavailable")
+		return
+	}
+	if s.jobs != nil {
+		if err := s.jobs.FlushEvents(); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "reliability_flush_failed", err.Error())
+			return
+		}
+	}
+	selectedRange := strings.TrimSpace(r.URL.Query().Get("range"))
+	if selectedRange == "" {
+		selectedRange = "24h"
+	}
+	retentionDays := 0
+	if s.jobs != nil {
+		retentionDays = s.jobs.Settings().EventRetentionDays
+	}
+	result, err := reliability.Build(s.store, selectedRange, time.Now().UTC(), s.activeProviderKeys(), retentionDays)
+	if errors.Is(err, reliability.ErrInvalidRange) {
+		writeError(w, http.StatusBadRequest, "invalid_reliability_range", "range must be one of 24h, 7d, or 30d")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "reliability_read_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) activeProviderKeys() map[string]bool {
+	result := map[string]bool{}
+	if s.scanner != nil {
+		if values, err := s.scanner.Providers(""); err == nil {
+			for _, value := range values {
+				result[reliabilityProviderKey(string(value.CLI), value.ID)] = true
+			}
+		}
+	}
+	if s.secure != nil {
+		if values, err := s.secure.ListCCSwitchProviders(); err == nil {
+			for _, value := range values {
+				result[reliabilityProviderKey(string(value.CLI), value.ID)] = true
+			}
+		}
+		if values, err := s.secure.ListManualProviders(); err == nil {
+			for _, value := range values {
+				result[reliabilityProviderKey(string(value.CLI), "manual:"+value.ID)] = true
+			}
+		}
+	}
+	return result
+}
+
+func reliabilityProviderKey(cli, id string) string {
+	if id == "" {
+		id = "current"
+	}
+	return cli + ":" + id
 }
 
 type scheduleInput struct {
@@ -252,6 +344,7 @@ func (s *Server) bulkJobs(w http.ResponseWriter, r *http.Request) {
 				KeepaliveIntervalSeconds: item.KeepaliveIntervalSeconds,
 				FailureThreshold:         item.FailureThreshold, Model: item.Model,
 				FallbackModel: item.FallbackModel,
+				TriggerSource: "bulk", ClientIP: requestClientIP(r),
 			})
 			err = startErr
 			if err == nil {
@@ -375,6 +468,7 @@ func (s *Server) operationalEvents(w http.ResponseWriter, r *http.Request) {
 	filter := store.EventFilter{
 		ProviderID: strings.TrimSpace(query.Get("providerId")),
 		JobID:      strings.TrimSpace(query.Get("jobId")),
+		ScheduleID: strings.TrimSpace(query.Get("scheduleId")),
 		Type:       strings.TrimSpace(query.Get("type")),
 		Level:      strings.TrimSpace(query.Get("level")),
 		Since:      since,
@@ -417,6 +511,14 @@ func parseEventTime(raw string) (time.Time, error) {
 	return value.UTC(), nil
 }
 
+func requestClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
+}
+
 func (s *Server) clearEvents(w http.ResponseWriter) {
 	if s.store == nil {
 		writeError(w, http.StatusServiceUnavailable, "events_unavailable", "event store is unavailable")
@@ -437,6 +539,12 @@ func (s *Server) clearEvents(w http.ResponseWriter) {
 }
 
 func (s *Server) health(w http.ResponseWriter) {
+	if s.store != nil {
+		if _, err := s.store.Diagnostics(); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "degraded", "time": time.Now().UTC(), "version": "dev", "storageError": "Redis is unavailable"})
+			return
+		}
+	}
 	if s.jobs != nil {
 		if message := s.jobs.PersistenceError(); message != "" {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "degraded", "time": time.Now().UTC(), "version": "dev", "persistenceError": message})
@@ -451,6 +559,28 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request) {
 	if e != nil {
 		writeError(w, 400, "provider_discovery", e.Error())
 		return
+	}
+	if s.secure != nil {
+		ccSwitch, err := s.secure.ListCCSwitchProviders()
+		if err != nil {
+			secureConfigError(w, err)
+			return
+		}
+		for _, value := range ccSwitch {
+			if cli == "" || value.CLI == cli {
+				v = append(v, value)
+			}
+		}
+		manual, err := s.secure.ListManualProviders()
+		if err != nil {
+			secureConfigError(w, err)
+			return
+		}
+		for _, value := range manual {
+			if cli == "" || value.CLI == cli {
+				v = append(v, s.secure.Provider(value))
+			}
+		}
 	}
 	if s.jobs != nil {
 		states := s.jobs.ProviderStates()
@@ -470,6 +600,8 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &v) {
 		return
 	}
+	v.TriggerSource = "manual"
+	v.ClientIP = requestClientIP(r)
 	job, e := s.jobs.Start(v)
 	if e != nil {
 		code := 400
@@ -581,17 +713,26 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request, id string) {
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	type input struct {
-		TimeoutSeconds            *int   `json:"timeoutSeconds"`
-		RetryIntervalSeconds      *int   `json:"retryIntervalSeconds"`
-		KeepaliveIntervalSeconds  *int   `json:"keepaliveIntervalSeconds"`
-		KeepaliveSummarySeconds   *int   `json:"keepaliveSummarySeconds"`
-		KeepaliveSummarySuccesses *int   `json:"keepaliveSummarySuccesses"`
-		ProbeProgressSeconds      *int   `json:"probeProgressSeconds"`
-		RecoveryMergeSeconds      *int   `json:"recoveryMergeSeconds"`
-		HistoryLimit              *int   `json:"historyLimit"`
-		EventRetentionDays        *int   `json:"eventRetentionDays"`
-		EventRetentionRows        *int   `json:"eventRetentionRows"`
-		EventRetentionBytes       *int64 `json:"eventRetentionBytes"`
+		TimeoutSeconds                      *int    `json:"timeoutSeconds"`
+		RetryIntervalSeconds                *int    `json:"retryIntervalSeconds"`
+		KeepaliveIntervalSeconds            *int    `json:"keepaliveIntervalSeconds"`
+		KeepaliveSummarySeconds             *int    `json:"keepaliveSummarySeconds"`
+		KeepaliveSummarySuccesses           *int    `json:"keepaliveSummarySuccesses"`
+		ProbeProgressSeconds                *int    `json:"probeProgressSeconds"`
+		RecoveryMergeSeconds                *int    `json:"recoveryMergeSeconds"`
+		ReliabilityAlertEnabled             *bool   `json:"reliabilityAlertEnabled"`
+		ReliabilityAlertMinSamples          *int    `json:"reliabilityAlertMinSamples"`
+		ReliabilityAlertSuccessRate         *int    `json:"reliabilityAlertSuccessRate"`
+		ReliabilityAlertConsecutiveFailures *int    `json:"reliabilityAlertConsecutiveFailures"`
+		ReliabilityAlertP95Millis           *int    `json:"reliabilityAlertP95Millis"`
+		ReliabilityAlertCooldownSeconds     *int    `json:"reliabilityAlertCooldownSeconds"`
+		ReliabilityAlertRecoverySuccesses   *int    `json:"reliabilityAlertRecoverySuccesses"`
+		ReliabilityAlertRecoveryEnabled     *bool   `json:"reliabilityAlertRecoveryEnabled"`
+		HistoryLimit                        *int    `json:"historyLimit"`
+		EventRetentionDays                  *int    `json:"eventRetentionDays"`
+		EventRetentionRows                  *int    `json:"eventRetentionRows"`
+		EventRetentionBytes                 *int64  `json:"eventRetentionBytes"`
+		UITheme                             *string `json:"uiTheme"`
 	}
 	var request input
 	if !decode(w, r, &request) {
@@ -619,6 +760,30 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	if request.RecoveryMergeSeconds != nil {
 		v.RecoveryMergeSeconds = *request.RecoveryMergeSeconds
 	}
+	if request.ReliabilityAlertEnabled != nil {
+		v.ReliabilityAlertEnabled = *request.ReliabilityAlertEnabled
+	}
+	if request.ReliabilityAlertMinSamples != nil {
+		v.ReliabilityAlertMinSamples = *request.ReliabilityAlertMinSamples
+	}
+	if request.ReliabilityAlertSuccessRate != nil {
+		v.ReliabilityAlertSuccessRate = *request.ReliabilityAlertSuccessRate
+	}
+	if request.ReliabilityAlertConsecutiveFailures != nil {
+		v.ReliabilityAlertConsecutiveFailures = *request.ReliabilityAlertConsecutiveFailures
+	}
+	if request.ReliabilityAlertP95Millis != nil {
+		v.ReliabilityAlertP95Millis = *request.ReliabilityAlertP95Millis
+	}
+	if request.ReliabilityAlertCooldownSeconds != nil {
+		v.ReliabilityAlertCooldownSeconds = *request.ReliabilityAlertCooldownSeconds
+	}
+	if request.ReliabilityAlertRecoverySuccesses != nil {
+		v.ReliabilityAlertRecoverySuccesses = *request.ReliabilityAlertRecoverySuccesses
+	}
+	if request.ReliabilityAlertRecoveryEnabled != nil {
+		v.ReliabilityAlertRecoveryEnabled = *request.ReliabilityAlertRecoveryEnabled
+	}
 	if request.HistoryLimit != nil {
 		v.HistoryLimit = *request.HistoryLimit
 	}
@@ -630,6 +795,9 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.EventRetentionBytes != nil {
 		v.EventRetentionBytes = *request.EventRetentionBytes
+	}
+	if request.UITheme != nil {
+		v.UITheme = *request.UITheme
 	}
 	if e := s.jobs.SetSettings(v); e != nil {
 		writeError(w, 400, "invalid_settings", e.Error())

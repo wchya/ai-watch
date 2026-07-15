@@ -39,6 +39,7 @@ type notificationState struct {
 	recoveries      map[string]notificationTarget
 	recoveryDropped int
 	recoveryTimer   *time.Timer
+	reliability     map[string]reliabilityAlertState
 }
 
 func (m *Manager) TestNotification(ctx context.Context) error {

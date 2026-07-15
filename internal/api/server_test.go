@@ -17,6 +17,9 @@ import (
 	"ai-watch/internal/jobs"
 	"ai-watch/internal/runner"
 	"ai-watch/internal/store"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 )
 
 type apiResolver struct{}
@@ -60,6 +63,43 @@ func TestHealthAndSPAFallback(t *testing.T) {
 	}
 }
 
+func TestHealthReturnsUnavailableWhenRedisStops(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	st := store.NewRedisWithClient(t.TempDir(), "health", redis.NewClient(&redis.Options{Addr: redisServer.Addr()}), []byte("0123456789abcdef0123456789abcdef"))
+	if err := st.Err(); err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	handler := New(configscan.New(), nil, "", st).Handler()
+	redisServer.Close()
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), `"status":"degraded"`) {
+		t.Fatalf("stopped Redis health=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestSettingsAcceptReliabilityAlertFields(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	manager := jobs.New(apiResolver{}, apiExecutor{}, st, nil)
+	defer manager.Shutdown()
+	handler := New(configscan.New(), manager, "", st).Handler()
+	body := `{"reliabilityAlertEnabled":true,"reliabilityAlertMinSamples":9,"reliabilityAlertSuccessRate":85,"reliabilityAlertConsecutiveFailures":4,"reliabilityAlertP95Millis":1200,"reliabilityAlertCooldownSeconds":600,"reliabilityAlertRecoverySuccesses":3,"reliabilityAlertRecoveryEnabled":false,"uiTheme":"graphite-signal"}`
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("settings status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var saved domain.Settings
+	if err := json.Unmarshal(recorder.Body.Bytes(), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if !saved.ReliabilityAlertEnabled || saved.ReliabilityAlertMinSamples != 9 || saved.ReliabilityAlertSuccessRate != 85 || saved.ReliabilityAlertConsecutiveFailures != 4 || saved.ReliabilityAlertP95Millis != 1200 || saved.ReliabilityAlertCooldownSeconds != 600 || saved.ReliabilityAlertRecoverySuccesses != 3 || saved.ReliabilityAlertRecoveryEnabled || saved.UITheme != domain.UIThemeGraphiteSignal {
+		t.Fatalf("reliability settings were not saved: %+v", saved)
+	}
+}
+
 func TestDiagnosticsIsReadOnlyAndDoesNotExposeSensitivePathsOrOutput(t *testing.T) {
 	root := t.TempDir()
 	bin := filepath.Join(root, "codex-safe")
@@ -80,7 +120,7 @@ func TestDiagnosticsIsReadOnlyAndDoesNotExposeSensitivePathsOrOutput(t *testing.
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	body := w.Body.String()
-	if w.Code != http.StatusOK || !strings.Contains(body, `"schemaVersion":7`) || !strings.Contains(body, `"pathLabel":"codex-safe"`) || !strings.Contains(body, `"directoryEntries":1`) {
+	if w.Code != http.StatusOK || !strings.Contains(body, `"schemaVersion":10`) || !strings.Contains(body, `"pathLabel":"codex-safe"`) || !strings.Contains(body, `"directoryEntries":1`) {
 		t.Fatalf("diagnostics status=%d body=%s", w.Code, body)
 	}
 	for _, forbidden := range []string{root, "temporary-secret-name", "webhook", "apiKey", "DINGTALK_WEBHOOK_URL"} {
@@ -139,6 +179,67 @@ func TestEventsListFilterAndClear(t *testing.T) {
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"deleted":3`) {
 		t.Fatalf("clear events: status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestEventsFilterByScheduleID(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	now := time.Now().UTC()
+	for _, event := range []store.Event{
+		{At: now, Type: "request_end", JobID: "job-1", ScheduleID: "schedule-1", Data: map[string]any{"scheduleId": "schedule-1", "requestId": "request-1", "responseExcerpt": "READY"}},
+		{At: now.Add(-time.Second), Type: "request_end", JobID: "job-2", ScheduleID: "schedule-2", Data: map[string]any{"scheduleId": "schedule-2", "requestId": "request-2"}},
+	} {
+		if err := st.SaveEvent(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler := New(configscan.New(), nil, "", st).Handler()
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/events?scheduleId=schedule-1&type=request_end&limit=50", nil))
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusOK || !strings.Contains(body, `"total":1`) || !strings.Contains(body, `"scheduleId":"schedule-1"`) || !strings.Contains(body, `"responseExcerpt":"READY"`) || strings.Contains(body, "request-2") {
+		t.Fatalf("schedule events status=%d body=%s", recorder.Code, body)
+	}
+}
+
+func TestReliabilityAggregatesRequestEventsAndRejectsInvalidRange(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	now := time.Now().UTC()
+	for _, event := range []store.Event{
+		{At: now.Add(-time.Hour), Type: "request_end", ProviderID: "ray", Data: map[string]any{"classification": "success", "durationMillis": 120, "job": map[string]any{"cli": "codex", "providerName": "Ray"}}},
+		{At: now.Add(-30 * time.Minute), Type: "request_end", ProviderID: "ray", Data: map[string]any{"classification": "timeout", "durationMillis": 240, "responseExcerpt": "private-response-sample", "job": map[string]any{"cli": "codex", "providerName": "Ray"}}},
+	} {
+		if err := st.SaveEvent(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler := New(configscan.New(), nil, "", st).Handler()
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/reliability?range=24h", nil))
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusOK || !strings.Contains(body, `"sampleCount":2`) || !strings.Contains(body, `"successRate":0.5`) || !strings.Contains(body, `"key":"codex:ray"`) {
+		t.Fatalf("reliability status=%d body=%s", recorder.Code, body)
+	}
+	for _, forbidden := range []string{"private-response-sample", `"responseExcerpt"`, `"prompt"`, `"maskedKey"`} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("reliability exposed %q: %s", forbidden, body)
+		}
+	}
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/reliability?range=90d", nil))
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "invalid_reliability_range") {
+		t.Fatalf("invalid range status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRequestClientIPUsesRemoteAddrOnly(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/api/jobs", nil)
+	r.RemoteAddr = "192.0.2.10:4321"
+	r.Header.Set("X-Forwarded-For", "203.0.113.9")
+	if got := requestClientIP(r); got != "192.0.2.10" {
+		t.Fatalf("got %q", got)
 	}
 }
 
@@ -286,5 +387,51 @@ func TestSchedulesCRUDRejectsRuntimeSecretsAndBulkIsItemized(t *testing.T) {
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"deleted":true`) {
 		t.Fatalf("delete schedule: status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestIdempotencyKeyReplaysAndRejectsConflicts(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	manager := jobs.New(apiResolver{}, apiExecutor{}, st)
+	defer manager.Shutdown()
+	h := New(configscan.New(), manager, "", st).Handler()
+	body := `{"name":"幂等计划","enabled":true,"cli":"codex","providerId":"provider-1","mode":"probe","timezone":"UTC","weekdaysMask":127,"startMinute":0,"endMinute":1439,"untilSuccess":true,"timeoutSeconds":15,"retryIntervalSeconds":2,"keepaliveIntervalSeconds":120,"failureThreshold":3}`
+	call := func(payload string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/api/schedules", strings.NewReader(payload))
+		r.Header.Set("Idempotency-Key", "test-idempotency-0001")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	go func() { responses <- call(body) }()
+	go func() { responses <- call(body) }()
+	first, second := <-responses, <-responses
+	if first.Code != http.StatusCreated || second.Code != first.Code || second.Body.String() != first.Body.String() {
+		t.Fatalf("idempotent replay first=%d %s second=%d %s", first.Code, first.Body.String(), second.Code, second.Body.String())
+	}
+	list, err := st.ListSchedules()
+	if err != nil || len(list) != 1 {
+		t.Fatalf("duplicate schedule created: %+v err=%v", list, err)
+	}
+	conflict := call(strings.Replace(body, "幂等计划", "不同计划", 1))
+	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), "idempotency_conflict") {
+		t.Fatalf("conflict status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+}
+
+func TestScheduleAllowsCurrentProviderWithEmptyID(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	manager := jobs.New(apiResolver{}, apiExecutor{}, st)
+	defer manager.Shutdown()
+	h := New(configscan.New(), manager, "", st).Handler()
+	body := `{"name":"当前配置巡检","enabled":true,"cli":"codex","providerId":"","mode":"probe","timezone":"Asia/Shanghai","weekdaysMask":62,"startMinute":540,"endMinute":1080,"untilSuccess":true,"timeoutSeconds":15,"retryIntervalSeconds":2,"keepaliveIntervalSeconds":120,"failureThreshold":3}`
+	r := httptest.NewRequest(http.MethodPost, "/api/schedules", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusCreated || !strings.Contains(w.Body.String(), `"providerId":""`) {
+		t.Fatalf("current provider schedule status=%d body=%s", w.Code, w.Body.String())
 	}
 }

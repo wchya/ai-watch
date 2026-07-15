@@ -32,11 +32,10 @@ type Scanner struct {
 	ClaudeBin       string
 	SQLiteBin       string
 	RuntimeDir      string
+	CCSwitchTimeout time.Duration
 	mu              sync.RWMutex
 	queryMu         sync.Mutex
 	queryCache      map[string]ccQueryCache
-	providerCache   map[domain.CLI][]domain.Provider
-	providerRefresh map[domain.CLI]bool
 	ccSwitchWarning string
 }
 
@@ -52,8 +51,27 @@ func New() *Scanner {
 		ClaudeDir:  value("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude")),
 		CCSwitchDB: value("CCSWITCH_DB", filepath.Join(home, ".cc-switch", "cc-switch.db")),
 		CodexBin:   value("CODEX_BIN", "codex"), ClaudeBin: value("CLAUDE_BIN", "claude"), SQLiteBin: value("SQLITE_BIN", "sqlite3"),
-		RuntimeDir: value("AI_WATCH_RUNTIME_DIR", "/run/ai-watch"), providerCache: map[domain.CLI][]domain.Provider{}, providerRefresh: map[domain.CLI]bool{}, queryCache: map[string]ccQueryCache{},
+		RuntimeDir: value("AI_WATCH_RUNTIME_DIR", "/run/ai-watch"), CCSwitchTimeout: durationSeconds("AI_WATCH_CC_SWITCH_SYNC_TIMEOUT_SECONDS", 10*time.Second), queryCache: map[string]ccQueryCache{},
 	}
+}
+
+func durationSeconds(key string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds < 1 || seconds > 120 {
+		return fallback
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (s *Scanner) ccSwitchTimeout() time.Duration {
+	if s.CCSwitchTimeout > 0 {
+		return s.CCSwitchTimeout
+	}
+	return 10 * time.Second
 }
 
 func value(k, fallback string) string {
@@ -89,101 +107,92 @@ func (s *Scanner) Providers(cli domain.CLI) ([]domain.Provider, error) {
 	if (cli == domain.CLICodex && exists(filepath.Join(s.CodexDir, "config.toml"))) || (cli == domain.CLIClaude && exists(filepath.Join(s.ClaudeDir, "settings.json"))) {
 		providers = append(providers, domain.Provider{ID: "", Name: "当前 CLI 配置", CLI: cli, Current: true})
 	}
-	if !exists(s.CCSwitchDB) {
-		return append(providers, s.cachedProviders(cli)...), nil
-	}
-	refreshDone := s.refreshProviders(cli)
-	cached := s.cachedProviders(cli)
-	if len(cached) == 0 {
-		select {
-		case <-refreshDone:
-			cached = s.cachedProviders(cli)
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
-	return append(providers, cached...), nil
+	return providers, nil
 }
 
-func (s *Scanner) refreshProviders(cli domain.CLI) <-chan struct{} {
-	done := make(chan struct{})
-	s.mu.Lock()
-	if s.providerRefresh == nil {
-		s.providerRefresh = map[domain.CLI]bool{}
-	}
-	if s.providerRefresh[cli] {
-		s.mu.Unlock()
-		close(done)
-		return done
-	}
-	s.providerRefresh[cli] = true
-	s.mu.Unlock()
-	go func() {
-		defer close(done)
-		providers, err := s.loadCCProviders(cli)
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		s.providerRefresh[cli] = false
-		if err != nil {
-			s.ccSwitchWarning = err.Error()
-			return
-		}
-		if s.providerCache == nil {
-			s.providerCache = map[domain.CLI][]domain.Provider{}
-		}
-		s.providerCache[cli] = append([]domain.Provider(nil), providers...)
-		s.ccSwitchWarning = ""
-	}()
-	return done
-}
-
-func (s *Scanner) loadCCProviders(cli domain.CLI) ([]domain.Provider, error) {
-	q := fmt.Sprintf(`SELECT id, name, is_current, settings_config FROM providers WHERE app_type='%s' ORDER BY COALESCE(sort_index,999999), created_at, id;`, sqlQuote(string(cli)))
+// LoadCCSwitchProviders performs the bounded, read-only CC Switch import used
+// during application startup. Callers must persist the returned records before
+// runtime code resolves provider IDs; Scanner intentionally retains no copy.
+func (s *Scanner) LoadCCSwitchProviders() ([]domain.CCSwitchProvider, error) {
+	// CC Switch releases in use today do not consistently expose an
+	// updated_at column. created_at is present in both schemas and remains a
+	// useful stable timestamp for the read-only startup snapshot.
+	q := `SELECT id, name, app_type, is_current, settings_config, created_at AS updated_at FROM providers WHERE app_type IN ('codex','claude') ORDER BY app_type, COALESCE(sort_index,999999), created_at, id;`
 	out, err := s.queryCCSwitch(q)
 	if err != nil {
+		s.setCCSwitchWarning(err)
 		return nil, err
 	}
 	var rows []struct {
-		ID       string `json:"id"`
-		Name     string `json:"name"`
-		Current  any    `json:"is_current"`
-		Settings string `json:"settings_config"`
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		AppType   string `json:"app_type"`
+		Current   any    `json:"is_current"`
+		Settings  string `json:"settings_config"`
+		UpdatedAt any    `json:"updated_at"`
 	}
 	if err := json.Unmarshal(out, &rows); err != nil {
-		return nil, fmt.Errorf("decode cc switch rows: %w", err)
+		err = fmt.Errorf("decode cc switch rows: %w", err)
+		s.setCCSwitchWarning(err)
+		return nil, err
 	}
-	ccProviders := make([]domain.Provider, 0, len(rows))
+	ccProviders := make([]domain.CCSwitchProvider, 0, len(rows))
 	for _, row := range rows {
+		cli := domain.CLI(row.AppType)
+		if cli != domain.CLICodex && cli != domain.CLIClaude {
+			continue
+		}
 		var raw struct {
 			Config string            `json:"config"`
 			Auth   map[string]string `json:"auth"`
 			Env    map[string]string `json:"env"`
 		}
-		_ = json.Unmarshal([]byte(row.Settings), &raw)
-		p := domain.Provider{ID: row.ID, Name: row.Name, CLI: cli, Current: sqliteBool(row.Current), Model: raw.Env["ANTHROPIC_MODEL"]}
+		if err := json.Unmarshal([]byte(row.Settings), &raw); err != nil {
+			err = fmt.Errorf("decode CC Switch provider %q settings: %w", row.ID, err)
+			s.setCCSwitchWarning(err)
+			return nil, err
+		}
+		p := domain.CCSwitchProvider{
+			ID: row.ID, Name: row.Name, CLI: cli, Current: sqliteBool(row.Current),
+			UpdatedAt: sqliteTime(row.UpdatedAt),
+		}
 		if cli == domain.CLICodex {
 			c := parseCodex(raw.Config)
 			p.BaseURL = c.BaseURL
 			p.Model = c.Model
-			p.MaskedKey = security.Mask(raw.Auth["OPENAI_API_KEY"])
+			p.Provider = c.Provider
+			p.APIKey = first(c.APIKey, raw.Auth[c.APIKeyEnv], raw.Auth["OPENAI_API_KEY"])
+			p.CodexConfig = raw.Config
 		} else {
 			p.BaseURL = raw.Env["ANTHROPIC_BASE_URL"]
-			p.MaskedKey = security.Mask(first(raw.Env["ANTHROPIC_AUTH_TOKEN"], raw.Env["ANTHROPIC_API_KEY"], raw.Env["OPENROUTER_API_KEY"], raw.Env["GOOGLE_API_KEY"]))
+			p.Model = raw.Env["ANTHROPIC_MODEL"]
+			p.Provider = "anthropic"
+			if p.BaseURL != "" && p.BaseURL != "https://api.anthropic.com" {
+				p.Provider = "anthropic-compatible"
+			}
+			p.APIKey = first(raw.Env["ANTHROPIC_AUTH_TOKEN"], raw.Env["ANTHROPIC_API_KEY"], raw.Env["OPENROUTER_API_KEY"], raw.Env["GOOGLE_API_KEY"])
+			p.ClaudeEnv = cloneStrings(raw.Env)
 		}
 		ccProviders = append(ccProviders, p)
 	}
+	s.setCCSwitchWarning(nil)
 	return ccProviders, nil
+}
+
+func (s *Scanner) setCCSwitchWarning(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err == nil {
+		s.ccSwitchWarning = ""
+		return
+	}
+	s.ccSwitchWarning = security.Redact(err.Error())
 }
 
 func (s *Scanner) CCSwitchWarning() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.ccSwitchWarning
-}
-
-func (s *Scanner) cachedProviders(cli domain.CLI) []domain.Provider {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return append([]domain.Provider(nil), s.providerCache[cli]...)
 }
 
 func sqliteBool(value any) bool {
@@ -199,7 +208,47 @@ func sqliteBool(value any) bool {
 	}
 }
 
-func sqlQuote(v string) string { return strings.ReplaceAll(v, "'", "''") }
+func sqliteTime(value any) time.Time {
+	switch typed := value.(type) {
+	case float64:
+		return unixSQLiteTime(int64(typed))
+	case int64:
+		return unixSQLiteTime(typed)
+	case int:
+		return unixSQLiteTime(int64(typed))
+	}
+	text := strings.TrimSpace(fmt.Sprint(value))
+	if text == "" || text == "<nil>" {
+		return time.Time{}
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, text); err == nil {
+		return parsed
+	}
+	integer, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	return unixSQLiteTime(integer)
+}
+
+func unixSQLiteTime(value int64) time.Time {
+	if value >= 1_000_000_000_000 {
+		return time.UnixMilli(value)
+	}
+	return time.Unix(value, 0)
+}
+
+func cloneStrings(source map[string]string) map[string]string {
+	if source == nil {
+		return nil
+	}
+	clone := make(map[string]string, len(source))
+	for key, value := range source {
+		clone[key] = value
+	}
+	return clone
+}
+
 func first(v ...string) string {
 	for _, x := range v {
 		if x != "" {
@@ -219,58 +268,7 @@ func (s *Scanner) Resolve(cli domain.CLI, providerID string) (domain.ResolvedCon
 		}
 		return domain.ResolvedConfig{}, errors.New("unsupported cli")
 	}
-	return s.ccProvider(cli, providerID)
-}
-
-func (s *Scanner) ccProvider(cli domain.CLI, id string) (domain.ResolvedConfig, error) {
-	q := fmt.Sprintf(`SELECT name, settings_config FROM providers WHERE app_type='%s' AND id='%s' LIMIT 1;`, sqlQuote(string(cli)), sqlQuote(id))
-	out, err := s.queryCCSwitch(q)
-	if err != nil {
-		return domain.ResolvedConfig{}, fmt.Errorf("query cc switch provider: %w", err)
-	}
-	var rows []struct {
-		Name     string `json:"name"`
-		Settings string `json:"settings_config"`
-	}
-	if json.Unmarshal(out, &rows) != nil || len(rows) != 1 {
-		return domain.ResolvedConfig{}, errors.New("provider not found")
-	}
-	var raw struct {
-		Config string            `json:"config"`
-		Auth   map[string]string `json:"auth"`
-		Env    map[string]string `json:"env"`
-	}
-	if err := json.Unmarshal([]byte(rows[0].Settings), &raw); err != nil {
-		return domain.ResolvedConfig{}, fmt.Errorf("invalid provider settings: %w", err)
-	}
-	r := domain.ResolvedConfig{Source: "cc-switch", ProviderID: id, ProviderName: rows[0].Name, ClaudeEnv: raw.Env}
-	if cli == domain.CLICodex {
-		c := parseCodex(raw.Config)
-		r.Provider = c.Provider
-		r.Model = c.Model
-		r.BaseURL = c.BaseURL
-		r.APIKey = raw.Auth["OPENAI_API_KEY"]
-		r.APIKeySource = "CC Switch auth.OPENAI_API_KEY"
-		r.CodexConfig = raw.Config
-		if r.CodexConfig == "" || r.APIKey == "" {
-			return domain.ResolvedConfig{}, errors.New("Codex provider requires config and OPENAI_API_KEY")
-		}
-	} else {
-		r.Provider = "anthropic-compatible"
-		r.BaseURL = raw.Env["ANTHROPIC_BASE_URL"]
-		r.Model = raw.Env["ANTHROPIC_MODEL"]
-		r.APIKey = first(raw.Env["ANTHROPIC_AUTH_TOKEN"], raw.Env["ANTHROPIC_API_KEY"], raw.Env["OPENROUTER_API_KEY"], raw.Env["GOOGLE_API_KEY"])
-		for _, k := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "GOOGLE_API_KEY"} {
-			if raw.Env[k] != "" {
-				r.APIKeySource = "CC Switch env." + k
-				break
-			}
-		}
-		if r.BaseURL == "" || r.APIKey == "" {
-			return domain.ResolvedConfig{}, errors.New("Claude provider requires ANTHROPIC_BASE_URL and API key")
-		}
-	}
-	return r, nil
+	return domain.ResolvedConfig{}, fmt.Errorf("provider %q must be resolved from the Redis provider store", providerID)
 }
 
 func (s *Scanner) queryCCSwitch(query string) ([]byte, error) {
@@ -290,8 +288,9 @@ func (s *Scanner) queryCCSwitch(query string) ([]byte, error) {
 			}
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), s.ccSwitchTimeout())
 		out, err := querySQLiteJSON(ctx, snapshot, query)
+		ctxErr := ctx.Err()
 		cancel()
 		_ = os.Remove(snapshot)
 		if err == nil {
@@ -301,7 +300,7 @@ func (s *Scanner) queryCCSwitch(query string) ([]byte, error) {
 			s.queryCache[query] = ccQueryCache{value: append([]byte(nil), out...), at: time.Now()}
 			return out, nil
 		}
-		if ctx.Err() != nil {
+		if errors.Is(ctxErr, context.DeadlineExceeded) {
 			lastErr = errors.New("SQLite query timed out")
 		} else {
 			lastErr = sanitizeSQLiteError(err, s.CCSwitchDB)
@@ -362,7 +361,7 @@ func (s *Scanner) copyCCSwitchSnapshot() (string, error) {
 		if err != nil {
 			return "", err
 		}
-	case <-time.After(1500 * time.Millisecond):
+	case <-time.After(s.ccSwitchTimeout()):
 		_ = source.Close()
 		_ = target.Close()
 		return "", errors.New("CC Switch snapshot copy timed out")

@@ -54,6 +54,7 @@ type Event struct {
 	Level      string         `json:"level,omitempty"`
 	ProviderID string         `json:"providerId,omitempty"`
 	JobID      string         `json:"jobId,omitempty"`
+	ScheduleID string         `json:"scheduleId,omitempty"`
 	Message    string         `json:"message,omitempty"`
 	Data       map[string]any `json:"data,omitempty"`
 }
@@ -61,6 +62,7 @@ type Event struct {
 type EventFilter struct {
 	ProviderID string
 	JobID      string
+	ScheduleID string
 	Type       string
 	Level      string
 	Since      time.Time
@@ -85,6 +87,7 @@ type RetentionResult struct {
 }
 
 type Diagnostics struct {
+	Backend       string
 	SchemaVersion int
 	LogicalBytes  int64
 	EventCount    int64
@@ -94,6 +97,15 @@ type Diagnostics struct {
 func New(dir string) *JSON {
 	s := &JSON{dir: dir, dbPath: filepath.Join(dir, databaseName)}
 	s.initErr = s.open()
+	return s
+}
+
+// NewReadOnly opens the existing SQLite database strictly as a migration
+// source. It never creates directories, applies schema migrations, changes
+// journaling settings, or removes legacy files.
+func NewReadOnly(dir string) *JSON {
+	s := &JSON{dir: dir, dbPath: filepath.Join(dir, databaseName)}
+	s.initErr = s.openReadOnly()
 	return s
 }
 
@@ -147,6 +159,25 @@ func (s *JSON) open() error {
 	}
 	s.removeLegacyFiles()
 	s.ensurePrivateFiles()
+	return nil
+}
+
+func (s *JSON) openReadOnly() error {
+	if _, err := os.Stat(s.dbPath); err != nil {
+		return fmt.Errorf("inspect read-only sqlite: %w", err)
+	}
+	dsn := "file:" + s.dbPath + "?mode=ro&_busy_timeout=5000&_query_only=1"
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		return fmt.Errorf("open read-only sqlite: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err = db.Ping(); err != nil {
+		_ = db.Close()
+		return fmt.Errorf("ping read-only sqlite: %w", err)
+	}
+	s.db = db
 	return nil
 }
 
@@ -238,7 +269,83 @@ func (s *JSON) migrate() error {
 			return err
 		}
 	}
+	if !applied[8] {
+		if err := s.applyUIThemeV8(); err != nil {
+			return err
+		}
+	}
+	if !applied[9] {
+		if err := s.applyReliabilityAlertsV9(); err != nil {
+			return err
+		}
+	}
+	if !applied[10] {
+		if err := s.applyScheduleEventLinkV10(); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (s *JSON) applyScheduleEventLinkV10() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin schedule event migration: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`ALTER TABLE events ADD COLUMN schedule_id TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("add event schedule id: %w", err)
+	}
+	if _, err = tx.Exec(`CREATE INDEX IF NOT EXISTS idx_events_schedule_at ON events(schedule_id, at_ns DESC)`); err != nil {
+		return fmt.Errorf("index event schedule id: %w", err)
+	}
+	if _, err = tx.Exec(`INSERT INTO schema_migrations(version, applied_at_ns) VALUES(10, ?)`, time.Now().UTC().UnixNano()); err != nil {
+		return fmt.Errorf("record schedule event migration: %w", err)
+	}
+	return tx.Commit()
+}
+
+func (s *JSON) applyReliabilityAlertsV9() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin reliability alert migration: %w", err)
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`ALTER TABLE settings ADD COLUMN reliability_alert_enabled INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE settings ADD COLUMN reliability_alert_min_samples INTEGER NOT NULL DEFAULT 5`,
+		`ALTER TABLE settings ADD COLUMN reliability_alert_success_rate INTEGER NOT NULL DEFAULT 90`,
+		`ALTER TABLE settings ADD COLUMN reliability_alert_consecutive_failures INTEGER NOT NULL DEFAULT 3`,
+		`ALTER TABLE settings ADD COLUMN reliability_alert_p95_millis INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE settings ADD COLUMN reliability_alert_cooldown_seconds INTEGER NOT NULL DEFAULT 1800`,
+		`ALTER TABLE settings ADD COLUMN reliability_alert_recovery_successes INTEGER NOT NULL DEFAULT 2`,
+		`ALTER TABLE settings ADD COLUMN reliability_alert_recovery_enabled INTEGER NOT NULL DEFAULT 1`,
+	} {
+		if _, err = tx.Exec(statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+			return fmt.Errorf("add reliability alert setting: %w", err)
+		}
+	}
+	if _, err = tx.Exec(`INSERT INTO schema_migrations(version, applied_at_ns) VALUES(9, ?)`, time.Now().UTC().UnixNano()); err != nil {
+		return fmt.Errorf("record reliability alert migration: %w", err)
+	}
+	return tx.Commit()
+}
+
+func (s *JSON) applyUIThemeV8() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin UI theme migration: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`ALTER TABLE settings ADD COLUMN ui_theme TEXT NOT NULL DEFAULT 'deep-ocean'`); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+			return fmt.Errorf("add UI theme column: %w", err)
+		}
+	}
+	if _, err = tx.Exec(`INSERT INTO schema_migrations(version, applied_at_ns) VALUES(8, ?)`, time.Now().UTC().UnixNano()); err != nil {
+		return fmt.Errorf("record UI theme migration: %w", err)
+	}
+	return tx.Commit()
 }
 
 func (s *JSON) applyJobRunOnceV7() error {
@@ -425,10 +532,19 @@ func (s *JSON) applySchemaV1() error {
 			keepalive_summary_successes INTEGER NOT NULL DEFAULT 0,
 			probe_progress_seconds INTEGER NOT NULL DEFAULT 3600,
 			recovery_merge_seconds INTEGER NOT NULL DEFAULT 0,
+			reliability_alert_enabled INTEGER NOT NULL DEFAULT 0,
+			reliability_alert_min_samples INTEGER NOT NULL DEFAULT 5,
+			reliability_alert_success_rate INTEGER NOT NULL DEFAULT 90,
+			reliability_alert_consecutive_failures INTEGER NOT NULL DEFAULT 3,
+			reliability_alert_p95_millis INTEGER NOT NULL DEFAULT 0,
+			reliability_alert_cooldown_seconds INTEGER NOT NULL DEFAULT 1800,
+			reliability_alert_recovery_successes INTEGER NOT NULL DEFAULT 2,
+			reliability_alert_recovery_enabled INTEGER NOT NULL DEFAULT 1,
 			history_limit INTEGER NOT NULL,
 			event_retention_days INTEGER NOT NULL DEFAULT 30,
 			event_retention_rows INTEGER NOT NULL DEFAULT 5000,
 			event_retention_bytes INTEGER NOT NULL DEFAULT 8388608,
+			ui_theme TEXT NOT NULL DEFAULT 'deep-ocean',
 			dingtalk_configured INTEGER NOT NULL DEFAULT 0,
 			updated_at_ns INTEGER NOT NULL
 		)`,
@@ -461,12 +577,14 @@ func (s *JSON) applySchemaV1() error {
 			level TEXT NOT NULL DEFAULT '',
 			provider_id TEXT NOT NULL DEFAULT '',
 			job_id TEXT NOT NULL DEFAULT '',
+			schedule_id TEXT NOT NULL DEFAULT '',
 			message TEXT NOT NULL DEFAULT '',
 			data_json TEXT NOT NULL DEFAULT '{}',
 			size_bytes INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE INDEX idx_events_at ON events(at_ns DESC, id DESC)`,
 		`CREATE INDEX idx_events_provider_at ON events(provider_id, at_ns DESC)`,
+		`CREATE INDEX idx_events_schedule_at ON events(schedule_id, at_ns DESC)`,
 		`CREATE INDEX idx_events_job_at ON events(job_id, at_ns DESC)`,
 		`CREATE INDEX idx_events_type_at ON events(type, at_ns DESC)`,
 		`CREATE INDEX idx_events_level_at ON events(level, at_ns DESC)`,
@@ -567,16 +685,22 @@ func (s *JSON) LoadSettings() (domain.Settings, error) {
 		return domain.Settings{}, err
 	}
 	var value domain.Settings
-	var configured int
+	var configured, alertEnabled, recoveryEnabled int
 	err := s.db.QueryRow(`SELECT timeout_seconds, retry_interval_seconds, keepalive_interval_seconds,
 		keepalive_summary_seconds, keepalive_summary_successes, probe_progress_seconds, recovery_merge_seconds,
+		reliability_alert_enabled, reliability_alert_min_samples, reliability_alert_success_rate,
+		reliability_alert_consecutive_failures, reliability_alert_p95_millis, reliability_alert_cooldown_seconds,
+		reliability_alert_recovery_successes, reliability_alert_recovery_enabled,
 		history_limit, event_retention_days, event_retention_rows, event_retention_bytes,
-		dingtalk_configured FROM settings WHERE id = 1`).Scan(
+		ui_theme, dingtalk_configured FROM settings WHERE id = 1`).Scan(
 		&value.TimeoutSeconds, &value.RetryIntervalSeconds, &value.KeepaliveIntervalSeconds,
 		&value.KeepaliveSummarySeconds, &value.KeepaliveSummarySuccesses,
 		&value.ProbeProgressSeconds, &value.RecoveryMergeSeconds,
+		&alertEnabled, &value.ReliabilityAlertMinSamples, &value.ReliabilityAlertSuccessRate,
+		&value.ReliabilityAlertConsecutiveFailures, &value.ReliabilityAlertP95Millis, &value.ReliabilityAlertCooldownSeconds,
+		&value.ReliabilityAlertRecoverySuccesses, &recoveryEnabled,
 		&value.HistoryLimit, &value.EventRetentionDays, &value.EventRetentionRows,
-		&value.EventRetentionBytes, &configured,
+		&value.EventRetentionBytes, &value.UITheme, &configured,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.DefaultSettings(), nil
@@ -585,6 +709,8 @@ func (s *JSON) LoadSettings() (domain.Settings, error) {
 		return domain.Settings{}, fmt.Errorf("load settings: %w", err)
 	}
 	value.DingTalkConfigured = configured != 0
+	value.ReliabilityAlertEnabled = alertEnabled != 0
+	value.ReliabilityAlertRecoveryEnabled = recoveryEnabled != 0
 	return value, nil
 }
 
@@ -609,9 +735,12 @@ func saveSettingsDB(exec sqlExecer, value domain.Settings, now time.Time) error 
 	_, err := exec.Exec(`INSERT INTO settings(
 		id, timeout_seconds, retry_interval_seconds, keepalive_interval_seconds,
 		keepalive_summary_seconds, keepalive_summary_successes, probe_progress_seconds, recovery_merge_seconds,
+		reliability_alert_enabled, reliability_alert_min_samples, reliability_alert_success_rate,
+		reliability_alert_consecutive_failures, reliability_alert_p95_millis, reliability_alert_cooldown_seconds,
+		reliability_alert_recovery_successes, reliability_alert_recovery_enabled,
 		history_limit, event_retention_days, event_retention_rows, event_retention_bytes,
-		dingtalk_configured, updated_at_ns
-	) VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ui_theme, dingtalk_configured, updated_at_ns
+	) VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		timeout_seconds = excluded.timeout_seconds,
 		retry_interval_seconds = excluded.retry_interval_seconds,
@@ -620,17 +749,29 @@ func saveSettingsDB(exec sqlExecer, value domain.Settings, now time.Time) error 
 		keepalive_summary_successes = excluded.keepalive_summary_successes,
 		probe_progress_seconds = excluded.probe_progress_seconds,
 		recovery_merge_seconds = excluded.recovery_merge_seconds,
+		reliability_alert_enabled = excluded.reliability_alert_enabled,
+		reliability_alert_min_samples = excluded.reliability_alert_min_samples,
+		reliability_alert_success_rate = excluded.reliability_alert_success_rate,
+		reliability_alert_consecutive_failures = excluded.reliability_alert_consecutive_failures,
+		reliability_alert_p95_millis = excluded.reliability_alert_p95_millis,
+		reliability_alert_cooldown_seconds = excluded.reliability_alert_cooldown_seconds,
+		reliability_alert_recovery_successes = excluded.reliability_alert_recovery_successes,
+		reliability_alert_recovery_enabled = excluded.reliability_alert_recovery_enabled,
 		history_limit = excluded.history_limit,
 		event_retention_days = excluded.event_retention_days,
 		event_retention_rows = excluded.event_retention_rows,
 		event_retention_bytes = excluded.event_retention_bytes,
+		ui_theme = excluded.ui_theme,
 		dingtalk_configured = excluded.dingtalk_configured,
 		updated_at_ns = excluded.updated_at_ns`,
 		value.TimeoutSeconds, value.RetryIntervalSeconds, value.KeepaliveIntervalSeconds,
 		value.KeepaliveSummarySeconds, value.KeepaliveSummarySuccesses,
 		value.ProbeProgressSeconds, value.RecoveryMergeSeconds,
+		boolInt(value.ReliabilityAlertEnabled), value.ReliabilityAlertMinSamples, value.ReliabilityAlertSuccessRate,
+		value.ReliabilityAlertConsecutiveFailures, value.ReliabilityAlertP95Millis, value.ReliabilityAlertCooldownSeconds,
+		value.ReliabilityAlertRecoverySuccesses, boolInt(value.ReliabilityAlertRecoveryEnabled),
 		value.HistoryLimit, value.EventRetentionDays, value.EventRetentionRows,
-		value.EventRetentionBytes, boolInt(value.DingTalkConfigured), now.UnixNano(),
+		value.EventRetentionBytes, value.UITheme, boolInt(value.DingTalkConfigured), now.UnixNano(),
 	)
 	if err != nil {
 		return fmt.Errorf("save settings: %w", err)
@@ -926,8 +1067,10 @@ func normalizeSchedule(value domain.Schedule) (domain.Schedule, error) {
 	if value.CLI != domain.CLICodex && value.CLI != domain.CLIClaude {
 		return domain.Schedule{}, errors.New("schedule cli must be codex or claude")
 	}
-	if value.ProviderID == "" || len(value.ProviderID) > 256 {
-		return domain.Schedule{}, errors.New("schedule providerId is required and must not exceed 256 bytes")
+	// An empty provider ID is the canonical identifier for the currently active
+	// CLI configuration. Non-empty IDs reference discovered or manual providers.
+	if len(value.ProviderID) > 256 {
+		return domain.Schedule{}, errors.New("schedule providerId must not exceed 256 bytes")
 	}
 	if value.Mode != domain.ModeProbe && value.Mode != domain.ModeKeepalive {
 		return domain.Schedule{}, errors.New("schedule mode must be probe or keepalive")
@@ -1103,9 +1246,9 @@ func (s *JSON) SaveEvent(value Event, retention ...EventRetention) error {
 	defer tx.Rollback()
 	size := eventSize(value, data)
 	result, err := tx.Exec(`INSERT INTO events(
-		at_ns, type, level, provider_id, job_id, message, data_json, size_bytes
-	) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`, value.At.UnixNano(), value.Type, value.Level,
-		value.ProviderID, value.JobID, value.Message, string(data), size)
+		at_ns, type, level, provider_id, job_id, schedule_id, message, data_json, size_bytes
+	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, value.At.UnixNano(), value.Type, value.Level,
+		value.ProviderID, value.JobID, value.ScheduleID, value.Message, string(data), size)
 	if err != nil {
 		return fmt.Errorf("save event: %w", err)
 	}
@@ -1142,7 +1285,7 @@ func (s *JSON) ListEvents(filter EventFilter) ([]Event, error) {
 	if offset < 0 {
 		offset = 0
 	}
-	query := `SELECT id, at_ns, type, level, provider_id, job_id, message, data_json
+	query := `SELECT id, at_ns, type, level, provider_id, job_id, schedule_id, message, data_json
 		FROM events` + where + ` ORDER BY at_ns DESC, id DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(query, args...)
@@ -1156,7 +1299,7 @@ func (s *JSON) ListEvents(filter EventFilter) ([]Event, error) {
 		var at int64
 		var data string
 		if err = rows.Scan(&value.ID, &at, &value.Type, &value.Level, &value.ProviderID,
-			&value.JobID, &value.Message, &data); err != nil {
+			&value.JobID, &value.ScheduleID, &value.Message, &data); err != nil {
 			return nil, fmt.Errorf("scan event: %w", err)
 		}
 		value.At = time.Unix(0, at).UTC()
@@ -1195,7 +1338,7 @@ func (s *JSON) Diagnostics() (Diagnostics, error) {
 	if err := s.ready(); err != nil {
 		return Diagnostics{}, err
 	}
-	var result Diagnostics
+	result := Diagnostics{Backend: "sqlite"}
 	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&result.SchemaVersion); err != nil {
 		return Diagnostics{}, fmt.Errorf("read schema version: %w", err)
 	}
@@ -1237,6 +1380,23 @@ func (s *JSON) ClearEvents() (int64, error) {
 		return deleted, fmt.Errorf("vacuum cleared events: %w", err)
 	}
 	return deleted, nil
+}
+
+func (s *JSON) DeleteEventsByType(eventType string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ready(); err != nil {
+		return 0, err
+	}
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" {
+		return 0, errors.New("event type is required")
+	}
+	result, err := s.db.Exec(`DELETE FROM events WHERE type = ?`, eventType)
+	if err != nil {
+		return 0, fmt.Errorf("delete events by type: %w", err)
+	}
+	return result.RowsAffected()
 }
 
 func (s *JSON) RetainEvents(retention EventRetention) (RetentionResult, error) {
@@ -1334,6 +1494,10 @@ func eventWhere(filter EventFilter) (string, []any) {
 	if filter.JobID != "" {
 		clauses = append(clauses, "job_id = ?")
 		args = append(args, filter.JobID)
+	}
+	if filter.ScheduleID != "" {
+		clauses = append(clauses, "(schedule_id = ? OR json_extract(data_json, '$.scheduleId') = ?)")
+		args = append(args, filter.ScheduleID, filter.ScheduleID)
 	}
 	if filter.Type != "" {
 		clauses = append(clauses, "type = ?")

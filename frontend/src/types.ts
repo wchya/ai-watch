@@ -27,9 +27,59 @@ export interface Provider {
   model?: string
   baseUrl?: string
   maskedApiKey?: string
-  source?: 'current' | 'cc-switch'
+  enabled?: boolean
+  proxyMode?: ProxyMode
+  hasProxyUrl?: boolean
+  maskedProxyUrl?: string
+  source?: 'current' | 'cc-switch' | 'manual'
   available?: boolean
   state?: ProviderState
+}
+
+export type ProxyMode = 'default' | 'direct' | 'custom'
+
+export interface ManualProvider {
+  id: string
+  name: string
+  cli: Cli
+  baseUrl: string
+  model?: string
+  provider?: string
+  hasApiKey: boolean
+  maskedKey?: string
+  proxyMode?: ProxyMode
+  hasProxyUrl?: boolean
+  maskedProxyUrl?: string
+  enabled?: boolean
+  createdAt?: string
+  updatedAt?: string
+}
+
+export interface ManualProviderWrite {
+  id?: string
+  name: string
+  cli: Cli
+  baseUrl: string
+  model?: string
+  provider?: string
+  apiKey?: string
+  clearApiKey?: boolean
+  proxyMode?: ProxyMode
+  proxyUrl?: string
+  clearProxyUrl?: boolean
+  enabled?: boolean
+}
+
+export interface DingTalkConfig {
+  configured: boolean
+  source: 'redis' | 'environment' | 'none'
+  maskedWebhook?: string
+  updatedAt?: string
+}
+
+export interface DingTalkConfigWrite {
+  webhookUrl?: string
+  clearStored?: boolean
 }
 
 export interface ProviderState {
@@ -120,8 +170,17 @@ export interface AppSettings {
   keepaliveSummarySuccesses: number
   probeProgressSeconds: number
   recoveryMergeSeconds: number
+  reliabilityAlertEnabled: boolean
+  reliabilityAlertMinSamples: number
+  reliabilityAlertSuccessRate: number
+  reliabilityAlertConsecutiveFailures: number
+  reliabilityAlertP95Millis: number
+  reliabilityAlertCooldownSeconds: number
+  reliabilityAlertRecoverySuccesses: number
+  reliabilityAlertRecoveryEnabled: boolean
   browserNotifications: boolean
   dingTalkConfigured: boolean
+  uiTheme: 'deep-ocean' | 'graphite-signal' | 'arctic-daylight'
 }
 
 export interface JobEvent {
@@ -132,6 +191,8 @@ export interface JobEvent {
   message?: string
   job?: JobSummary
   attemptStatus?: AttemptStatus
+  data?: Record<string, unknown>
+  rawType?: string
 }
 
 export interface OperationalEvent {
@@ -141,7 +202,9 @@ export interface OperationalEvent {
   level?: string
   providerId?: string
   jobId?: string
+  scheduleId?: string
   message?: string
+  data?: Record<string, unknown>
 }
 
 export interface EventQuery {
@@ -151,6 +214,7 @@ export interface EventQuery {
   level?: string
   providerId?: string
   jobId?: string
+  scheduleId?: string
   since?: string
   until?: string
 }
@@ -179,12 +243,26 @@ export interface SystemDiagnostics {
   status: 'ok' | 'degraded'
   generatedAt: string
   clis: DiagnosticCLI[]
-  sqlite: {
+  storage: {
     available: boolean
+    backend: 'redis' | 'sqlite' | string
     schemaVersion: number
     logicalBytes: number
     eventCount: number
     scheduleCount: number
+  }
+  proxy: {
+    configured: boolean
+    available: boolean
+    endpoint?: string
+    checkState: 'ok' | 'not_configured' | 'invalid' | 'unavailable' | 'timeout'
+  }
+  ccSwitchSync?: {
+    sourceAvailable: boolean
+    lastAttemptAt?: string
+    lastSuccessAt?: string
+    count: number
+    warning?: string
   }
   runtime: {
     activeJobs: number
@@ -272,3 +350,148 @@ export interface BulkJobResult {
 }
 
 export interface ApiErrorBody { error?: string; message?: string; code?: string }
+
+export type RedisDataType = 'string' | 'hash' | 'list' | 'set' | 'zset' | string
+
+export interface RedisOverview {
+  connected: boolean
+  version?: string
+  mode?: string
+  keyCount: number
+  usedMemoryBytes: number
+  usedMemoryHuman?: string
+  maxMemoryBytes: number
+  connectedClients: number
+  expiringKeys: number
+  hitRate: number
+  uptimeSeconds: number
+  latencyMs: number
+}
+
+export interface RedisKeySummary {
+  key: string
+  type: RedisDataType
+  ttlMillis: number
+  persistent: boolean
+  size: number
+  memoryBytes?: number
+}
+
+export interface RedisHashEntry { field: string; value: string }
+export interface RedisZSetEntry { member: string; score: number }
+
+export interface RedisKeyDetail extends RedisKeySummary {
+  encoding?: string
+  version: string
+  cursor?: string
+  nextCursor?: string
+  truncated?: boolean
+  value?: string | string[] | RedisHashEntry[] | RedisZSetEntry[]
+}
+
+export interface RedisKeyListResult {
+  keys: RedisKeySummary[]
+  cursor: string
+  nextCursor: string
+}
+
+export interface RedisPrewarmSnapshots {
+  settings: number
+  summaries: number
+  providerExamples: number
+  schedules: number
+  manualProviders: number
+  ccSwitchProviders: number
+  dingTalk: number
+}
+
+export interface RedisPrewarmResult {
+  durationMs: number
+  snapshots: RedisPrewarmSnapshots
+}
+
+export interface RedisMutationInput {
+  key: string
+  operation: string
+  version: string
+  confirmKey?: string
+  value?: string
+  field?: string
+  member?: string
+  score?: number
+  index?: number
+}
+
+export interface RedisMutationResult {
+  key: RedisKeyDetail
+  prewarm?: RedisPrewarmSnapshots
+}
+
+export type ReliabilityRange = '24h' | '7d' | '30d'
+
+export interface ReliabilityCounts {
+  success: number
+  timeout: number
+  overloaded: number
+  unmatched: number
+  fatal: number
+  startFailed: number
+  stopped: number
+}
+
+export interface ReliabilityMetrics {
+  requests: number
+  completed: number
+  successRate?: number
+  averageDurationMillis?: number
+  p95DurationMillis?: number
+  maxConsecutiveFailures: number
+  consecutiveFailures: number
+  counts: ReliabilityCounts
+}
+
+export interface ReliabilityProvider {
+  key: string
+  cli: Cli
+  providerId: string
+  name: string
+  model?: string
+  historical: boolean
+  lastStatus?: string
+  lastRequestAt?: string
+  lastSuccessAt?: string
+  lastFailureAt?: string
+  metrics: ReliabilityMetrics
+  recommendation: {
+    level: 'recommended' | 'healthy' | 'observe' | 'pause' | 'insufficient'
+    title: string
+    reasons: string[]
+    action: string
+  }
+}
+
+export interface ReliabilityBucket {
+  start: string
+  requests: number
+  successes: number
+  failures: number
+  stopped: number
+  successRate?: number
+  averageDurationMillis?: number
+}
+
+export interface ReliabilityData {
+  range: ReliabilityRange
+  generatedAt: string
+  coverage: {
+    requestedStart: string
+    end: string
+    retentionDays: number
+    partial: boolean
+    sampleCount: number
+  }
+  overall: ReliabilityMetrics
+  providers: ReliabilityProvider[]
+  buckets: ReliabilityBucket[]
+  anomalies: ReliabilityBucket[]
+}

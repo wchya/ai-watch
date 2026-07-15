@@ -4,15 +4,19 @@ import "time"
 
 type Mode string
 type CLI string
+type ProxyMode string
 type JobStatus string
 type AttemptStatus string
 type JobPhase string
 
 const (
-	ModeProbe     Mode = "probe"
-	ModeKeepalive Mode = "keepalive"
-	CLICodex      CLI  = "codex"
-	CLIClaude     CLI  = "claude"
+	ModeProbe     Mode      = "probe"
+	ModeKeepalive Mode      = "keepalive"
+	CLICodex      CLI       = "codex"
+	CLIClaude     CLI       = "claude"
+	ProxyDefault  ProxyMode = "default"
+	ProxyDirect   ProxyMode = "direct"
+	ProxyCustom   ProxyMode = "custom"
 
 	JobQueued  JobStatus = "queued"
 	JobRunning JobStatus = "running"
@@ -50,6 +54,8 @@ type JobOptions struct {
 	Model                    string `json:"model,omitempty"`
 	FallbackModel            string `json:"fallbackModel,omitempty"`
 	SessionName              string `json:"sessionName,omitempty"`
+	TriggerSource            string `json:"-"`
+	ClientIP                 string `json:"-"`
 }
 
 func (o *JobOptions) Defaults() {
@@ -87,6 +93,8 @@ type ResolvedConfig struct {
 	CodexConfig  string            `json:"-"`
 	ClaudeEnv    map[string]string `json:"-"`
 	ConfigDir    string            `json:"-"`
+	ProxyMode    ProxyMode         `json:"-"`
+	ProxyURL     string            `json:"-"`
 }
 
 type Provider struct {
@@ -97,7 +105,26 @@ type Provider struct {
 	Model     string         `json:"model,omitempty"`
 	BaseURL   string         `json:"baseUrl,omitempty"`
 	MaskedKey string         `json:"maskedKey,omitempty"`
+	Enabled   *bool          `json:"enabled,omitempty"`
+	Available *bool          `json:"available,omitempty"`
 	State     *ProviderState `json:"state,omitempty"`
+}
+
+// CCSwitchProvider is a normalized startup import record. Sensitive source
+// material is deliberately excluded from JSON so it can only cross trusted
+// scanner/store boundaries before being encrypted at rest.
+type CCSwitchProvider struct {
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	CLI         CLI               `json:"cli"`
+	Current     bool              `json:"current"`
+	BaseURL     string            `json:"baseUrl,omitempty"`
+	Model       string            `json:"model,omitempty"`
+	Provider    string            `json:"provider,omitempty"`
+	APIKey      string            `json:"-"`
+	CodexConfig string            `json:"-"`
+	ClaudeEnv   map[string]string `json:"-"`
+	UpdatedAt   time.Time         `json:"updatedAt"`
 }
 
 type ProviderState struct {
@@ -135,24 +162,37 @@ type ManualProvider struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
 	CLI       CLI       `json:"cli"`
+	Enabled   bool      `json:"enabled"`
 	BaseURL   string    `json:"baseUrl"`
 	Model     string    `json:"model,omitempty"`
 	Provider  string    `json:"provider,omitempty"`
+	ProxyMode ProxyMode `json:"proxyMode"`
 	APIKey    string    `json:"-"`
-	HasAPIKey bool      `json:"hasApiKey"`
-	MaskedKey string    `json:"maskedKey,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	ProxyURL  string    `json:"-"`
+	// ClearAPIKey is an in-memory persistence instruction and is never exposed.
+	ClearAPIKey bool `json:"-"`
+	// ClearProxyURL is an in-memory persistence instruction and is never exposed.
+	ClearProxyURL  bool      `json:"-"`
+	HasAPIKey      bool      `json:"hasApiKey"`
+	MaskedKey      string    `json:"maskedKey,omitempty"`
+	HasProxyURL    bool      `json:"hasProxyUrl"`
+	MaskedProxyURL string    `json:"maskedProxyUrl,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 type ManualProviderWrite struct {
-	Name        string `json:"name"`
-	CLI         CLI    `json:"cli"`
-	BaseURL     string `json:"baseUrl"`
-	Model       string `json:"model,omitempty"`
-	Provider    string `json:"provider,omitempty"`
-	APIKey      string `json:"apiKey,omitempty"`
-	ClearAPIKey bool   `json:"clearApiKey,omitempty"`
+	Name          string    `json:"name"`
+	CLI           CLI       `json:"cli"`
+	Enabled       *bool     `json:"enabled,omitempty"`
+	BaseURL       string    `json:"baseUrl"`
+	Model         string    `json:"model,omitempty"`
+	Provider      string    `json:"provider,omitempty"`
+	ProxyMode     ProxyMode `json:"proxyMode,omitempty"`
+	APIKey        string    `json:"apiKey,omitempty"`
+	ClearAPIKey   bool      `json:"clearApiKey,omitempty"`
+	ProxyURL      string    `json:"proxyUrl,omitempty"`
+	ClearProxyURL bool      `json:"clearProxyUrl,omitempty"`
 }
 
 type DingTalkConfig struct {
@@ -243,18 +283,37 @@ type Event struct {
 }
 
 type Settings struct {
-	TimeoutSeconds            int   `json:"timeoutSeconds"`
-	RetryIntervalSeconds      int   `json:"retryIntervalSeconds"`
-	KeepaliveIntervalSeconds  int   `json:"keepaliveIntervalSeconds"`
-	KeepaliveSummarySeconds   int   `json:"keepaliveSummarySeconds"`
-	KeepaliveSummarySuccesses int   `json:"keepaliveSummarySuccesses"`
-	ProbeProgressSeconds      int   `json:"probeProgressSeconds"`
-	RecoveryMergeSeconds      int   `json:"recoveryMergeSeconds"`
-	HistoryLimit              int   `json:"historyLimit"`
-	EventRetentionDays        int   `json:"eventRetentionDays"`
-	EventRetentionRows        int   `json:"eventRetentionRows"`
-	EventRetentionBytes       int64 `json:"eventRetentionBytes"`
-	DingTalkConfigured        bool  `json:"dingTalkConfigured"`
+	TimeoutSeconds                      int    `json:"timeoutSeconds"`
+	RetryIntervalSeconds                int    `json:"retryIntervalSeconds"`
+	KeepaliveIntervalSeconds            int    `json:"keepaliveIntervalSeconds"`
+	KeepaliveSummarySeconds             int    `json:"keepaliveSummarySeconds"`
+	KeepaliveSummarySuccesses           int    `json:"keepaliveSummarySuccesses"`
+	ProbeProgressSeconds                int    `json:"probeProgressSeconds"`
+	RecoveryMergeSeconds                int    `json:"recoveryMergeSeconds"`
+	ReliabilityAlertEnabled             bool   `json:"reliabilityAlertEnabled"`
+	ReliabilityAlertMinSamples          int    `json:"reliabilityAlertMinSamples"`
+	ReliabilityAlertSuccessRate         int    `json:"reliabilityAlertSuccessRate"`
+	ReliabilityAlertConsecutiveFailures int    `json:"reliabilityAlertConsecutiveFailures"`
+	ReliabilityAlertP95Millis           int    `json:"reliabilityAlertP95Millis"`
+	ReliabilityAlertCooldownSeconds     int    `json:"reliabilityAlertCooldownSeconds"`
+	ReliabilityAlertRecoverySuccesses   int    `json:"reliabilityAlertRecoverySuccesses"`
+	ReliabilityAlertRecoveryEnabled     bool   `json:"reliabilityAlertRecoveryEnabled"`
+	HistoryLimit                        int    `json:"historyLimit"`
+	EventRetentionDays                  int    `json:"eventRetentionDays"`
+	EventRetentionRows                  int    `json:"eventRetentionRows"`
+	EventRetentionBytes                 int64  `json:"eventRetentionBytes"`
+	DingTalkConfigured                  bool   `json:"dingTalkConfigured"`
+	UITheme                             string `json:"uiTheme"`
+}
+
+const (
+	UIThemeDeepOcean      = "deep-ocean"
+	UIThemeGraphiteSignal = "graphite-signal"
+	UIThemeArcticDaylight = "arctic-daylight"
+)
+
+func ValidUITheme(value string) bool {
+	return value == UIThemeDeepOcean || value == UIThemeGraphiteSignal || value == UIThemeArcticDaylight
 }
 
 func DefaultSettings() Settings {
@@ -262,7 +321,11 @@ func DefaultSettings() Settings {
 		TimeoutSeconds: 15, RetryIntervalSeconds: 2, KeepaliveIntervalSeconds: 120,
 		KeepaliveSummarySeconds: 3600, KeepaliveSummarySuccesses: 0,
 		ProbeProgressSeconds: 3600, RecoveryMergeSeconds: 0,
+		ReliabilityAlertEnabled: false, ReliabilityAlertMinSamples: 5, ReliabilityAlertSuccessRate: 90,
+		ReliabilityAlertConsecutiveFailures: 3, ReliabilityAlertP95Millis: 0,
+		ReliabilityAlertCooldownSeconds: 1800, ReliabilityAlertRecoverySuccesses: 2, ReliabilityAlertRecoveryEnabled: true,
 		HistoryLimit: 100, EventRetentionDays: 30, EventRetentionRows: 5000,
 		EventRetentionBytes: 8 << 20,
+		UITheme:             UIThemeDeepOcean,
 	}
 }

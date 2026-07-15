@@ -2,19 +2,30 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, AlertCircle, Bell, BookOpen, Bot, Boxes, CalendarClock, Check, CheckCircle2, ChevronDown, ChevronLeft,
   ChevronRight, CircleDot, Clock3, Command, Copy, Database, ExternalLink, Eye,
-  EyeOff, Filter, Gauge, History, KeyRound, LoaderCircle, Menu, Pause, Play, Plus, RefreshCw,
-  Pencil, RotateCcw, Save, Send, Server, Settings, ShieldCheck, Sparkles, Square, Terminal,
-  TimerReset, Trash2, Wifi, WifiOff, X, Zap,
+  EyeOff, Filter, Gauge, GitBranch, History, KeyRound, List, LoaderCircle, Menu, Pause, Play, Plus, RefreshCw,
+  Palette, Pencil, RotateCcw, Save, Server, Settings, ShieldCheck, Sparkles, Square, Terminal,
+  TimerReset, TrendingUp, Trash2, Wifi, WifiOff, X, Zap,
 } from 'lucide-react'
 import { api, normalizeEvent } from './api'
 import { DiagnosticsView } from './DiagnosticsView'
+import { DingTalkConfigCard } from './DingTalkConfigCard'
+import { ProviderConfigView } from './ProviderConfigView'
+import { ReliabilityView } from './ReliabilityView'
+import { RedisView } from './RedisView'
 import { SchedulesView } from './SchedulesView'
 import type {
   AppSettings, Cli, DashboardData, JobEvent, JobMode, JobOptions, JobStatus,
   JobSummary, OperationalEvent, Provider, ProviderExample, ProviderExampleWriteRequest, StartJobRequest,
 } from './types'
 
-type View = 'dashboard' | 'schedules' | 'events' | 'diagnostics' | 'settings'
+type View = 'dashboard' | 'providers' | 'reliability' | 'schedules' | 'events' | 'redis' | 'diagnostics' | 'settings'
+
+const viewPaths: Record<View, string> = {
+  dashboard: '/', providers: '/providers', reliability: '/reliability', schedules: '/schedules',
+  events: '/events', redis: '/redis', diagnostics: '/diagnostics', settings: '/settings',
+}
+const pathViews = new Map(Object.entries(viewPaths).map(([view, route]) => [route, view as View]))
+const viewFromPath = (pathname: string) => pathViews.get(pathname.replace(/\/+$/, '') || '/')
 
 const DEFAULT_OPTIONS: JobOptions = {
   runOnce: true,
@@ -57,8 +68,9 @@ const formatDuration = (ms?: number) => {
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
   return `${Math.floor(ms / 60_000)}m ${Math.floor(ms % 60_000 / 1000)}s`
 }
-const eventTypeLabels: Record<string, string> = {
+  const eventTypeLabels: Record<string, string> = {
   job_state: '任务状态', attempt_start: '开始尝试', classification: '探测判定',
+  request_start: '请求开始', request_log: '请求输出', request_end: '请求结束',
   phase: '阶段切换', recovery: '恢复可用', countdown: '等待重试', cleanup: '运行时清理',
 }
 const eventTypeLabel = (type: string) => eventTypeLabels[type] || type.replaceAll('_', ' ')
@@ -89,7 +101,7 @@ function SkeletonCards() {
 }
 
 export function App() {
-  const [view, setView] = useState<View>('dashboard')
+  const [view, setView] = useState<View>(() => viewFromPath(window.location.pathname) ?? 'dashboard')
   const [data, setData] = useState<DashboardData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -101,6 +113,27 @@ export function App() {
   const [detailJob, setDetailJob] = useState<JobSummary | null>(null)
   const [mobileNav, setMobileNav] = useState(false)
   const [eventsRefreshToken, setEventsRefreshToken] = useState(0)
+  const [providersRefreshToken, setProvidersRefreshToken] = useState(0)
+  const [uiTheme, setUiTheme] = useState<AppSettings['uiTheme']>('deep-ocean')
+  const [themeOpen, setThemeOpen] = useState(false)
+  const [themeSaving, setThemeSaving] = useState(false)
+  const [themeMessage, setThemeMessage] = useState('')
+  const themeRef = useRef<HTMLDivElement>(null)
+
+  const navigate = useCallback((next: View) => {
+    if (next !== view) {
+      window.history.pushState({}, '', viewPaths[next])
+      setView(next)
+    }
+    setMobileNav(false)
+  }, [view])
+
+  useEffect(() => {
+    if (!viewFromPath(window.location.pathname)) window.history.replaceState({}, '', viewPaths.dashboard)
+    const onPopState = () => setView(viewFromPath(window.location.pathname) ?? 'dashboard')
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true)
@@ -110,22 +143,48 @@ export function App() {
   }, [])
 
   useEffect(() => { void load(); const t = window.setInterval(() => void load(true), 10_000); return () => clearInterval(t) }, [load])
-  useEffect(() => { void api.settings().then(settings => setJobDefaults(current => ({ ...current, timeoutSeconds: settings.timeoutSeconds, retryIntervalSeconds: settings.retryIntervalSeconds, keepaliveIntervalSeconds: settings.keepaliveIntervalSeconds }))).catch(() => undefined) }, [])
+  useEffect(() => { void api.settings().then(settings => { setUiTheme(settings.uiTheme); setJobDefaults(current => ({ ...current, timeoutSeconds: settings.timeoutSeconds, retryIntervalSeconds: settings.retryIntervalSeconds, keepaliveIntervalSeconds: settings.keepaliveIntervalSeconds })) }).catch(() => undefined) }, [])
+  useEffect(() => {
+    if (!themeOpen) return
+    const close = (event: MouseEvent) => { if (!themeRef.current?.contains(event.target as Node)) setThemeOpen(false) }
+    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') setThemeOpen(false) }
+    document.addEventListener('mousedown', close); window.addEventListener('keydown', key)
+    return () => { document.removeEventListener('mousedown', close); window.removeEventListener('keydown', key) }
+  }, [themeOpen])
+
+  const chooseTheme = async (next: AppSettings['uiTheme']) => {
+    if (next === uiTheme || themeSaving) { setThemeOpen(false); return }
+    const previous = uiTheme
+    setUiTheme(next); setThemeSaving(true); setThemeMessage('')
+    try {
+      const settings = await api.settings()
+      await api.saveSettings({ ...settings, uiTheme: next })
+      setThemeMessage('主题已保存')
+      window.setTimeout(() => setThemeMessage(''), 2400)
+    } catch (cause) {
+      setUiTheme(previous)
+      setThemeMessage(cause instanceof Error ? `主题保存失败：${cause.message}` : '主题保存失败')
+    } finally { setThemeSaving(false); setThemeOpen(false) }
+  }
 
   const openJob = (job: JobSummary) => { setDetailJob(job); setMobileNav(false) }
   const onStarted = (job: JobSummary, notifyOnComplete: boolean) => { setDrawerOpen(false); setDetailJob(job); if (notifyOnComplete) setNotificationJobs(current => new Set(current).add(job.id)); void load(true) }
-  const viewLabel = view === 'dashboard' ? '总览' : view === 'schedules' ? '计划任务' : view === 'events' ? '事件' : view === 'diagnostics' ? '系统诊断' : '设置与通知'
+  const viewLabel = view === 'dashboard' ? '总览' : view === 'providers' ? '供应商配置' : view === 'reliability' ? '可靠性' : view === 'schedules' ? '计划任务' : view === 'events' ? '事件' : view === 'redis' ? 'Redis 管理' : view === 'diagnostics' ? '系统诊断' : '设置与通知'
+  useEffect(() => { document.title = `AI Watch · ${viewLabel}` }, [viewLabel])
 
-  return <div className="app-shell">
+  return <div className={`app-shell theme-${uiTheme}`}>
     <div className="ambient ambient-a"/><div className="ambient ambient-b"/>
     <aside className={`sidebar ${mobileNav ? 'mobile-open' : ''}`}>
       <div className="sidebar-top"><Logo/><button className="icon-button mobile-close" onClick={() => setMobileNav(false)} aria-label="关闭菜单"><X/></button></div>
       <nav>
-        <button className={view === 'dashboard' ? 'active' : ''} aria-current={view === 'dashboard' ? 'page' : undefined} onClick={() => { setView('dashboard'); setMobileNav(false) }}><Gauge/><span>总览</span></button>
-        <button className={view === 'schedules' ? 'active' : ''} aria-current={view === 'schedules' ? 'page' : undefined} onClick={() => { setView('schedules'); setMobileNav(false) }}><CalendarClock/><span>计划任务</span></button>
-        <button className={view === 'events' ? 'active' : ''} aria-current={view === 'events' ? 'page' : undefined} onClick={() => { setView('events'); setMobileNav(false) }}><History/><span>事件记录</span></button>
-        <button className={view === 'diagnostics' ? 'active' : ''} aria-current={view === 'diagnostics' ? 'page' : undefined} onClick={() => { setView('diagnostics'); setMobileNav(false) }}><Server/><span>系统诊断</span></button>
-        <button className={view === 'settings' ? 'active' : ''} aria-current={view === 'settings' ? 'page' : undefined} onClick={() => { setView('settings'); setMobileNav(false) }}><Settings/><span>设置与通知</span></button>
+        <button className={view === 'dashboard' ? 'active' : ''} aria-current={view === 'dashboard' ? 'page' : undefined} onClick={() => navigate('dashboard')}><Gauge/><span>总览</span></button>
+        <button className={view === 'providers' ? 'active' : ''} aria-current={view === 'providers' ? 'page' : undefined} onClick={() => navigate('providers')}><KeyRound/><span>供应商配置</span></button>
+        <button className={view === 'reliability' ? 'active' : ''} aria-current={view === 'reliability' ? 'page' : undefined} onClick={() => navigate('reliability')}><TrendingUp/><span>可靠性</span></button>
+        <button className={view === 'schedules' ? 'active' : ''} aria-current={view === 'schedules' ? 'page' : undefined} onClick={() => navigate('schedules')}><CalendarClock/><span>计划任务</span></button>
+        <button className={view === 'events' ? 'active' : ''} aria-current={view === 'events' ? 'page' : undefined} onClick={() => navigate('events')}><History/><span>事件记录</span></button>
+        <button className={view === 'redis' ? 'active' : ''} aria-current={view === 'redis' ? 'page' : undefined} onClick={() => navigate('redis')}><Database/><span>Redis 管理</span></button>
+        <button className={view === 'diagnostics' ? 'active' : ''} aria-current={view === 'diagnostics' ? 'page' : undefined} onClick={() => navigate('diagnostics')}><Server/><span>系统诊断</span></button>
+        <button className={view === 'settings' ? 'active' : ''} aria-current={view === 'settings' ? 'page' : undefined} onClick={() => navigate('settings')}><Settings/><span>设置与通知</span></button>
       </nav>
       <div className="sidebar-spacer"/>
       <div className={`connection-card ${error ? 'offline' : ''}`}>
@@ -138,14 +197,17 @@ export function App() {
       <header className="topbar">
         <button className="icon-button menu-button" onClick={() => setMobileNav(true)} aria-label="打开菜单"><Menu/></button>
         <div className="crumb"><span>AI Watch</span><ChevronRight/><strong>{viewLabel}</strong></div>
-        <div className="top-actions">{view !== 'schedules' && view !== 'diagnostics' && <button className="icon-button" onClick={() => view === 'events' ? setEventsRefreshToken(current => current + 1) : void load()} aria-label={view === 'events' ? '刷新事件' : '刷新'}><RefreshCw className={view !== 'events' && loading ? 'spinning' : ''}/></button>}{view !== 'diagnostics' && <button className="primary compact" onClick={() => { setPresetProvider(null); setPresetExample(null); setDrawerOpen(true) }}><Plus/>新建任务</button>}</div>
+        <div className="top-actions"><div className="theme-picker" ref={themeRef}><button className="theme-trigger" aria-haspopup="menu" aria-expanded={themeOpen} onClick={() => setThemeOpen(current => !current)}><Palette/><span><small>界面主题</small><strong>{uiTheme === 'deep-ocean' ? '深海终端' : uiTheme === 'graphite-signal' ? '石墨信号' : '极昼控制台'}</strong></span><i className={`theme-dot ${uiTheme}`}/></button>{themeOpen && <div className="theme-popover" role="menu"><header><strong>切换全局主题</strong><small>选择后立即预览并保存</small></header>{([
+          ['deep-ocean', '深海终端', '深蓝黑 · 青色信号'], ['graphite-signal', '石墨信号', '中性石墨 · 薄荷信号'], ['arctic-daylight', '极昼控制台', '浅灰蓝 · 深色数据'],
+        ] as const).map(([value, label, detail]) => <button role="menuitemradio" aria-checked={uiTheme === value} key={value} disabled={themeSaving} onClick={() => void chooseTheme(value)}><i className={`theme-swatch ${value}`}/><span><strong>{label}</strong><small>{detail}</small></span>{uiTheme === value && <Check/>}</button>)}</div>}</div>{(view === 'dashboard' || view === 'events' || view === 'providers') && <button className="icon-button" onClick={() => view === 'events' ? setEventsRefreshToken(current => current + 1) : view === 'providers' ? setProvidersRefreshToken(current => current + 1) : void load()} aria-label={view === 'events' ? '刷新事件' : view === 'providers' ? '刷新供应商' : '刷新总览'}><RefreshCw className={view === 'dashboard' && loading ? 'spinning' : ''}/></button>}{view !== 'diagnostics' && view !== 'redis' && <button className="primary compact" onClick={() => { setPresetProvider(null); setPresetExample(null); setDrawerOpen(true) }}><Plus/>新建任务</button>}</div>
       </header>
 
-      {view === 'dashboard' ? <Dashboard data={data} loading={loading} error={error} retry={() => void load()} openNew={() => { setPresetProvider(null); setPresetExample(null); setDrawerOpen(true) }} probeProvider={(provider) => { setPresetExample(null); setPresetProvider(provider); setDrawerOpen(true) }} referenceExample={(example) => { setPresetProvider(null); setPresetExample(example); setDrawerOpen(true) }} openJob={openJob}/> : view === 'schedules' ? <SchedulesView providers={data?.providers ?? []} defaultOptions={jobDefaults}/> : view === 'events' ? <EventsView providers={data?.providers ?? []} refreshToken={eventsRefreshToken}/> : view === 'diagnostics' ? <DiagnosticsView/> : <SettingsView/>}
+      {view === 'dashboard' ? <Dashboard data={data} loading={loading} error={error} retry={() => void load()} openNew={() => { setPresetProvider(null); setPresetExample(null); setDrawerOpen(true) }} probeProvider={(provider) => { setPresetExample(null); setPresetProvider(provider); setDrawerOpen(true) }} referenceExample={(example) => { setPresetProvider(null); setPresetExample(example); setDrawerOpen(true) }} openJob={openJob}/> : view === 'providers' ? <ProviderConfigView discoveredProviders={(data?.providers ?? []).filter(provider => provider.source !== 'manual')} refreshToken={providersRefreshToken} onProbe={(provider) => { setPresetExample(null); setPresetProvider(provider); setDrawerOpen(true) }} onChanged={() => void load(true)}/> : view === 'reliability' ? <ReliabilityView/> : view === 'schedules' ? <SchedulesView providers={data?.providers ?? []} defaultOptions={jobDefaults}/> : view === 'events' ? <EventsView providers={data?.providers ?? []} refreshToken={eventsRefreshToken}/> : view === 'redis' ? <RedisView/> : view === 'diagnostics' ? <DiagnosticsView/> : <SettingsView onThemeChanged={setUiTheme}/>}
     </main>
     {mobileNav && <div className="nav-scrim" onClick={() => setMobileNav(false)}/>} 
     {drawerOpen && <NewJobDrawer providers={data?.providers ?? []} initialProvider={presetProvider} initialExample={presetExample} defaultOptions={jobDefaults} close={() => { setDrawerOpen(false); setPresetProvider(null); setPresetExample(null) }} onStarted={onStarted}/>} 
     {detailJob && <JobDetail initial={detailJob} notifyOnComplete={notificationJobs.has(detailJob.id)} close={() => { setDetailJob(null); void load(true) }} onChanged={() => void load(true)}/>} 
+    {themeMessage && <div className={`theme-toast ${themeMessage.includes('失败') ? 'error' : ''}`} role="status">{themeMessage}</div>}
   </div>
 }
 
@@ -178,7 +240,7 @@ function Dashboard({ data, loading, error, retry, openNew, probeProvider, refere
         <div className="panel span-2"><PanelTitle title="最近任务" detail="仅保存结果摘要，不包含任何原始日志"/>
           <div className="recent-table"><div className="table-head"><span>任务</span><span>结果</span><span>尝试</span><span>耗时</span><span>时间</span></div>{data?.recentJobs.length ? data.recentJobs.map(job => <button className="table-row" key={job.id} onClick={() => openJob(job)}><span className="job-identity"><CliIcon cli={job.cli}/><span><strong>{cliLabel(job.cli)} · {modeLabel(job.mode)}</strong><small>{job.providerName || job.providerId || '当前配置'}</small></span></span><span><StatusPill status={job.status}/></span><span>{job.attemptCount}</span><span>{formatDuration(job.elapsedMs)}</span><span>{formatAgo(job.endedAt || job.startedAt)}</span></button>) : <EmptyState title="暂无历史摘要" detail="完成任务后，结果摘要会出现在这里。"/>}</div>
         </div>
-        <div className="panel"><PanelTitle title="本地供应商" detail="按客户端分类，密钥仅展示脱敏信息"/><div className="provider-categories">{data?.providers.length ? <><ProviderGroup cli="codex" providers={data.providers.filter(provider => provider.cli === 'codex')} probeProvider={probeProvider}/><ProviderGroup cli="claude" providers={data.providers.filter(provider => provider.cli === 'claude')} probeProvider={probeProvider}/></> : <EmptyState icon={<Database/>} title="暂无本地供应商" detail="挂载 Codex、Claude 或 CC Switch 配置后会显示在这里。"/>}</div><ProviderExamples referenceExample={referenceExample}/></div>
+        <div className="panel"><PanelTitle title="本地供应商" detail="按客户端分类，密钥仅展示脱敏信息"/><div className="provider-categories">{data?.providers.length ? <><ProviderGroup cli="codex" providers={data.providers.filter(provider => provider.cli === 'codex')} probeProvider={probeProvider}/><ProviderGroup cli="claude" providers={data.providers.filter(provider => provider.cli === 'claude')} probeProvider={probeProvider}/></> : <EmptyState icon={<Database/>} title="暂无本地供应商" detail="挂载 Codex、Claude 配置，或重启应用同步 CC Switch Provider 后会显示在这里。"/>}</div><ProviderExamples referenceExample={referenceExample}/></div>
       </section>
     </>}
   </div>
@@ -200,6 +262,8 @@ function EventsView({ providers, refreshToken }: { providers: Provider[]; refres
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const [logKind, setLogKind] = useState<'events' | 'requests'>('events')
+  const [eventView, setEventView] = useState<'list' | 'timeline'>(() => localStorage.getItem('ai-watch-event-view') === 'timeline' ? 'timeline' : 'list')
   const requestSequence = useRef(0)
   const clearButtonRef = useRef<HTMLButtonElement>(null)
   const confirmRef = useRef<HTMLElement>(null)
@@ -246,9 +310,10 @@ function EventsView({ providers, refreshToken }: { providers: Provider[]; refres
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [confirmOpen])
+  }, [clearing, confirmOpen])
 
-  const closeConfirm = () => {
+  const closeConfirm = (force = false) => {
+    if (clearing && !force) return
     setConfirmOpen(false)
     window.requestAnimationFrame(() => clearButtonRef.current?.focus())
   }
@@ -258,7 +323,7 @@ function EventsView({ providers, refreshToken }: { providers: Provider[]; refres
     setMessage('')
     try {
       const deleted = await api.clearEvents()
-      closeConfirm()
+      closeConfirm(true)
       setMessage(deleted > 0 ? `已清空 ${deleted} 条事件记录` : '事件记录已清空')
       await loadEvents()
     } catch (e) {
@@ -269,6 +334,21 @@ function EventsView({ providers, refreshToken }: { providers: Provider[]; refres
   }
 
   const providerNames = useMemo(() => new Map(providers.filter(provider => provider.id).map(provider => [provider.id, provider.name])), [providers])
+  const requestRecords = useMemo(() => {
+    const records = new Map<string, { id: string; start?: OperationalEvent; end?: OperationalEvent; data: Record<string, unknown> }>()
+    for (const event of events) {
+      if (event.type !== 'request_start' && event.type !== 'request_end') continue
+      const requestId = String(event.data?.requestId || '')
+      if (!requestId) continue
+      const current = records.get(requestId) || { id: requestId, data: {} }
+      if (event.type === 'request_start') current.start = event
+      if (event.type === 'request_end') current.end = event
+      current.data = { ...current.data, ...(event.data || {}) }
+      records.set(requestId, current)
+    }
+    return Array.from(records.values()).sort((a, b) => new Date(b.start?.at || b.end?.at || 0).getTime() - new Date(a.start?.at || a.end?.at || 0).getTime())
+  }, [events])
+  const lifecycleEvents = useMemo(() => events.filter(event => event.type !== 'request_start' && event.type !== 'request_end'), [events])
   const typeOptions = useMemo(() => Array.from(new Set([...Object.keys(eventTypeLabels), ...events.map(event => event.type)])).sort(), [events])
   const errorCount = events.filter(event => event.level === 'error' || event.level === 'fatal').length
   const newest = events[0]?.at
@@ -279,9 +359,12 @@ function EventsView({ providers, refreshToken }: { providers: Provider[]; refres
   const resetFilters = () => {
     setType(''); setLevel(''); setProviderId(''); setJobId(''); setSince(''); setUntil(''); setLimit(100); setOffset(0)
   }
+  const switchEventView = (value: 'list' | 'timeline') => { setEventView(value); localStorage.setItem('ai-watch-event-view', value) }
 
   return <div className="page events-page">
     <section className="page-heading events-heading"><div><span className="eyebrow"><History/>运行审计</span><h1>结构化事件记录</h1><p>查看任务、供应商与运行时生命周期信号。事件受保留策略约束，不包含原始 CLI 输出、Prompt 或凭证。</p></div><button ref={clearButtonRef} className="danger-button events-clear" disabled={loading || clearing || total === 0} onClick={() => setConfirmOpen(true)}><Trash2/>清空事件</button></section>
+
+    <nav className="event-kind-tabs" aria-label="日志类型"><button className={logKind === 'events' ? 'active' : ''} onClick={() => setLogKind('events')}><History/><span><strong>事件记录</strong><small>任务、调度与系统生命周期</small></span><em>{lifecycleEvents.length}</em></button><button className={logKind === 'requests' ? 'active' : ''} onClick={() => setLogKind('requests')}><Terminal/><span><strong>请求日志</strong><small>按 requestId 聚合 CLI 调用</small></span><em>{requestRecords.length}</em></button></nav>
 
     <section className="event-summary" aria-label="事件计数">
       <div><span>匹配事件</span><strong>{loading ? '—' : total}</strong><small>当前服务端筛选结果</small></div>
@@ -307,16 +390,46 @@ function EventsView({ providers, refreshToken }: { providers: Provider[]; refres
     {message && <div className="event-message" role="status"><CheckCircle2/>{message}</div>}
 
     <section className="panel event-feed" aria-busy={loading}>
-      <div className="panel-title"><div><h2>事件信号流</h2><p>只展示可持久化的结构化摘要</p></div><span className="event-retention"><ShieldCheck/>有界保留</span></div>
-      {loading ? <div className="event-loading"><LoaderCircle className="spinning"/><span>正在读取事件记录</span></div> : events.length ? <ol className="event-list">{events.map(event => {
+      <div className="panel-title"><div><h2>{logKind === 'requests' ? 'CLI 请求日志' : eventView === 'list' ? '事件详情列表' : '事件信号流'}</h2><p>{logKind === 'requests' ? '每行对应一次独立 CLI 调用' : '结构化字段经过脱敏后展示'}</p></div><div className="event-view-actions">{logKind === 'events' && <div className="event-view-switch" role="group" aria-label="事件展示方式"><button className={eventView === 'list' ? 'active' : ''} onClick={() => switchEventView('list')}><List/>列表</button><button className={eventView === 'timeline' ? 'active' : ''} onClick={() => switchEventView('timeline')}><GitBranch/>时间线</button></div>}<span className="event-retention"><ShieldCheck/>有界保留</span></div></div>
+      {loading ? <div className="event-loading"><LoaderCircle className="spinning"/><span>正在读取事件记录</span></div> : logKind === 'requests' ? <RequestLogList records={requestRecords} providerNames={providerNames}/> : lifecycleEvents.length && eventView === 'list' ? <div className="event-detail-table"><div className="event-detail-head"><span>时间 / 级别</span><span>事件</span><span>任务 / Provider</span><span>摘要</span><span>详情</span></div>{lifecycleEvents.map(event => <details className={`event-detail-row level-${event.level || 'info'}`} key={event.id}><summary><span><time>{new Date(event.at).toLocaleString('zh-CN', { hour12: false })}</time><em className={`event-level level-${event.level || 'info'}`}>{eventLevelLabel(event.level)}</em></span><span><strong>{eventTypeLabel(event.type)}</strong></span><span><small>{event.jobId ? `任务 ${event.jobId}` : '无任务关联'}</small><small>{event.providerId ? providerNames.get(event.providerId) || event.providerId : '无 Provider'}</small></span><span>{event.message || '结构化运行事件'}</span><span><ChevronDown/></span></summary><EventRecordDetails event={event} providerName={event.providerId ? providerNames.get(event.providerId) : undefined}/></details>)}</div> : lifecycleEvents.length ? <ol className="event-list">{lifecycleEvents.map(event => {
         const level = event.level || 'info'
         return <li key={event.id} className={`event-item level-${level}`}><div className="event-rail"><i/></div><div className="event-content"><header><span className={`event-level level-${level}`}>{eventLevelLabel(level)}</span><strong>{eventTypeLabel(event.type)}</strong><time dateTime={event.at}>{new Date(event.at).toLocaleString('zh-CN', { hour12: false })}</time></header><p>{event.message || '记录了一次结构化运行事件。'}</p><footer>{event.providerId && <span><Database/>{providerNames.get(event.providerId) || event.providerId}</span>}{event.jobId && <span title={event.jobId}><Activity/>任务 {event.jobId}</span>}<code>#{event.id}</code></footer></div></li>
       })}</ol> : <EmptyState icon={<History/>} title="没有匹配的事件" detail="调整过滤条件，或等待新的任务与运行时事件写入。"/>}
       {!loading && total > 0 && <nav className="event-pagination" aria-label="事件分页"><span>第 {page} / {pageCount} 页 · 显示 {rangeStart}–{rangeEnd}，共 {total} 条</span><div><button className="secondary" disabled={offset === 0} onClick={() => setOffset(current => Math.max(0, current - limit))}><ChevronLeft/>上一页</button><button className="secondary" disabled={offset + limit >= total} onClick={() => setOffset(current => current + limit)}>下一页<ChevronRight/></button></div></nav>}
     </section>
 
-    {confirmOpen && <div className="event-confirm-overlay"><button className="event-confirm-scrim" aria-label="取消清空事件" onClick={closeConfirm}/><section ref={confirmRef} className="event-confirm" role="dialog" aria-modal="true" aria-labelledby="clear-events-title"><div className="event-confirm-icon"><Trash2/></div><h2 id="clear-events-title">清空全部事件记录？</h2><p>这会删除所有结构化运行事件，而不仅是当前筛选结果。任务摘要、设置和供应商配置不会被删除，此操作无法撤销。</p><div><button className="secondary" autoFocus disabled={clearing} onClick={closeConfirm}>取消</button><button className="danger-button" disabled={clearing} onClick={() => void clearEvents()}>{clearing ? <LoaderCircle className="spinning"/> : <Trash2/>}{clearing ? '正在清空' : '确认清空'}</button></div></section></div>}
+    {confirmOpen && <div className="event-confirm-overlay"><button className="event-confirm-scrim" aria-label="取消清空事件" disabled={clearing} onClick={() => closeConfirm()}/><section ref={confirmRef} className="event-confirm" role="dialog" aria-modal="true" aria-labelledby="clear-events-title"><div className="event-confirm-icon"><Trash2/></div><h2 id="clear-events-title">清空全部事件记录？</h2><p>这会删除所有结构化运行事件，而不仅是当前筛选结果。任务摘要、设置和供应商配置不会被删除，此操作无法撤销。</p><div><button className="secondary" autoFocus disabled={clearing} onClick={() => closeConfirm()}>取消</button><button className="danger-button" disabled={clearing} onClick={() => void clearEvents()}>{clearing ? <LoaderCircle className="spinning"/> : <Trash2/>}{clearing ? '正在清空' : '确认清空'}</button></div></section></div>}
   </div>
+}
+
+function EventRecordDetails({ event, providerName }: { event: OperationalEvent; providerName?: string }) {
+  const data = event.data || {}
+  const entries = [
+    ['请求 ID', data.requestId], ['任务 ID', event.jobId], ['Provider', providerName || event.providerId],
+    ['触发来源', data.triggerSource], ['发起端 IP', data.clientIP], ['模式 / 阶段', [data.mode, data.phase].filter(Boolean).join(' / ')],
+    ['CLI', data.cli], ['CLI 可执行文件', data.cliExecutable], ['CLI 版本', data.cliVersion], ['模型', data.model], ['配置来源', data.configSource], ['尝试序号', data.attempt],
+    ['目标地址', data.target], ['目标主机', data.targetHost], ['目标端口', data.targetPort],
+    ['DNS 预解析', Array.isArray(data.dnsIPs) ? data.dnsIPs.join(', ') : data.dnsIPs], ['DNS 错误', data.dnsError],
+    ['代理模式', data.proxyMode], ['代理地址', data.proxyEndpoint], ['状态', data.status],
+    ['开始时间', data.startedAt], ['结束时间', data.endedAt], ['耗时', data.durationMillis != null ? `${String(data.durationMillis)} ms` : undefined],
+    ['退出码', data.exitCode], ['分类结果', data.classification], ['错误类型', data.errorType], ['错误详情', data.error],
+    ['请求体摘要', data.requestBody ? JSON.stringify(data.requestBody) : undefined], ['下一次执行', data.nextAttemptAt], ['返回信息', data.responseExcerpt],
+  ].filter((entry): entry is [string, unknown] => entry[1] !== undefined && entry[1] !== null && entry[1] !== '')
+  return <div className="event-record-details"><div className="event-record-grid">{entries.map(([label, value]) => <div key={label}><span>{label}</span><strong>{String(value)}</strong></div>)}</div>{Object.keys(data).length > 0 && <details className="event-raw-data"><summary>查看完整脱敏结构</summary><pre>{JSON.stringify(data, null, 2)}</pre></details>}</div>
+}
+
+function RequestLogList({ records, providerNames }: {
+  records: Array<{ id: string; start?: OperationalEvent; end?: OperationalEvent; data: Record<string, unknown> }>
+  providerNames: Map<string, string>
+}) {
+  if (!records.length) return <EmptyState icon={<Terminal/>} title="没有匹配的请求日志" detail="启动一次测活或保活后，这里会按 requestId 聚合请求详情。"/>
+  return <div className="request-log-list"><div className="request-log-head"><span>请求时间</span><span>CLI / Provider</span><span>来源 / IP</span><span>状态 / 耗时</span><span>返回摘要</span><span/></div>{records.map(record => {
+    const event = record.end || record.start!
+    const data = record.data
+    const providerId = event.providerId || String(data.providerId || '')
+    const status = String(data.status || (record.end ? 'completed' : 'running'))
+    return <details className={`request-log-row status-${status}`} key={record.id}><summary><span><time>{new Date(record.start?.at || record.end?.at || 0).toLocaleString('zh-CN', { hour12: false })}</time><code>{record.id}</code></span><span><strong>{String(data.cli || 'CLI 未知')}</strong><small>{providerNames.get(providerId) || providerId || String(data.provider || '当前配置')}</small></span><span><strong>{String(data.triggerSource || 'manual')}</strong><small>{String(data.clientIP || '不可观测')}</small></span><span><em>{status}</em><small>{data.durationMillis != null ? `${String(data.durationMillis)} ms` : '执行中'}</small></span><span>{String(data.responseExcerpt || data.error || data.classification || '等待返回信息')}</span><span><ChevronDown/></span></summary><EventRecordDetails event={{ ...event, data, type: 'request', message: 'CLI 请求详情' }} providerName={providerNames.get(providerId)}/></details>
+  })}</div>
 }
 
 function Metric({ icon, label, value, detail, tone }: { icon: React.ReactNode; label: string; value: string; detail: string; tone: string }) {
@@ -325,7 +438,7 @@ function Metric({ icon, label, value, detail, tone }: { icon: React.ReactNode; l
 function PanelTitle({ title, detail, action }: { title: string; detail: string; action?: React.ReactNode }) { return <div className="panel-title"><div><h2>{title}</h2><p>{detail}</p></div>{action}</div> }
 function CliIcon({ cli }: { cli: Cli }) { return <span className={`cli-icon ${cli}`}>{cli === 'codex' ? <Command/> : <Bot/>}</span> }
 function ProviderGroup({ cli, providers, probeProvider }: { cli: Cli; providers: Provider[]; probeProvider: (provider: Provider) => void }) {
-  return <section className={`provider-category ${cli}`}><header><div><CliIcon cli={cli}/><span><strong>{cli === 'codex' ? 'Codex Providers' : 'Claude Code Providers'}</strong><small>{cli === 'codex' ? 'OpenAI Codex CLI' : 'Anthropic Claude Code CLI'}</small></span></div><em>{providers.length}</em></header><div className="provider-mini-list">{providers.length ? providers.map(provider => <div key={`${provider.cli}-${provider.id}`} className="provider-mini-item"><span className="provider-mini-main"><strong>{provider.name}</strong><small>{provider.model || provider.baseUrl || '默认模型'}</small><span className="provider-mini-meta">{provider.state?.scheduleEnabled && <em><CalendarClock/>{provider.state.scheduleName || '计划已启用'}</em>}{provider.state?.lastSuccessAt && <em title={new Date(provider.state.lastSuccessAt).toLocaleString('zh-CN')}><CheckCircle2/>成功 {formatAgo(provider.state.lastSuccessAt)}</em>}{provider.state?.lastFailureAt && <em title={new Date(provider.state.lastFailureAt).toLocaleString('zh-CN')}><AlertCircle/>失败 {formatAgo(provider.state.lastFailureAt)}</em>}</span></span><span className={`provider-runtime-state ${providerStateTone(provider.state?.status)}`}><i/>{providerStateLabel(provider.state?.status)}{provider.state?.consecutiveFailures ? ` · ${provider.state.consecutiveFailures} 次失败` : ''}</span>{provider.current && <em className="provider-current">当前</em>}<button className="provider-probe" aria-label={`测活：${provider.name}`} onClick={() => probeProvider(provider)}><Activity/>测活</button></div>) : <p className="provider-category-empty">暂未发现此类配置</p>}</div></section>
+  return <section className={`provider-category ${cli}`}><header><div><CliIcon cli={cli}/><span><strong>{cli === 'codex' ? 'Codex Providers' : 'Claude Code Providers'}</strong><small>{cli === 'codex' ? 'OpenAI Codex CLI' : 'Anthropic Claude Code CLI'}</small></span></div><em>{providers.length}</em></header><div className="provider-mini-list">{providers.length ? providers.map(provider => <div key={`${provider.cli}-${provider.id}`} className={`provider-mini-item ${provider.enabled === false ? 'disabled' : ''}`}><span className="provider-mini-main"><strong>{provider.name}</strong><small>{provider.model || provider.baseUrl || '默认模型'}</small><span className="provider-mini-meta"><em className="provider-source-readonly">{provider.source === 'current' ? '当前配置 · 只读' : provider.source === 'cc-switch' ? 'CC Switch · Redis快照/启动同步，只读' : '手填配置'}</em>{provider.state?.scheduleEnabled && <em><CalendarClock/>{provider.state.scheduleName || '计划已启用'}</em>}{provider.state?.lastSuccessAt && <em title={new Date(provider.state.lastSuccessAt).toLocaleString('zh-CN')}><CheckCircle2/>成功 {formatAgo(provider.state.lastSuccessAt)}</em>}{provider.state?.lastFailureAt && <em title={new Date(provider.state.lastFailureAt).toLocaleString('zh-CN')}><AlertCircle/>失败 {formatAgo(provider.state.lastFailureAt)}</em>}</span></span><span className={`provider-runtime-state ${providerStateTone(provider.state?.status)}`}><i/>{provider.enabled === false ? '已停用' : providerStateLabel(provider.state?.status)}{provider.state?.consecutiveFailures ? ` · ${provider.state.consecutiveFailures} 次失败` : ''}</span>{provider.current && <em className="provider-current">当前</em>}<button className="provider-probe" disabled={provider.enabled === false || provider.available === false} aria-label={`测活：${provider.name}`} onClick={() => probeProvider(provider)}><Activity/>测活</button></div>) : <p className="provider-category-empty">暂未发现此类配置</p>}</div></section>
 }
 function ProviderExamples({ referenceExample }: { referenceExample: (example: ProviderExample) => void }) {
   const [examples, setExamples] = useState<ProviderExample[]>([])
@@ -391,7 +504,7 @@ function ProviderExampleDialog({ example, close, save }: { example: ProviderExam
     const focusable = () => Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled])') || [])
     dialogRef.current?.querySelector<HTMLElement>('[data-initial-focus]')?.focus()
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close()
+      if (event.key === 'Escape' && !busy) close()
       if (event.key !== 'Tab') return
       const items = focusable(); if (!items.length) return
       const first = items[0]; const last = items[items.length - 1]
@@ -400,7 +513,7 @@ function ProviderExampleDialog({ example, close, save }: { example: ProviderExam
     }
     window.addEventListener('keydown', keydown)
     return () => { window.removeEventListener('keydown', keydown); previous?.focus() }
-  }, [])
+  }, [busy, close])
   const patch = (key: keyof ProviderExampleWriteRequest, next: string) => setValue(current => ({ ...current, [key]: next }))
   const submit = async () => {
     setError('')
@@ -415,7 +528,7 @@ function ProviderExampleDialog({ example, close, save }: { example: ProviderExam
     setBusy(true)
     try { await save(normalized) } catch (e) { setError(e instanceof Error ? e.message : '保存供应商示例失败') } finally { setBusy(false) }
   }
-  return <div className="provider-example-dialog-overlay"><button className="provider-example-dialog-scrim" aria-label="关闭供应商示例编辑" onClick={close}/><section ref={dialogRef} className="provider-example-dialog" role="dialog" aria-modal="true" aria-labelledby="provider-example-dialog-title"><header><div><span>{example ? '编辑非敏感模板' : '创建非敏感模板'}</span><h2 id="provider-example-dialog-title">{example ? example.name : '新增供应商示例'}</h2></div><button className="icon-button" aria-label="关闭" onClick={close}><X/></button></header><div className="provider-example-dialog-body"><div className="provider-example-guard"><ShieldCheck/><span><strong>此表单不会接收凭证</strong><small>API Key、Token、认证头和 Webhook 均不属于示例信息，请在服务端环境变量或本地配置中维护。</small></span></div><div className="field-grid"><label className="field"><span>示例名称 *</span><input data-initial-focus value={value.name} maxLength={160} onChange={event => patch('name', event.target.value)}/></label><label className="field"><span>示例 ID *</span><input value={value.id} disabled={Boolean(example)} pattern="[a-z0-9][a-z0-9._-]*" spellCheck={false} autoCapitalize="none" onChange={event => patch('id', event.target.value.toLowerCase())}/><small>{example ? '编辑时不可更改 ID' : '例如 codex-ray-compatible'}</small></label></div><fieldset className="provider-example-cli"><legend>客户端类目 *</legend><button type="button" className={value.cli === 'codex' ? 'selected' : ''} aria-pressed={value.cli === 'codex'} onClick={() => patch('cli', 'codex')}><CliIcon cli="codex"/><span><strong>Codex</strong><small>OpenAI Codex CLI</small></span><Check/></button><button type="button" className={value.cli === 'claude' ? 'selected' : ''} aria-pressed={value.cli === 'claude'} onClick={() => patch('cli', 'claude')}><CliIcon cli="claude"/><span><strong>Claude Code</strong><small>Anthropic CLI</small></span><Check/></button></fieldset><label className="field"><span>Base URL *</span><input type="url" inputMode="url" spellCheck={false} autoCapitalize="none" placeholder="https://api.example.com/v1" value={value.baseUrl} onChange={event => patch('baseUrl', event.target.value)}/><small>只允许无账号、查询参数和片段的 HTTP(S) 地址</small></label><div className="field-grid"><label className="field"><span>模型</span><input spellCheck={false} placeholder="例如 gpt-5" value={value.model} onChange={event => patch('model', event.target.value)}/></label><label className="field"><span>Provider 标识</span><input spellCheck={false} placeholder="例如 custom" value={value.provider} onChange={event => patch('provider', event.target.value)}/></label></div><label className="field"><span>说明</span><textarea rows={3} maxLength={2048} placeholder="说明兼容范围、使用场景或模型限制，不要粘贴认证信息。" value={value.description} onChange={event => patch('description', event.target.value)}/></label>{error && <div className="form-error" role="alert"><AlertCircle/>{error}</div>}</div><footer><button className="secondary" disabled={busy} onClick={close}>取消</button><button className="primary" disabled={busy} onClick={() => void submit()}>{busy ? <LoaderCircle className="spinning"/> : <Save/>}{busy ? '保存中' : example ? '保存修改' : '创建示例'}</button></footer></section></div>
+  return <div className="provider-example-dialog-overlay"><button className="provider-example-dialog-scrim" aria-label="关闭供应商示例编辑" disabled={busy} onClick={() => { if (!busy) close() }}/><section ref={dialogRef} className="provider-example-dialog" role="dialog" aria-modal="true" aria-labelledby="provider-example-dialog-title"><header><div><span>{example ? '编辑非敏感模板' : '创建非敏感模板'}</span><h2 id="provider-example-dialog-title">{example ? example.name : '新增供应商示例'}</h2></div><button className="icon-button" disabled={busy} aria-label="关闭" onClick={close}><X/></button></header><div className="provider-example-dialog-body"><div className="provider-example-guard"><ShieldCheck/><span><strong>此表单不会接收凭证</strong><small>API Key、Token、认证头和 Webhook 均不属于示例信息，请在服务端环境变量或本地配置中维护。</small></span></div><div className="field-grid"><label className="field"><span>示例名称 *</span><input data-initial-focus value={value.name} maxLength={160} onChange={event => patch('name', event.target.value)}/></label><label className="field"><span>示例 ID *</span><input value={value.id} disabled={Boolean(example)} pattern="[a-z0-9][a-z0-9._-]*" spellCheck={false} autoCapitalize="none" onChange={event => patch('id', event.target.value.toLowerCase())}/><small>{example ? '编辑时不可更改 ID' : '例如 codex-ray-compatible'}</small></label></div><fieldset className="provider-example-cli"><legend>客户端类目 *</legend><button type="button" disabled={busy} className={value.cli === 'codex' ? 'selected' : ''} aria-pressed={value.cli === 'codex'} onClick={() => patch('cli', 'codex')}><CliIcon cli="codex"/><span><strong>Codex</strong><small>OpenAI Codex CLI</small></span><Check/></button><button type="button" disabled={busy} className={value.cli === 'claude' ? 'selected' : ''} aria-pressed={value.cli === 'claude'} onClick={() => patch('cli', 'claude')}><CliIcon cli="claude"/><span><strong>Claude Code</strong><small>Anthropic CLI</small></span><Check/></button></fieldset><label className="field"><span>Base URL *</span><input type="url" inputMode="url" spellCheck={false} autoCapitalize="none" placeholder="https://api.example.com/v1" value={value.baseUrl} onChange={event => patch('baseUrl', event.target.value)}/><small>只允许无账号、查询参数和片段的 HTTP(S) 地址</small></label><div className="field-grid"><label className="field"><span>模型</span><input spellCheck={false} placeholder="例如 gpt-5" value={value.model} onChange={event => patch('model', event.target.value)}/></label><label className="field"><span>Provider 标识</span><input spellCheck={false} placeholder="例如 custom" value={value.provider} onChange={event => patch('provider', event.target.value)}/></label></div><label className="field"><span>说明</span><textarea rows={3} maxLength={2048} placeholder="说明兼容范围、使用场景或模型限制，不要粘贴认证信息。" value={value.description} onChange={event => patch('description', event.target.value)}/></label>{error && <div className="form-error" role="alert"><AlertCircle/>{error}</div>}</div><footer><button className="secondary" disabled={busy} onClick={close}>取消</button><button className="primary" disabled={busy} onClick={() => void submit()}>{busy ? <LoaderCircle className="spinning"/> : <Save/>}{busy ? '保存中' : example ? '保存修改' : '创建示例'}</button></footer></section></div>
 }
 function ProviderExampleDeleteDialog({ example, close, remove }: { example: ProviderExample; close: () => void; remove: () => Promise<void> }) {
   const [busy, setBusy] = useState(false)
@@ -425,7 +538,7 @@ function ProviderExampleDeleteDialog({ example, close, remove }: { example: Prov
     const previous = document.activeElement as HTMLElement | null
     const focusable = () => Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled])') || [])
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close()
+      if (event.key === 'Escape' && !busy) close()
       if (event.key !== 'Tab') return
       const items = focusable(); if (!items.length) return
       const first = items[0]; const last = items[items.length - 1]
@@ -434,9 +547,9 @@ function ProviderExampleDeleteDialog({ example, close, remove }: { example: Prov
     }
     window.addEventListener('keydown', keydown); focusable()[0]?.focus()
     return () => { window.removeEventListener('keydown', keydown); previous?.focus() }
-  }, [])
+  }, [busy, close])
   const confirm = async () => { setBusy(true); setError(''); try { await remove() } catch (e) { setError(e instanceof Error ? e.message : '删除供应商示例失败'); setBusy(false) } }
-  return <div className="provider-example-dialog-overlay"><button className="provider-example-dialog-scrim" aria-label="取消删除供应商示例" onClick={close}/><section ref={dialogRef} className="provider-example-delete" role="dialog" aria-modal="true" aria-labelledby="delete-provider-example-title"><div className="event-confirm-icon"><Trash2/></div><h2 id="delete-provider-example-title">删除“{example.name}”？</h2><p>此操作只删除示例模板，不会删除本地 Provider、凭证、计划任务或运行记录。删除后无法撤销。</p>{error && <div className="form-error" role="alert"><AlertCircle/>{error}</div>}<div><button className="secondary" disabled={busy} onClick={close}>取消</button><button className="danger-button" disabled={busy} onClick={() => void confirm()}>{busy ? <LoaderCircle className="spinning"/> : <Trash2/>}{busy ? '正在删除' : '确认删除'}</button></div></section></div>
+  return <div className="provider-example-dialog-overlay"><button className="provider-example-dialog-scrim" aria-label="取消删除供应商示例" disabled={busy} onClick={() => { if (!busy) close() }}/><section ref={dialogRef} className="provider-example-delete" role="dialog" aria-modal="true" aria-labelledby="delete-provider-example-title"><div className="event-confirm-icon"><Trash2/></div><h2 id="delete-provider-example-title">删除“{example.name}”？</h2><p>此操作只删除示例模板，不会删除本地 Provider、凭证、计划任务或运行记录。删除后无法撤销。</p>{error && <div className="form-error" role="alert"><AlertCircle/>{error}</div>}<div><button className="secondary" disabled={busy} onClick={close}>取消</button><button className="danger-button" disabled={busy} onClick={() => void confirm()}>{busy ? <LoaderCircle className="spinning"/> : <Trash2/>}{busy ? '正在删除' : '确认删除'}</button></div></section></div>
 }
 function JobRow({ job, open }: { job: JobSummary; open: () => void }) {
   const [seconds, setSeconds] = useState(0)
@@ -449,7 +562,7 @@ function NewJobDrawer({ providers, initialProvider, initialExample, defaultOptio
   const [mode, setMode] = useState<JobMode>('probe')
   const [cli, setCli] = useState<Cli>(initialProvider?.cli ?? initialExample?.cli ?? 'codex')
   const [exampleReference, setExampleReference] = useState(initialExample)
-  const filtered = useMemo(() => providers.filter(p => p.cli === cli), [providers, cli])
+  const filtered = useMemo(() => providers.filter(p => p.cli === cli && p.enabled !== false && p.available !== false), [providers, cli])
   const [providerId, setProviderId] = useState(initialProvider?.id ?? '')
   const [options, setOptions] = useState<JobOptions>({ ...defaultOptions, model: initialExample?.model || defaultOptions.model })
   const [busy, setBusy] = useState(false)
@@ -460,7 +573,7 @@ function NewJobDrawer({ providers, initialProvider, initialExample, defaultOptio
     const focusable = () => Array.from(drawerRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? [])
     focusable()[0]?.focus()
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close()
+      if (event.key === 'Escape' && !busy) close()
       if (event.key !== 'Tab') return
       const items = focusable(); if (!items.length) return
       const first = items[0]; const last = items[items.length - 1]
@@ -469,7 +582,7 @@ function NewJobDrawer({ providers, initialProvider, initialExample, defaultOptio
     }
     window.addEventListener('keydown', onKeyDown)
     return () => { window.removeEventListener('keydown', onKeyDown); previousFocus?.focus() }
-  }, [close])
+  }, [busy, close])
   useEffect(() => { setProviderId(current => filtered.some(p => p.id === current) ? current : (filtered.find(p => p.current)?.id || filtered[0]?.id || '')) }, [cli, filtered])
   const selected = filtered.find(p => p.id === providerId)
   const canNext = step !== 3 || Boolean(selected)
@@ -478,24 +591,24 @@ function NewJobDrawer({ providers, initialProvider, initialExample, defaultOptio
     const body: StartJobRequest = { mode, cli, providerId, options }
     try { onStarted(await api.startJob(body), options.notifyOnComplete) } catch (e) { setError(e instanceof Error ? e.message : '任务启动失败') } finally { setBusy(false) }
   }
-  return <div className="overlay"><div className="overlay-scrim" onClick={close}/><aside ref={drawerRef} className="drawer" role="dialog" aria-modal="true" aria-labelledby="new-job-title">
-    <div className="drawer-header"><div><span>新建任务</span><h2 id="new-job-title">{step === 1 ? '选择运行模式' : step === 2 ? '选择客户端' : step === 3 ? '选择配置源' : step === 4 ? '高级参数' : '确认并启动'}</h2></div><button className="icon-button" onClick={close} aria-label="关闭新建任务"><X/></button></div>
+  return <div className="overlay"><div className="overlay-scrim" onClick={() => { if (!busy) close() }}/><aside ref={drawerRef} className="drawer" role="dialog" aria-modal="true" aria-labelledby="new-job-title">
+    <div className="drawer-header"><div><span>新建任务</span><h2 id="new-job-title">{step === 1 ? '选择运行模式' : step === 2 ? '选择客户端' : step === 3 ? '选择配置源' : step === 4 ? '高级参数' : '确认并启动'}</h2></div><button className="icon-button" disabled={busy} onClick={close} aria-label="关闭新建任务"><X/></button></div>
     <div className="steps">{[1,2,3,4,5].map(n => <div key={n} className={`${n === step ? 'active' : ''} ${n < step ? 'done' : ''}`}><span>{n < step ? <Check/> : n}</span><i/></div>)}</div>
     <div className="drawer-body">
       {exampleReference && <div className="example-reference-banner"><BookOpen/><span><strong>参考模板：{exampleReference.name}</strong><small>已预选 {cliLabel(exampleReference.cli)}{exampleReference.model ? `，并参考模型 ${exampleReference.model}` : ''}。模板不含密钥，请选择一个可用的本地配置源。</small></span></div>}
       {step === 1 && <div className="choice-grid"><Choice active={mode === 'probe' && options.runOnce} onClick={() => { setMode('probe'); setOptions(current => ({ ...current, runOnce: true })) }} icon={<Gauge/>} title="一次测活" tag="执行一次" detail="只调用一次所选 CLI，并立即返回本次探测结果。" footer="适合快速检查当前连通性"/><Choice active={mode === 'probe' && !options.runOnce} onClick={() => { setMode('probe'); setOptions(current => ({ ...current, runOnce: false })) }} icon={<RotateCcw/>} title="持续测活" tag="直至成功" detail="按重试间隔持续探测，成功或遇到不可恢复错误后结束。" footer="适合等待服务恢复可用"/><Choice active={mode === 'keepalive' && options.runOnce} onClick={() => { setMode('keepalive'); setOptions(current => ({ ...current, runOnce: true })) }} icon={<Activity/>} title="一次保活" tag="单轮观测" detail="按保活规则执行一轮检查，不进入后续周期。" footer="适合验证保活参数"/><Choice active={mode === 'keepalive' && !options.runOnce} onClick={() => { setMode('keepalive'); setOptions(current => ({ ...current, runOnce: false })) }} icon={<TimerReset/>} title="持续保活" tag="持续运行" detail="立即检查一次，之后按固定间隔持续观测，直到手动停止。" footer="适合长期观测服务稳定性"/></div>}
-      {step === 2 && <div className="choice-grid"><Choice active={cli === 'codex'} onClick={() => { setCli('codex'); if (exampleReference?.cli !== 'codex') setExampleReference(null) }} icon={<Command/>} title="Codex CLI" tag="OpenAI" detail="使用只读沙箱与临时会话，检查 Codex 连接状态。" footer="支持当前配置与 CC Switch"/><Choice active={cli === 'claude'} onClick={() => { setCli('claude'); if (exampleReference?.cli !== 'claude') setExampleReference(null) }} icon={<Bot/>} title="Claude CLI" tag="Anthropic" detail="禁用工具与会话持久化，安全检查 Claude 连接状态。" footer="支持当前配置与 CC Switch"/></div>}
-      {step === 3 && <div><div className="inline-note"><ShieldCheck/><span>选择只影响当前任务，不会切换 CC Switch 的当前 Provider。</span></div><div className="provider-grid">{filtered.length ? filtered.map(p => <ProviderCard key={p.id || `current-${p.cli}`} provider={p} selected={providerId === p.id} onClick={() => setProviderId(p.id)}/>) : <EmptyState icon={<Database/>} title="没有可用配置" detail={`未发现 ${cliLabel(cli)} 当前配置或 CC Switch Provider。`}/>}</div></div>}
+      {step === 2 && <div className="choice-grid"><Choice active={cli === 'codex'} onClick={() => { setCli('codex'); if (exampleReference?.cli !== 'codex') setExampleReference(null) }} icon={<Command/>} title="Codex CLI" tag="OpenAI" detail="使用只读沙箱与临时会话，检查 Codex 连接状态。" footer="支持当前配置与 Redis Provider 快照"/><Choice active={cli === 'claude'} onClick={() => { setCli('claude'); if (exampleReference?.cli !== 'claude') setExampleReference(null) }} icon={<Bot/>} title="Claude CLI" tag="Anthropic" detail="禁用工具与会话持久化，安全检查 Claude 连接状态。" footer="支持当前配置与 Redis Provider 快照"/></div>}
+      {step === 3 && <div><div className="inline-note"><ShieldCheck/><span>CC Switch Provider 已在应用启动时同步到 Redis；启动任务不会访问 SQLite，也不会切换 CC Switch 当前 Provider。</span></div><div className="provider-grid">{filtered.length ? filtered.map(p => <ProviderCard key={p.id || `current-${p.cli}`} provider={p} selected={providerId === p.id} onClick={() => setProviderId(p.id)}/>) : <EmptyState icon={<Database/>} title="没有可用配置" detail={`未发现 ${cliLabel(cli)} 当前配置或 Redis Provider 快照。`}/>}</div></div>}
       {step === 4 && <AdvancedFields mode={mode} cli={cli} options={options} setOptions={setOptions}/>} 
       {step === 5 && <div className="confirmation"><div className="confirm-hero"><div className="confirm-orbit"><CliIcon cli={cli}/><i/></div><span>即将启动</span><h3>{cliLabel(cli)} {executionLabel(mode, options.runOnce)}任务</h3><p>所有 CLI 输出只在运行时通过内存实时传递，任务结束后立即销毁。</p></div><div className="confirm-list"><Confirm label="运行模式" value={executionLabel(mode, options.runOnce)}/><Confirm label="客户端" value={cliLabel(cli)}/>{exampleReference && <Confirm label="参考模板" value={exampleReference.name}/>}<Confirm label="配置源" value={selected?.name || providerId}/><Confirm label="模型" value={options.model || selected?.model || '跟随配置'}/><Confirm label="单次超时" value={`${options.timeoutSeconds} 秒`}/>{!options.runOnce && <Confirm label={mode === 'probe' ? '重试间隔' : '保活间隔'} value={`${mode === 'probe' ? options.retryIntervalSeconds : options.keepaliveIntervalSeconds} 秒`}/>} {mode === 'keepalive' && !options.runOnce && <Confirm label="失败转测活阈值" value={`${options.failureThreshold} 次`}/>}</div></div>}
       {error && <div className="form-error" role="alert"><AlertCircle/>{error}</div>}
     </div>
-    <div className="drawer-footer"><button className="secondary" onClick={() => step === 1 ? close() : setStep(step - 1)}>{step === 1 ? '取消' : <><ChevronLeft/>上一步</>}</button>{step < 5 ? <button className="primary" disabled={!canNext} onClick={() => setStep(step + 1)}>继续<ChevronRight/></button> : <button className="primary launch" disabled={busy} onClick={() => void submit()}>{busy ? <LoaderCircle className="spinning"/> : <Play/>}{busy ? '正在启动' : '启动任务'}</button>}</div>
+    <div className="drawer-footer"><button className="secondary" disabled={busy} onClick={() => step === 1 ? close() : setStep(step - 1)}>{step === 1 ? '取消' : <><ChevronLeft/>上一步</>}</button>{step < 5 ? <button className="primary" disabled={!canNext || busy} onClick={() => setStep(step + 1)}>继续<ChevronRight/></button> : <button className="primary launch" disabled={busy} onClick={() => void submit()}>{busy ? <LoaderCircle className="spinning"/> : <Play/>}{busy ? '正在启动' : '启动任务'}</button>}</div>
   </aside></div>
 }
 
 function Choice({ active, onClick, icon, title, tag, detail, footer }: { active: boolean; onClick: () => void; icon: React.ReactNode; title: string; tag: string; detail: string; footer: string }) { return <button className={`choice-card ${active ? 'selected' : ''}`} aria-pressed={active} onClick={onClick}><span className="choice-check">{active && <Check/>}</span><div className="choice-icon">{icon}</div><div className="choice-title"><h3>{title}</h3><em>{tag}</em></div><p>{detail}</p><small><CheckCircle2/>{footer}</small></button> }
-function ProviderCard({ provider, selected, onClick }: { provider: Provider; selected: boolean; onClick: () => void }) { return <button className={`provider-card ${selected ? 'selected' : ''}`} aria-pressed={selected} onClick={onClick}><span className="radio-dot"><i/></span><div className="provider-top"><CliIcon cli={provider.cli}/><div><strong>{provider.name}</strong><span>{provider.source === 'current' ? '当前 CLI 配置' : 'CC Switch Provider'}</span></div>{provider.current && <em>当前</em>}</div><dl><div><dt>模型</dt><dd>{provider.model || '跟随配置'}</dd></div><div><dt>Base URL</dt><dd>{provider.baseUrl || '默认地址'}</dd></div><div><dt>API Key</dt><dd><KeyRound/>{provider.maskedApiKey || '环境变量'}</dd></div></dl></button> }
+function ProviderCard({ provider, selected, onClick }: { provider: Provider; selected: boolean; onClick: () => void }) { return <button className={`provider-card ${selected ? 'selected' : ''}`} aria-pressed={selected} onClick={onClick}><span className="radio-dot"><i/></span><div className="provider-top"><CliIcon cli={provider.cli}/><div><strong>{provider.name}</strong><span>{provider.source === 'current' ? '当前 CLI 配置 · 自动发现只读' : provider.source === 'cc-switch' ? 'CC Switch · Redis快照/启动同步，只读' : '手填 Provider'}</span></div>{provider.current && <em>当前</em>}</div><dl><div><dt>模型</dt><dd>{provider.model || '跟随配置'}</dd></div><div><dt>Base URL</dt><dd>{provider.baseUrl || '默认地址'}</dd></div><div><dt>API Key</dt><dd><KeyRound/>{provider.maskedApiKey || '环境变量'}</dd></div></dl></button> }
 function Confirm({ label, value }: { label: string; value: string }) { return <div><span>{label}</span><strong>{value}</strong></div> }
 
 function AdvancedFields({ mode, cli, options, setOptions }: { mode: JobMode; cli: Cli; options: JobOptions; setOptions: (v: JobOptions) => void }) {
@@ -515,23 +628,35 @@ function JobDetail({ initial, notifyOnComplete, close, onChanged }: { initial: J
   const previousStatus = useRef(initial.status)
   const running = job.status === 'running' || job.status === 'starting'
   useEffect(() => {
-    if (!running) { setEvents([]); return }
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); close() }
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [close])
+  useEffect(() => {
     const source = new EventSource(api.eventsUrl(job.id))
     source.onopen = () => setConnected(true)
-    source.onerror = () => setConnected(false)
+    source.onerror = () => {
+      setConnected(false)
+      if (!running) source.close()
+    }
     const handleEvent = (e: MessageEvent) => {
       try {
         const event = normalizeEvent(JSON.parse(e.data))
         if (event.job) setJob(event.job)
-        if (event.type === 'cleanup' || (event.job && !['running','starting'].includes(event.job.status))) setEvents([])
-        else setEvents(prev => [...prev.slice(-499), event])
+        setEvents(prev => [...prev.slice(-4999), event])
+        if (event.job && !['running','starting'].includes(event.job.status)) {
+          source.close()
+          setConnected(false)
+        }
         if (event.type !== 'log') void api.getJob(job.id).then(setJob).catch(() => undefined)
       } catch { /* ignore malformed heartbeats */ }
     }
-    const eventNames = ['output', 'error', 'cleanup', 'attempt_start', 'classification', 'job_state', 'countdown']
+    const eventNames = ['output', 'error', 'cleanup', 'attempt_start', 'classification', 'job_state', 'countdown', 'phase', 'recovery', 'request_start', 'request_log', 'request_end']
     eventNames.forEach(name => source.addEventListener(name, handleEvent as EventListener))
-    return () => { source.close(); setConnected(false); setEvents([]) }
-  }, [job.id, running])
+    return () => { source.close(); setConnected(false) }
+  }, [job.id])
   useEffect(() => { if (!paused) outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight, behavior: 'smooth' }) }, [events, paused])
   useEffect(() => {
     const wasRunning = previousStatus.current === 'running' || previousStatus.current === 'starting'
@@ -541,28 +666,52 @@ function JobDetail({ initial, notifyOnComplete, close, onChanged }: { initial: J
     }
     previousStatus.current = job.status
   }, [job.status, job.cli, job.mode, job.providerId, job.providerName, notifyOnComplete])
-  const stop = async () => { setStopping(true); try { const next = await api.stopJob(job.id); setJob(next); setEvents([]); onChanged() } finally { setStopping(false) } }
+  const stop = async () => { setStopping(true); try { const next = await api.stopJob(job.id); setJob(next); onChanged() } finally { setStopping(false) } }
   const copy = () => void navigator.clipboard.writeText(events.map(e => `[${new Date(e.timestamp).toLocaleTimeString()}] ${e.message ?? e.type}`).join('\n'))
-  return <div className="detail-overlay"><div className="detail-header"><button className="icon-button" onClick={close}><ChevronLeft/></button><CliIcon cli={job.cli}/><div><span>{cliLabel(job.cli)} · {executionLabel(job.mode, job.runOnce)}</span><h2>{job.providerName || job.providerId || '当前配置'}</h2></div><StatusPill status={job.status}/><div className="detail-actions">{running && <button className="danger-button" disabled={stopping} onClick={() => void stop()}>{stopping ? <LoaderCircle className="spinning"/> : <Square/>}停止任务</button>}<button className="icon-button" onClick={close}><X/></button></div></div><div className="detail-body"><section className="detail-stats"><div><span>任务 ID</span><strong className="mono">{job.id.slice(0, 12)}</strong></div><div><span>尝试次数</span><strong>{job.attemptCount}</strong></div><div><span>已运行</span><strong>{formatDuration(job.elapsedMs ?? Date.now() - new Date(job.startedAt).getTime())}</strong></div><div><span>模式 / 最近结果</span><strong>{executionLabel(job.mode, job.runOnce)} · {job.lastAttemptStatus || '等待中'}</strong></div></section><section className="terminal-card"><div className="terminal-bar"><div className="window-dots"><i/><i/><i/></div><div className={`stream-state ${connected ? 'online' : ''}`}>{connected ? <Wifi/> : <WifiOff/>}{connected ? '实时连接' : running ? '正在重连' : '连接已关闭'}</div><div className="terminal-actions"><button onClick={() => setPaused(!paused)}>{paused ? <Play/> : <Pause/>}{paused ? '继续滚动' : '暂停滚动'}</button><button onClick={copy} disabled={!events.length}><Copy/>复制</button></div></div><div className="terminal-output" ref={outputRef}>{events.length ? events.map((event, index) => <div className={`log-line ${event.level || ''}`} key={event.id || `${event.timestamp}-${index}`}><time>{new Date(event.timestamp).toLocaleTimeString('zh-CN', { hour12: false })}</time><span>{event.level === 'command' ? '$' : event.level === 'success' ? '✓' : event.level === 'error' ? '×' : '›'}</span><code>{event.message || event.type}</code></div>) : <div className="terminal-empty">{running ? <><LoaderCircle className="spinning"/><span>等待 CLI 输出…</span></> : <><Trash2/><span>任务已结束，实时日志已从内存销毁。</span></>}</div>}</div><div className="terminal-foot"><ShieldCheck/><span>此处输出不会写入磁盘，任务结束后自动清空</span><em>最大 500 行内存缓冲</em></div></section></div></div>
+  return <div className="detail-overlay" role="dialog" aria-modal="true" aria-label="测活终端输出"><div className="detail-header"><button className="icon-button" onClick={close} aria-label="返回并关闭终端"><ChevronLeft/></button><CliIcon cli={job.cli}/><div><span>{cliLabel(job.cli)} · {executionLabel(job.mode, job.runOnce)}</span><h2>{job.providerName || job.providerId || '当前配置'}</h2></div><StatusPill status={job.status}/><div className="detail-actions">{running && <button className="danger-button" disabled={stopping} onClick={() => void stop()}>{stopping ? <LoaderCircle className="spinning"/> : <Square/>}停止任务</button>}<button className="icon-button terminal-close-button" onClick={close} aria-label="关闭测活终端"><X/></button></div></div><div className="detail-body"><section className="detail-stats"><div><span>任务 ID</span><strong className="mono">{job.id.slice(0, 12)}</strong></div><div><span>请求次数</span><strong>{events.filter(e => e.data?.requestId && e.type !== 'log').length}</strong></div><div><span>已运行</span><strong>{formatDuration(job.elapsedMs ?? Date.now() - new Date(job.startedAt).getTime())}</strong></div><div><span>模式 / 最近结果</span><strong>{executionLabel(job.mode, job.runOnce)} · {job.lastAttemptStatus || '等待中'}</strong></div></section><section className="terminal-card"><div className="terminal-bar"><div className="window-dots"><i/><i/><i/></div><button className={`stream-state terminal-replay-close ${connected ? 'online' : ''}`} onClick={close} aria-label="关闭终端并返回任务列表">{connected ? <Wifi/> : <WifiOff/>}{connected ? '实时连接' : running ? '正在重连' : '缓存回放'}</button><div className="terminal-actions"><button onClick={() => setPaused(!paused)}>{paused ? <Play/> : <Pause/>}{paused ? '继续滚动' : '暂停滚动'}</button><button onClick={copy} disabled={!events.length}><Copy/>复制</button></div></div><div className="terminal-output" ref={outputRef}>{events.length ? events.map((event, index) => <div className={`log-line ${event.level || ''}`} key={event.id || `${event.timestamp}-${index}`}><time>{new Date(event.timestamp).toLocaleTimeString('zh-CN', { hour12: false })}</time><span>{event.level === 'command' ? '$' : event.level === 'success' ? '✓' : event.level === 'error' ? '×' : '›'}</span><code>{terminalEventText(event)}</code></div>) : <div className="terminal-empty">{running ? <><LoaderCircle className="spinning"/><span>等待 CLI 输出…</span></> : <><Trash2/><span>{job.mode === 'probe' ? '测活日志不存在或已超过 24 小时。' : '保活任务不缓存完整运行日志。'}</span></>}</div>}</div><div className="terminal-foot"><ShieldCheck/><span>{job.mode === 'probe' ? '测活日志脱敏后在 Redis 中缓存 24 小时' : '保活输出仅保留在运行时内存中'}</span><em>{job.mode === 'probe' ? '最多 5000 条 / 约 2 MiB' : '任务结束后自动清空'}</em></div></section></div></div>
 }
 
-function SettingsView() {
+function terminalEventText(event: JobEvent) {
+  if (event.rawType === 'request_start') {
+    const cli = String(event.data?.cli || event.job?.cli || 'cli')
+    const model = String(event.data?.model || event.job?.model || '默认模型')
+    return `$ ${cli} --model ${model} [PROMPT REDACTED]\n请求目标 ${String(event.data?.target || '目标未知')} · proxy=${String(event.data?.proxyMode || '—')}`
+  }
+  if (event.rawType === 'request_end') {
+    const summary = `${event.message || '请求结束'} · ${String(event.data?.status || '')} · ${String(event.data?.durationMillis || 0)}ms · exit=${String(event.data?.exitCode ?? '—')}`
+    const response = String(event.data?.responseExcerpt || '').trim()
+    return response ? `${summary}\n供应商返回：${response}` : summary
+  }
+  return event.message || event.type
+}
+
+function SettingsView({ onThemeChanged }: { onThemeChanged: (theme: AppSettings['uiTheme']) => void }) {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('')
   const [messageTone, setMessageTone] = useState<'success' | 'error'>('success')
-  const [testing, setTesting] = useState<'test' | 'status' | null>(null)
   useEffect(() => { api.settings().then(setSettings).catch(e => setMessage(e instanceof Error ? e.message : '加载失败')).finally(() => setLoading(false)) }, [])
-  const patch = (key: keyof AppSettings, value: number | boolean) => settings && setSettings({ ...settings, [key]: value })
-  const save = async () => { if (!settings) return; setSaving(true); setMessage(''); try { setSettings(await api.saveSettings(settings)); setMessageTone('success'); setMessage('设置已保存') } catch (e) { setMessageTone('error'); setMessage(e instanceof Error ? e.message : '保存失败') } finally { setSaving(false) } }
-  const testNotification = async (kind: 'test' | 'status') => {
-    setTesting(kind); setMessage('')
-    try {
-      if (kind === 'test') await api.testDingTalk(); else await api.sendDingTalkStatus()
-      setMessageTone('success'); setMessage(kind === 'test' ? '测试通知已发送' : '状态通知已发送')
-    } catch (e) { setMessageTone('error'); setMessage(e instanceof Error ? e.message : '通知发送失败') } finally { setTesting(null) }
-  }
+  useEffect(() => {
+    if (!message || messageTone !== 'success') return
+    const timer = window.setTimeout(() => setMessage(''), 3200)
+    return () => window.clearTimeout(timer)
+  }, [message, messageTone])
+  const patch = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => settings && setSettings({ ...settings, [key]: value })
+  const save = async () => { if (!settings) return; setSaving(true); setMessage(''); try { const saved = await api.saveSettings(settings); setSettings(saved); onThemeChanged(saved.uiTheme); setMessageTone('success'); setMessage('设置已保存') } catch (e) { setMessageTone('error'); setMessage(e instanceof Error ? e.message : '保存失败') } finally { setSaving(false) } }
   const browserPermission = typeof Notification === 'undefined' ? 'unsupported' : Notification.permission
-  return <div className="page settings-page"><section className="page-heading"><div><span className="eyebrow"><Settings/>全局偏好</span><h1>设置与通知</h1><p>为后续任务定义默认节奏与通知聚合策略。所有敏感通知凭证只存在于服务端环境变量。</p></div></section>{loading ? <div className="settings-loading"><LoaderCircle className="spinning"/>正在读取设置</div> : settings && <div className="settings-grid"><section className="panel settings-panel"><PanelTitle title="任务默认值" detail="新建任务时会自动带入，可在任务中临时调整"/><div className="setting-fields"><NumberField label="单次调用超时" value={settings.timeoutSeconds} suffix="秒" min={5} onChange={v => patch('timeoutSeconds', v)}/><NumberField label="测活重试间隔" value={settings.retryIntervalSeconds} suffix="秒" min={1} onChange={v => patch('retryIntervalSeconds', v)}/><NumberField label="保活执行间隔" value={settings.keepaliveIntervalSeconds} suffix="秒" min={10} onChange={v => patch('keepaliveIntervalSeconds', v)}/><NumberField label="摘要保留数量" value={settings.historyLimit} suffix="条" min={10} onChange={v => patch('historyLimit', v)}/><NumberField label="事件保留天数" value={settings.eventRetentionDays} suffix="天" min={1} onChange={v => patch('eventRetentionDays', v)}/><NumberField label="事件最大条数" value={settings.eventRetentionRows} suffix="条" min={100} onChange={v => patch('eventRetentionRows', v)}/><NumberField label="事件容量上限" value={Math.max(1, Math.round(settings.eventRetentionBytes / 1048576))} suffix="MiB" min={1} onChange={v => patch('eventRetentionBytes', v * 1048576)}/></div><div className="settings-callout"><Database/><div><strong>仅保存摘要元数据</strong><span>状态、运行时间、尝试次数与耗时会保留；Prompt、API Key 与 CLI 原始输出不会入库。</span></div></div></section><section className="panel settings-panel notification-panel"><PanelTitle title="通知渠道" detail="凭证留在服务端，浏览器只控制策略与测试"/><div className="notification-list"><div className="notification-card"><div className="notification-icon browser"><Bell/></div><div><strong>浏览器通知</strong><span>{browserPermission === 'granted' ? '权限已允许' : browserPermission === 'denied' ? '权限已被浏览器阻止' : browserPermission === 'unsupported' ? '当前浏览器不支持系统通知' : '替代容器中不可用的 macOS 通知'}</span></div><button className={`switch ${settings.browserNotifications ? 'on' : ''}`} aria-label="切换浏览器通知" aria-pressed={settings.browserNotifications} disabled={browserPermission === 'unsupported' || browserPermission === 'denied'} onClick={async () => { if (!settings.browserNotifications && browserPermission === 'default') await Notification.requestPermission(); patch('browserNotifications', !settings.browserNotifications) }}><i/></button></div><div className="notification-card notification-card-dingtalk"><div className="notification-icon dingtalk"><Zap/></div><div><strong>钉钉机器人</strong><span>{settings.dingTalkConfigured ? 'Webhook 已通过服务端环境变量配置，可直接验证通知链路' : '需要设置 DINGTALK_WEBHOOK_URL 环境变量'}</span></div><span className={`config-badge ${settings.dingTalkConfigured ? 'ok' : ''}`}>{settings.dingTalkConfigured ? '已配置' : '未配置'}</span></div><div className="notification-test-actions"><button className="secondary" disabled={!settings.dingTalkConfigured || testing !== null} onClick={() => void testNotification('test')}>{testing === 'test' ? <LoaderCircle className="spinning"/> : <Send/>}{testing === 'test' ? '发送中' : '发送测试通知'}</button><button className="secondary" disabled={!settings.dingTalkConfigured || testing !== null} onClick={() => void testNotification('status')}>{testing === 'status' ? <LoaderCircle className="spinning"/> : <Activity/>}{testing === 'status' ? '发送中' : '发送状态通知'}</button></div></div><div className="secret-note"><KeyRound/><span>Webhook 永远不会发送到浏览器，也不会保存在设置数据库中。</span></div></section><section className="panel settings-panel notification-policy-panel"><PanelTitle title="通知聚合策略" detail="降低保活噪声，同时保留长时间探测与恢复信号"/><div className="notification-policy-intro"><Sparkles/><span><strong>按窗口合并消息</strong><small>保活成功可按时间或次数汇总；多个 Provider 只有在合并窗口大于 0 时才会合并恢复通知。</small></span></div><div className="setting-fields notification-policy-fields"><NumberField label="保活按时间汇总" value={settings.keepaliveSummarySeconds} suffix="秒" min={0} max={604800} onChange={v => patch('keepaliveSummarySeconds', v)}/><NumberField label="保活按成功次数汇总" value={settings.keepaliveSummarySuccesses} suffix="次" min={0} max={1000000} onChange={v => patch('keepaliveSummarySuccesses', v)}/><NumberField label="测活进度通知间隔" value={settings.probeProgressSeconds} suffix="秒" min={1} max={604800} onChange={v => patch('probeProgressSeconds', v)}/><NumberField label="恢复通知合并窗口" value={settings.recoveryMergeSeconds} suffix="秒" min={0} max={86400} onChange={v => patch('recoveryMergeSeconds', v)}/></div><div className="notification-policy-foot"><CircleDot/><span><strong>恢复合并为 0 时保留单 Provider 模板</strong><small>保活时间或次数设为 0 会关闭对应汇总条件；两个条件同时启用时，任一条件先达到即发送。</small></span></div></section></div>}{message && <div className={`toast-inline ${messageTone === 'success' ? 'success' : ''}`} role="status" aria-live="polite">{messageTone === 'success' ? <CheckCircle2/> : <AlertCircle/>}{message}</div>}<div className="sticky-save"><div><strong>修改全局默认值</strong><span>不会影响已经运行的任务</span></div><button className="primary" disabled={!settings || saving} onClick={() => void save()}>{saving ? <LoaderCircle className="spinning"/> : <Save/>}{saving ? '保存中' : '保存设置'}</button></div></div>
+  return <div className="page settings-page">
+    <section className="page-heading"><div><span className="eyebrow"><Settings/>全局偏好</span><h1>设置与通知</h1><p>定义任务节奏与通知策略。供应商密钥和钉钉 Webhook 均以 AES-GCM 密文保存在 Redis。</p></div></section>
+    {loading ? <div className="settings-loading"><LoaderCircle className="spinning"/>正在读取设置</div> : settings && <div className="settings-grid">
+      <section className="panel settings-panel theme-settings-panel"><PanelTitle title="界面主题" detail="切换后立即预览，保存后由 Redis 持久化"/><div className="theme-choice-grid">{([
+        ['deep-ocean', '深海终端', '高对比青蓝控制台'], ['graphite-signal', '石墨信号', '低饱和中性暗色'], ['arctic-daylight', '极昼控制台', '清晰明亮的浅色界面'],
+      ] as const).map(([value, label, detail]) => <button key={value} className={`theme-choice ${settings.uiTheme === value ? 'active' : ''}`} onClick={() => { patch('uiTheme', value); onThemeChanged(value) }}><i className={`theme-swatch ${value}`}/><span><strong>{label}</strong><small>{detail}</small></span>{settings.uiTheme === value && <Check/>}</button>)}</div></section>
+      <section className="panel settings-panel"><PanelTitle title="任务默认值" detail="新建任务时会自动带入，可在任务中临时调整"/><div className="setting-fields"><NumberField label="单次调用超时" value={settings.timeoutSeconds} suffix="秒" min={5} onChange={v => patch('timeoutSeconds', v)}/><NumberField label="测活重试间隔" value={settings.retryIntervalSeconds} suffix="秒" min={1} onChange={v => patch('retryIntervalSeconds', v)}/><NumberField label="保活执行间隔" value={settings.keepaliveIntervalSeconds} suffix="秒" min={10} onChange={v => patch('keepaliveIntervalSeconds', v)}/><NumberField label="摘要保留数量" value={settings.historyLimit} suffix="条" min={10} onChange={v => patch('historyLimit', v)}/><NumberField label="事件保留天数" value={settings.eventRetentionDays} suffix="天" min={1} onChange={v => patch('eventRetentionDays', v)}/><NumberField label="事件最大条数" value={settings.eventRetentionRows} suffix="条" min={100} onChange={v => patch('eventRetentionRows', v)}/><NumberField label="事件容量上限" value={Math.max(1, Math.round(settings.eventRetentionBytes / 1048576))} suffix="MiB" min={1} onChange={v => patch('eventRetentionBytes', v * 1048576)}/></div><div className="settings-callout"><Database/><div><strong>摘要持久化，测活明细短期缓存</strong><span>Prompt 和密钥不会入库；测活 CLI 输出脱敏后在 Redis 缓存 24 小时，保活原始输出仍只存在运行时内存。</span></div></div></section>
+      <section className="panel settings-panel notification-panel"><PanelTitle title="通知渠道" detail="浏览器权限留在本机；钉钉凭证在服务端加密"/><div className="notification-list"><div className="notification-card"><div className="notification-icon browser"><Bell/></div><div><strong>浏览器通知</strong><span>{browserPermission === 'granted' ? '权限已允许' : browserPermission === 'denied' ? '权限已被浏览器阻止' : browserPermission === 'unsupported' ? '当前浏览器不支持系统通知' : '替代容器中不可用的 macOS 通知'}</span></div><button className={`switch ${settings.browserNotifications ? 'on' : ''}`} aria-label="切换浏览器通知" aria-pressed={settings.browserNotifications} disabled={browserPermission === 'unsupported' || browserPermission === 'denied'} onClick={async () => { if (!settings.browserNotifications && browserPermission === 'default') await Notification.requestPermission(); patch('browserNotifications', !settings.browserNotifications) }}><i/></button></div><DingTalkConfigCard onConfigured={configured => setSettings(current => current ? { ...current, dingTalkConfigured: configured } : current)}/></div><div className="secret-note"><KeyRound/><span>Webhook 明文不会返回浏览器；保存成功后输入框会立即清空。</span></div></section>
+      <section className="panel settings-panel notification-policy-panel"><PanelTitle title="通知聚合策略" detail="降低保活噪声，同时保留长时间探测与恢复信号"/><div className="notification-policy-intro"><Sparkles/><span><strong>按窗口合并消息</strong><small>保活成功可按时间或次数汇总；多个 Provider 只有在合并窗口大于 0 时才会合并恢复通知。</small></span></div><div className="setting-fields notification-policy-fields"><NumberField label="保活按时间汇总" value={settings.keepaliveSummarySeconds} suffix="秒" min={0} max={604800} onChange={v => patch('keepaliveSummarySeconds', v)}/><NumberField label="保活按成功次数汇总" value={settings.keepaliveSummarySuccesses} suffix="次" min={0} max={1000000} onChange={v => patch('keepaliveSummarySuccesses', v)}/><NumberField label="测活进度通知间隔" value={settings.probeProgressSeconds} suffix="秒" min={1} max={604800} onChange={v => patch('probeProgressSeconds', v)}/><NumberField label="恢复通知合并窗口" value={settings.recoveryMergeSeconds} suffix="秒" min={0} max={86400} onChange={v => patch('recoveryMergeSeconds', v)}/></div><div className="notification-policy-foot"><CircleDot/><span><strong>恢复合并为 0 时保留单 Provider 模板</strong><small>保活时间或次数设为 0 会关闭对应汇总条件；两个条件同时启用时，任一条件先达到即发送。</small></span></div></section>
+      <section className="panel settings-panel reliability-alert-settings"><PanelTitle title="Provider 可靠性告警" detail="每次请求结束后评估滚动 24 小时指标"/><label className="toggle-row reliability-alert-toggle"><div><strong>启用可靠性告警</strong><span>{settings.dingTalkConfigured ? '达到阈值时通过钉钉通知，并记录结构化告警事件。' : '钉钉未配置；达到阈值时只记录结构化告警事件。'}</span></div><input type="checkbox" checked={settings.reliabilityAlertEnabled} onChange={event => patch('reliabilityAlertEnabled', event.target.checked)}/><i/></label><div className={`setting-fields reliability-alert-fields ${settings.reliabilityAlertEnabled ? '' : 'disabled'}`}><NumberField label="最少完成样本" value={settings.reliabilityAlertMinSamples} suffix="次" min={1} max={10000} onChange={v => patch('reliabilityAlertMinSamples', v)}/><NumberField label="成功率下限" value={settings.reliabilityAlertSuccessRate} suffix="%" min={1} max={100} onChange={v => patch('reliabilityAlertSuccessRate', v)}/><NumberField label="连续失败阈值" value={settings.reliabilityAlertConsecutiveFailures} suffix="次" min={1} max={10000} onChange={v => patch('reliabilityAlertConsecutiveFailures', v)}/><NumberField label="P95 延迟上限" value={settings.reliabilityAlertP95Millis} suffix={settings.reliabilityAlertP95Millis === 0 ? '关闭' : 'ms'} min={0} max={86400000} onChange={v => patch('reliabilityAlertP95Millis', v)}/><NumberField label="重复告警冷却" value={settings.reliabilityAlertCooldownSeconds} suffix="秒" min={0} max={604800} onChange={v => patch('reliabilityAlertCooldownSeconds', v)}/><NumberField label="连续成功恢复" value={settings.reliabilityAlertRecoverySuccesses} suffix="次" min={1} max={10000} onChange={v => patch('reliabilityAlertRecoverySuccesses', v)}/></div><label className="toggle-row reliability-recovery-toggle"><div><strong>发送恢复通知</strong><span>异常条件全部清除并达到连续成功次数后发送一次。</span></div><input type="checkbox" checked={settings.reliabilityAlertRecoveryEnabled} onChange={event => patch('reliabilityAlertRecoveryEnabled', event.target.checked)}/><i/></label><div className="notification-policy-foot"><TrendingUp/><span><strong>告警不会自动切换 Provider</strong><small>通知失败、事件读取失败或阈值计算失败都不会改变任务结果。</small></span></div></section>
+    </div>}
+    {message && <div className={`toast-inline ${messageTone === 'success' ? 'success' : ''}`} role="status" aria-live="polite">{messageTone === 'success' ? <CheckCircle2/> : <AlertCircle/>}{message}</div>}
+    <div className="sticky-save"><div><strong>修改全局默认值</strong><span>不会影响已经运行的任务</span></div><button className="primary" disabled={!settings || saving} onClick={() => void save()}>{saving ? <LoaderCircle className="spinning"/> : <Save/>}{saving ? '保存中' : '保存设置'}</button></div>
+  </div>
 }

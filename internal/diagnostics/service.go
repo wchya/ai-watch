@@ -3,6 +3,8 @@ package diagnostics
 import (
 	"bytes"
 	"context"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,19 +30,21 @@ const (
 type Service struct {
 	scanner    *configscan.Scanner
 	jobs       *jobs.Manager
-	store      *store.JSON
+	store      store.Store
 	runtimeDir string
 	checkCLI   func(context.Context, string, string) CLIStatus
 	now        func() time.Time
 }
 
 type Snapshot struct {
-	Status      string          `json:"status"`
-	GeneratedAt time.Time       `json:"generatedAt"`
-	CLIs        []CLIStatus     `json:"clis"`
-	SQLite      SQLiteStatus    `json:"sqlite"`
-	Runtime     RuntimeStatus   `json:"runtime"`
-	Config      ConfigLifecycle `json:"config"`
+	Status       string                    `json:"status"`
+	GeneratedAt  time.Time                 `json:"generatedAt"`
+	CLIs         []CLIStatus               `json:"clis"`
+	Storage      StorageStatus             `json:"storage"`
+	Proxy        ProxyStatus               `json:"proxy"`
+	CCSwitchSync *store.CCSwitchSyncStatus `json:"ccSwitchSync,omitempty"`
+	Runtime      RuntimeStatus             `json:"runtime"`
+	Config       ConfigLifecycle           `json:"config"`
 }
 
 type CLIStatus struct {
@@ -52,12 +56,20 @@ type CLIStatus struct {
 	CheckState string `json:"checkState"`
 }
 
-type SQLiteStatus struct {
-	Available     bool  `json:"available"`
-	SchemaVersion int   `json:"schemaVersion"`
-	LogicalBytes  int64 `json:"logicalBytes"`
-	EventCount    int64 `json:"eventCount"`
-	ScheduleCount int64 `json:"scheduleCount"`
+type StorageStatus struct {
+	Available     bool   `json:"available"`
+	Backend       string `json:"backend"`
+	SchemaVersion int    `json:"schemaVersion"`
+	LogicalBytes  int64  `json:"logicalBytes"`
+	EventCount    int64  `json:"eventCount"`
+	ScheduleCount int64  `json:"scheduleCount"`
+}
+
+type ProxyStatus struct {
+	Configured bool   `json:"configured"`
+	Available  bool   `json:"available"`
+	Endpoint   string `json:"endpoint,omitempty"`
+	CheckState string `json:"checkState"`
 }
 
 type RuntimeStatus struct {
@@ -78,7 +90,7 @@ type ConfigField struct {
 	Description string `json:"description"`
 }
 
-func New(scanner *configscan.Scanner, manager *jobs.Manager, st *store.JSON, runtimeDir string) *Service {
+func New(scanner *configscan.Scanner, manager *jobs.Manager, st store.Store, runtimeDir string) *Service {
 	if runtimeDir == "" {
 		runtimeDir = os.Getenv("AI_WATCH_RUNTIME_DIR")
 	}
@@ -118,13 +130,25 @@ func (s *Service) Snapshot(ctx context.Context) Snapshot {
 
 	if s.store != nil {
 		if stats, err := s.store.Diagnostics(); err == nil {
-			result.SQLite = SQLiteStatus{
-				Available: true, SchemaVersion: stats.SchemaVersion,
+			result.Storage = StorageStatus{
+				Available: true, Backend: stats.Backend, SchemaVersion: stats.SchemaVersion,
 				LogicalBytes: stats.LogicalBytes, EventCount: stats.EventCount,
 				ScheduleCount: stats.ScheduleCount,
 			}
 		} else {
 			result.Status = "degraded"
+		}
+		if statusStore, ok := s.store.(interface {
+			LoadCCSwitchSyncStatus() (store.CCSwitchSyncStatus, error)
+		}); ok {
+			if syncStatus, syncErr := statusStore.LoadCCSwitchSyncStatus(); syncErr == nil {
+				result.CCSwitchSync = &syncStatus
+				if syncStatus.Warning != "" && (syncStatus.SourceAvailable || syncStatus.LastSuccessAt != nil) {
+					result.Status = "degraded"
+				}
+			} else {
+				result.Status = "degraded"
+			}
 		}
 	} else {
 		result.Status = "degraded"
@@ -133,6 +157,10 @@ func (s *Service) Snapshot(ctx context.Context) Snapshot {
 	if s.jobs != nil {
 		result.Runtime.ActiveJobs = s.jobs.ActiveCount()
 	}
+	result.Proxy = checkProxy(ctx, os.Getenv("AI_WATCH_DEFAULT_PROXY_URL"))
+	if result.Proxy.Configured && !result.Proxy.Available {
+		result.Status = "degraded"
+	}
 	entries, ready := runtimeEntries(filepath.Join(s.runtimeDir, "jobs"))
 	result.Runtime.DirectoryEntries = entries
 	result.Runtime.DirectoryReady = ready
@@ -140,6 +168,34 @@ func (s *Service) Snapshot(ctx context.Context) Snapshot {
 		result.Status = "degraded"
 	}
 	return result
+}
+
+func checkProxy(ctx context.Context, rawURL string) ProxyStatus {
+	status := ProxyStatus{CheckState: "not_configured"}
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Host == "" {
+		if strings.TrimSpace(rawURL) != "" {
+			status.Configured = true
+			status.CheckState = "invalid"
+		}
+		return status
+	}
+	status.Configured = true
+	status.Endpoint = parsed.Host
+	status.CheckState = "unavailable"
+	checkCtx, cancel := context.WithTimeout(ctx, commandTimeout)
+	defer cancel()
+	connection, err := (&net.Dialer{}).DialContext(checkCtx, "tcp", parsed.Host)
+	if err != nil {
+		if checkCtx.Err() != nil {
+			status.CheckState = "timeout"
+		}
+		return status
+	}
+	_ = connection.Close()
+	status.Available = true
+	status.CheckState = "ok"
+	return status
 }
 
 func checkCLI(ctx context.Context, id, binary string) CLIStatus {
@@ -254,13 +310,15 @@ func configLifecycle() ConfigLifecycle {
 			{Key: "taskDefaults", Label: "任务默认节奏", Description: "超时、重试、保活间隔只影响后续新任务。"},
 			{Key: "eventRetention", Label: "事件保留策略", Description: "保留天数、条数和容量保存后立即生效。"},
 			{Key: "notificationPolicy", Label: "通知聚合策略", Description: "进度、摘要和恢复合并窗口保存后立即生效。"},
+			{Key: "manualProviders", Label: "手动 Provider", Description: "凭证、模型、启停和代理策略保存后影响后续新任务。"},
+			{Key: "dingTalkWebhook", Label: "钉钉 Webhook", Description: "Redis 中的加密 Webhook 保存或清除后立即生效。"},
 			{Key: "schedules", Label: "计划任务", Description: "新增、编辑、启停和删除会唤醒调度器重新协调。"},
 		},
 		RestartRequired: []ConfigField{
 			{Key: "cliBinaries", Label: "CLI 可执行文件", Description: "CODEX_BIN 与 CLAUDE_BIN 在服务启动时装配。"},
 			{Key: "mountedConfigs", Label: "配置挂载位置", Description: "Codex、Claude 与 CC Switch 路径变更后需要重启。"},
 			{Key: "storageAndRuntime", Label: "存储与运行目录", Description: "数据目录、运行目录和 Web 静态目录在启动时确定。"},
-			{Key: "networkAndNotification", Label: "监听与通知凭证", Description: "监听地址和钉钉 Webhook 由启动环境注入。"},
+			{Key: "networkAndProxy", Label: "监听与默认代理", Description: "监听地址、Mihomo 服务和默认代理 URL 由启动环境与 Compose 确定。"},
 		},
 	}
 }

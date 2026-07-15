@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,19 +20,26 @@ import (
 )
 
 type Result struct {
-	ExitCode int
-	Output   string
-	TimedOut bool
-	Stopped  bool
+	ExitCode       int
+	Output         string
+	TimedOut       bool
+	Stopped        bool
+	StartedAt      time.Time
+	EndedAt        time.Time
+	DurationMillis int64
+	CLIExecutable  string
+	CLIVersion     string
 }
 
 type Runner struct {
 	CodexBin, ClaudeBin, RuntimeDir string
 	MaxOutputBytes                  int
+	versionMu                       sync.Mutex
+	versions                        map[domain.CLI]string
 }
 
 func New() *Runner {
-	return &Runner{CodexBin: env("CODEX_BIN", "codex"), ClaudeBin: env("CLAUDE_BIN", "claude"), RuntimeDir: env("AI_WATCH_RUNTIME_DIR", "/run/ai-watch"), MaxOutputBytes: 256 << 10}
+	return &Runner{CodexBin: env("CODEX_BIN", "codex"), ClaudeBin: env("CLAUDE_BIN", "claude"), RuntimeDir: env("AI_WATCH_RUNTIME_DIR", "/run/ai-watch"), MaxOutputBytes: 256 << 10, versions: map[domain.CLI]string{}}
 }
 func env(k, v string) string {
 	if x := os.Getenv(k); x != "" {
@@ -49,6 +57,7 @@ func (r *Runner) CleanupRuntimeJobs() error {
 }
 
 func (r *Runner) Run(ctx context.Context, jobID string, opts domain.JobOptions, cfg domain.ResolvedConfig, output func(string)) (Result, error) {
+	startedAt := time.Now().UTC()
 	temp, err := r.prepare(jobID, opts.CLI, cfg)
 	if err != nil {
 		return Result{}, err
@@ -64,9 +73,13 @@ func (r *Runner) Run(ctx context.Context, jobID string, opts domain.JobOptions, 
 		if model := firstNonEmpty(opts.Model, cfg.Model); model != "" {
 			args = append(args, "--model", model)
 		}
-		args = append(args, opts.Prompt)
+		// Passing both a prompt argument and non-TTY stdin triggers a Codex CLI
+		// bug where exec can hang at "Reading additional input from stdin...".
+		// Use the documented stdin-only form instead.
+		args = append(args, "-")
 		cmd = exec.Command(r.CodexBin, args...)
-		cmd.Env = commandEnv(map[string]string{"HOME": temp, "CODEX_HOME": temp, "OPENAI_API_KEY": cfg.APIKey})
+		cmd.Env = commandEnv(map[string]string{"HOME": temp, "CODEX_HOME": temp, "OPENAI_API_KEY": cfg.APIKey}, cfg)
+		cmd.Stdin = strings.NewReader(opts.Prompt + "\n")
 	} else if opts.CLI == domain.CLIClaude {
 		args := []string{"--print", "--output-format", "text", "--no-session-persistence", "--safe-mode", "--permission-mode", "dontAsk", "--name", opts.SessionName, "--tools", ""}
 		if opts.Model != "" {
@@ -90,7 +103,7 @@ func (r *Runner) Run(ctx context.Context, jobID string, opts domain.JobOptions, 
 			vars["ANTHROPIC_API_KEY"] = cfg.APIKey
 		}
 		vars["HOME"] = temp
-		cmd.Env = commandEnv(vars)
+		cmd.Env = commandEnv(vars, cfg)
 		cmd.Stdin = strings.NewReader(opts.Prompt + "\n")
 	} else {
 		return Result{}, errors.New("unsupported cli")
@@ -102,12 +115,20 @@ func (r *Runner) Run(ctx context.Context, jobID string, opts domain.JobOptions, 
 	if err := cmd.Start(); err != nil {
 		return Result{}, err
 	}
+	finish := func(result Result) Result {
+		result.StartedAt = startedAt
+		result.EndedAt = time.Now().UTC()
+		result.DurationMillis = result.EndedAt.Sub(startedAt).Milliseconds()
+		result.CLIExecutable = filepath.Base(cmd.Path)
+		result.CLIVersion = r.cliVersion(opts.CLI)
+		return result
+	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	select {
 	case err := <-done:
 		collector.Flush()
-		return Result{ExitCode: exitCode(err), Output: collector.String()}, nil
+		return finish(Result{ExitCode: exitCode(err), Output: collector.String()}), nil
 	case <-ctx.Done():
 		terminateGroup(cmd.Process.Pid)
 		select {
@@ -117,8 +138,29 @@ func (r *Runner) Run(ctx context.Context, jobID string, opts domain.JobOptions, 
 			<-done
 		}
 		collector.Flush()
-		return Result{ExitCode: 124, Output: collector.String(), TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded), Stopped: errors.Is(ctx.Err(), context.Canceled)}, nil
+		return finish(Result{ExitCode: 124, Output: collector.String(), TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded), Stopped: errors.Is(ctx.Err(), context.Canceled)}), nil
 	}
+}
+
+func (r *Runner) cliVersion(cli domain.CLI) string {
+	r.versionMu.Lock()
+	defer r.versionMu.Unlock()
+	if r.versions == nil {
+		r.versions = map[domain.CLI]string{}
+	}
+	if value, ok := r.versions[cli]; ok {
+		return value
+	}
+	key := "AI_WATCH_CODEX_CLI_VERSION"
+	if cli == domain.CLIClaude {
+		key = "AI_WATCH_CLAUDE_CLI_VERSION"
+	}
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" || len(value) > 256 {
+		value = "unavailable"
+	}
+	r.versions[cli] = value
+	return value
 }
 
 func terminateGroup(pid int) { _ = syscall.Kill(-pid, syscall.SIGTERM) }
@@ -197,12 +239,13 @@ func (r *Runner) prepare(jobID string, cli domain.CLI, cfg domain.ResolvedConfig
 	return dir, nil
 }
 
-func commandEnv(values map[string]string) []string {
+func commandEnv(values map[string]string, cfg domain.ResolvedConfig) []string {
 	m := map[string]string{}
 	for _, key := range []string{
 		"PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR",
 		"SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
 		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+		"http_proxy", "https_proxy", "all_proxy", "no_proxy",
 		"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_REGION", "AWS_PROFILE",
 		"GOOGLE_APPLICATION_CREDENTIALS", "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_PROJECT_ID",
 		"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
@@ -216,11 +259,57 @@ func commandEnv(values map[string]string) []string {
 			m[k] = v
 		}
 	}
+	applyProxyPolicy(m, cfg)
 	out := make([]string, 0, len(m))
 	for k, v := range m {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+var routeProxyEnvKeys = []string{
+	"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+	"http_proxy", "https_proxy", "all_proxy",
+}
+
+func applyProxyPolicy(environment map[string]string, cfg domain.ResolvedConfig) {
+	mode := cfg.ProxyMode
+	if mode == "" {
+		mode = domain.ProxyDefault
+	}
+	switch mode {
+	case domain.ProxyDirect:
+		clearRouteProxy(environment)
+	case domain.ProxyCustom:
+		clearRouteProxy(environment)
+		setProxyURL(environment, cfg.ProxyURL)
+	case domain.ProxyDefault:
+		if proxyURL := strings.TrimSpace(os.Getenv("AI_WATCH_DEFAULT_PROXY_URL")); proxyURL != "" {
+			clearRouteProxy(environment)
+			setProxyURL(environment, proxyURL)
+		}
+	}
+}
+
+func clearRouteProxy(environment map[string]string) {
+	for _, key := range routeProxyEnvKeys {
+		delete(environment, key)
+	}
+}
+
+func setProxyURL(environment map[string]string, proxyURL string) {
+	proxyURL = strings.TrimSpace(proxyURL)
+	if proxyURL == "" {
+		return
+	}
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+		environment[key] = proxyURL
+	}
+	parsed, err := url.Parse(proxyURL)
+	if err == nil && (strings.EqualFold(parsed.Scheme, "socks5") || strings.EqualFold(parsed.Scheme, "socks5h")) {
+		environment["ALL_PROXY"] = proxyURL
+		environment["all_proxy"] = proxyURL
+	}
 }
 
 func sensitiveEnvValues(environment []string) []string {
@@ -233,9 +322,23 @@ func sensitiveEnvValues(environment []string) []string {
 		name := strings.ToUpper(parts[0])
 		if strings.Contains(name, "KEY") || strings.Contains(name, "TOKEN") || strings.Contains(name, "SECRET") || strings.Contains(name, "PASSWORD") || strings.Contains(name, "CREDENTIAL") || strings.Contains(name, "AUTH") {
 			values = append(values, parts[1])
+		} else if strings.Contains(name, "PROXY") && proxyURLContainsCredentials(parts[1]) {
+			values = append(values, parts[1])
+			parsed, _ := url.Parse(parts[1])
+			if password, ok := parsed.User.Password(); ok && password != "" {
+				values = append(values, password)
+			}
+			if username := parsed.User.Username(); len(username) >= 6 {
+				values = append(values, username)
+			}
 		}
 	}
 	return values
+}
+
+func proxyURLContainsCredentials(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.User != nil
 }
 
 func firstNonEmpty(values ...string) string {

@@ -5,9 +5,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +30,9 @@ var ErrActiveLimit = errors.New("active job limit reached")
 const (
 	minRetryIntervalSeconds = 1
 	maxActiveJobs           = 8
+	probeLogTTL             = 24 * time.Hour
+	probeLogMaxRows         = 5000
+	probeLogMaxBytes        = 2 << 20
 )
 
 type Resolver interface {
@@ -44,7 +50,7 @@ type Manager struct {
 	mu                sync.RWMutex
 	resolver          Resolver
 	executor          Executor
-	store             *store.JSON
+	store             store.Store
 	jobs              map[string]*runtime
 	locks             map[string]string
 	history           []domain.Summary
@@ -82,12 +88,14 @@ type runtime struct {
 }
 
 type eventWrite struct {
-	event     store.Event
-	retention store.EventRetention
-	barrier   chan struct{}
+	operationalEvent *store.Event
+	retention        store.EventRetention
+	jobID            string
+	jobEvent         *domain.Event
+	barrier          chan struct{}
 }
 
-func New(res Resolver, exec Executor, st *store.JSON, notifier ...Notifier) *Manager {
+func New(res Resolver, exec Executor, st store.Store, notifier ...Notifier) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	settings, _ := st.LoadSettings()
 	settings = normalizedSettings(settings)
@@ -97,7 +105,7 @@ func New(res Resolver, exec Executor, st *store.JSON, notifier ...Notifier) *Man
 		n = notifier[0]
 	}
 	settings.DingTalkConfigured = n != nil && n.Configured()
-	m := &Manager{resolver: res, executor: exec, store: st, jobs: map[string]*runtime{}, locks: map[string]string{}, history: history, settings: settings, notifier: n, ctx: ctx, cancel: cancel, eventQueue: make(chan eventWrite, 256), scheduleJobs: map[string]string{}, scheduleWake: make(chan struct{}, 1), notificationSlots: make(chan struct{}, 4)}
+	m := &Manager{resolver: res, executor: exec, store: st, jobs: map[string]*runtime{}, locks: map[string]string{}, history: history, settings: settings, notifier: n, ctx: ctx, cancel: cancel, eventQueue: make(chan eventWrite, 1024), scheduleJobs: map[string]string{}, scheduleWake: make(chan struct{}, 1), notificationSlots: make(chan struct{}, 4)}
 	m.persistenceErr.Store("")
 	m.eventWG.Add(1)
 	go m.persistEvents()
@@ -198,6 +206,11 @@ func (m *Manager) start(opts domain.JobOptions, scheduleID, occurrenceKey string
 
 func (m *Manager) run(rt *runtime) {
 	m.update(rt, func(j *domain.Job) { j.Status = domain.JobRunning }, "job_state", "任务开始运行", map[string]any{"status": domain.JobRunning})
+	if rt.scheduleID != "" {
+		if err := m.store.MarkScheduleRun(rt.scheduleID, rt.occurrenceKey, string(domain.JobRunning), rt.job.ID, time.Now().UTC()); err != nil {
+			m.persistenceErr.Store(err.Error())
+		}
+	}
 	for {
 		if rt.ctx.Err() != nil {
 			m.finish(rt, domain.JobStopped, domain.AttemptStopped, "任务已停止")
@@ -206,18 +219,107 @@ func (m *Manager) run(rt *runtime) {
 		m.mu.Lock()
 		rt.job.Attempts++
 		attempt := rt.job.Attempts
+		requestID := fmt.Sprintf("%s-%d-%d", rt.job.ID, attempt, time.Now().UnixNano())
+		requestStarted := time.Now().UTC()
+		triggerSource := rt.opts.TriggerSource
+		if triggerSource == "" {
+			triggerSource = "manual"
+		}
+		if rt.job.Phase == domain.JobPhaseRecoveryProbe {
+			triggerSource = "recovery_probe"
+		}
+		targetHost, targetPort := endpointParts(rt.cfg.BaseURL)
+		var dnsIPs []string
+		var dnsError string
+		if rt.opts.TriggerSource != "" && targetHost != "" {
+			dnsCtx, dnsCancel := context.WithTimeout(rt.ctx, 2*time.Second)
+			addresses, lookupErr := net.DefaultResolver.LookupHost(dnsCtx, targetHost)
+			dnsCancel()
+			if lookupErr != nil {
+				dnsError = lookupErr.Error()
+			} else {
+				dnsIPs = addresses
+			}
+		}
+		proxyEndpoint := ""
+		if rt.cfg.ProxyMode == domain.ProxyCustom {
+			proxyEndpoint = sanitizeTarget(rt.cfg.ProxyURL)
+		}
+		promptHash := sha256.Sum256([]byte(rt.opts.Prompt))
+		requestBody := map[string]any{
+			"promptBytes": len([]byte(rt.opts.Prompt)), "promptSHA256": hex.EncodeToString(promptHash[:8]),
+			"expectedText": rt.opts.Expected, "model": first(rt.opts.Model, rt.cfg.Model),
+			"timeoutSeconds": rt.opts.TimeoutSeconds, "runOnce": rt.opts.RunOnce,
+			"codexRequestRetries": rt.opts.CodexRequestRetries, "codexStreamRetries": rt.opts.CodexStreamRetries,
+			"claudeMaxRetries": rt.opts.ClaudeMaxRetries, "fallbackModel": rt.opts.FallbackModel,
+		}
 		m.publishLocked(rt, "attempt_start", fmt.Sprintf("第 %d 次调用", attempt), map[string]any{"attempt": attempt})
+		m.publishLocked(rt, "request_start", "请求开始", map[string]any{
+			"requestId": requestID, "attempt": attempt, "mode": rt.opts.Mode,
+			"cli": rt.opts.CLI, "providerId": rt.job.ProviderID, "target": rt.cfg.BaseURL,
+			"proxyMode": rt.cfg.ProxyMode, "startedAt": requestStarted,
+			"triggerSource": triggerSource, "clientIP": rt.opts.ClientIP, "phase": rt.job.Phase,
+			"targetHost": targetHost, "targetPort": targetPort, "proxyEndpoint": proxyEndpoint,
+			"dnsIPs": dnsIPs, "dnsError": dnsError,
+			"model": first(rt.opts.Model, rt.cfg.Model), "configSource": rt.cfg.Source, "provider": rt.cfg.Provider,
+			"requestBody": requestBody,
+		})
 		m.mu.Unlock()
 		attemptCtx, cancel := context.WithTimeout(rt.ctx, time.Duration(rt.opts.TimeoutSeconds)*time.Second)
-		res, err := m.executor.Run(attemptCtx, rt.job.ID, rt.opts, rt.cfg, func(chunk string) { m.publish(rt, "output", chunk, nil) })
+		res, err := m.executor.Run(attemptCtx, rt.job.ID, rt.opts, rt.cfg, func(chunk string) {
+			m.publish(rt, "request_log", chunk, map[string]any{"requestId": requestID, "stream": "combined"})
+		})
 		cancel()
 		if err != nil {
-			m.publish(rt, "error", "CLI 启动失败", map[string]any{"error": err.Error()})
+			m.publish(rt, "request_end", "请求启动失败", map[string]any{"requestId": requestID, "attempt": attempt, "status": "start_failed", "error": err.Error(), "durationMillis": time.Since(requestStarted).Milliseconds(), "startedAt": requestStarted, "endedAt": time.Now().UTC(), "cli": rt.opts.CLI, "providerId": rt.job.ProviderID, "triggerSource": triggerSource, "phase": rt.job.Phase, "model": first(rt.opts.Model, rt.cfg.Model)})
+			m.publish(rt, "error", "CLI 启动失败", map[string]any{"error": err.Error(), "requestId": requestID})
 			m.clearOutput(rt)
 			m.finish(rt, domain.JobFailed, domain.AttemptFatal, "任务执行失败")
 			return
 		}
 		state := classify.Result(rt.opts.CLI, res.ExitCode, res.Output, rt.opts.Expected, res.TimedOut, res.Stopped)
+		if res.StartedAt.IsZero() {
+			res.StartedAt = requestStarted
+		}
+		if res.EndedAt.IsZero() {
+			res.EndedAt = time.Now().UTC()
+		}
+		if res.DurationMillis <= 0 {
+			res.DurationMillis = res.EndedAt.Sub(res.StartedAt).Milliseconds()
+		}
+		requestStatus := "failed"
+		if state == domain.AttemptSuccess {
+			requestStatus = "success"
+		} else if state == domain.AttemptTimeout {
+			requestStatus = "timeout"
+		} else if state == domain.AttemptStopped {
+			requestStatus = "stopped"
+		}
+		var nextAttemptAt *time.Time
+		if !rt.opts.RunOnce && state != domain.AttemptStopped && state != domain.AttemptFatal {
+			next := time.Now().UTC().Add(time.Duration(rt.opts.RetryIntervalSeconds) * time.Second)
+			if rt.opts.Mode == domain.ModeKeepalive && state == domain.AttemptSuccess {
+				next = time.Now().UTC().Add(time.Duration(rt.opts.KeepaliveIntervalSeconds) * time.Second)
+			}
+			nextAttemptAt = &next
+		}
+		errorType := ""
+		if state != domain.AttemptSuccess {
+			errorType = string(state)
+		}
+		responseExcerpt := safeOutputExcerpt(res.Output, rt)
+		errorMessage := ""
+		if state != domain.AttemptSuccess && state != domain.AttemptStopped {
+			errorMessage = responseExcerpt
+			if errorMessage == "" {
+				if state == domain.AttemptTimeout {
+					errorMessage = fmt.Sprintf("CLI 请求超过 %d 秒未完成", rt.opts.TimeoutSeconds)
+				} else {
+					errorMessage = "CLI 请求未返回可识别的供应商响应"
+				}
+			}
+		}
+		m.publish(rt, "request_end", "请求结束", map[string]any{"requestId": requestID, "attempt": attempt, "status": requestStatus, "durationMillis": res.DurationMillis, "startedAt": res.StartedAt, "endedAt": res.EndedAt, "exitCode": res.ExitCode, "classification": state, "cli": rt.opts.CLI, "providerId": rt.job.ProviderID, "triggerSource": triggerSource, "phase": rt.job.Phase, "model": first(rt.opts.Model, rt.cfg.Model), "cliExecutable": res.CLIExecutable, "cliVersion": res.CLIVersion, "nextAttemptAt": nextAttemptAt, "errorType": errorType, "error": errorMessage, "responseExcerpt": responseExcerpt})
 		m.mu.Lock()
 		rt.job.LatestAttempt = state
 		m.clearOutputLocked(rt)
@@ -458,6 +560,9 @@ func (m *Manager) publishLocked(rt *runtime, typ, msg string, data map[string]an
 	if data == nil {
 		data = map[string]any{}
 	}
+	if rt.scheduleID != "" {
+		data["scheduleId"] = rt.scheduleID
+	}
 	data["job"] = view(rt.job)
 	rt.nextEvent++
 	e := domain.Event{ID: rt.nextEvent, Type: typ, At: time.Now().UTC(), Message: msg, Data: data}
@@ -471,18 +576,36 @@ func (m *Manager) publishLocked(rt *runtime, typ, msg string, data map[string]an
 		default:
 		}
 	}
-	if typ != "output" {
+	var operationalEvent *store.Event
+	if typ != "output" && typ != "request_log" {
 		level := "info"
 		if typ == "error" || rt.job.Status == domain.JobFatal || rt.job.Status == domain.JobFailed {
 			level = "error"
 		} else if typ == "recovery" || rt.job.Status == domain.JobSuccess {
 			level = "success"
 		}
-		settings := m.settings
-		m.eventQueue <- eventWrite{
-			event:     store.Event{At: e.At, Type: typ, Level: level, ProviderID: rt.job.ProviderID, JobID: rt.job.ID, Message: msg},
-			retention: store.EventRetention{MaxAge: time.Duration(settings.EventRetentionDays) * 24 * time.Hour, MaxRows: settings.EventRetentionRows, MaxBytes: settings.EventRetentionBytes},
+		safeEvent := redactJobEvent(e, rt)
+		if rt.scheduleID != "" {
+			if safeEvent.Data == nil {
+				safeEvent.Data = map[string]any{}
+			}
+			safeEvent.Data["scheduleId"] = rt.scheduleID
 		}
+		value := store.Event{At: e.At, Type: typ, Level: level, ProviderID: rt.job.ProviderID, JobID: rt.job.ID, ScheduleID: rt.scheduleID, Message: safeEvent.Message, Data: safeEvent.Data}
+		operationalEvent = &value
+	}
+	settings := m.settings
+	item := eventWrite{
+		operationalEvent: operationalEvent,
+		retention:        store.EventRetention{MaxAge: time.Duration(settings.EventRetentionDays) * 24 * time.Hour, MaxRows: settings.EventRetentionRows, MaxBytes: settings.EventRetentionBytes},
+	}
+	if rt.opts.Mode == domain.ModeProbe {
+		cached := redactJobEvent(e, rt)
+		item.jobID = rt.job.ID
+		item.jobEvent = &cached
+	}
+	if item.operationalEvent != nil || item.jobEvent != nil {
+		m.eventQueue <- item
 	}
 }
 
@@ -495,7 +618,7 @@ func (m *Manager) recordOperationalEvent(event store.Event) {
 	settings := m.settings
 	m.mu.RUnlock()
 	item := eventWrite{
-		event: event,
+		operationalEvent: &event,
 		retention: store.EventRetention{
 			MaxAge:  time.Duration(settings.EventRetentionDays) * 24 * time.Hour,
 			MaxRows: settings.EventRetentionRows, MaxBytes: settings.EventRetentionBytes,
@@ -583,14 +706,24 @@ func (m *Manager) Stop(id string) error {
 }
 func (m *Manager) Subscribe(id string, after uint64) ([]domain.Event, <-chan domain.Event, func(), error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	rt, ok := m.jobs[id]
 	if !ok {
 		if _, historical := m.historyJobLocked(id); historical {
+			m.mu.Unlock()
+			m.flushEventWrites()
+			var replay []domain.Event
+			if cache, ok := m.store.(store.JobEventStore); ok {
+				var err error
+				replay, err = cache.ListJobEvents(id, after)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+			}
 			ch := make(chan domain.Event)
 			close(ch)
-			return nil, ch, func() {}, nil
+			return replay, ch, func() {}, nil
 		}
+		m.mu.Unlock()
 		return nil, nil, nil, ErrNotFound
 	}
 	var replay []domain.Event
@@ -602,9 +735,11 @@ func (m *Manager) Subscribe(id string, after uint64) ([]domain.Event, <-chan dom
 	ch := make(chan domain.Event, 64)
 	if rt.closed {
 		close(ch)
+		m.mu.Unlock()
 		return replay, ch, func() {}, nil
 	}
 	rt.subscribers[ch] = struct{}{}
+	m.mu.Unlock()
 	return replay, ch, func() {
 		m.mu.Lock()
 		if _, ok := rt.subscribers[ch]; ok {
@@ -614,7 +749,14 @@ func (m *Manager) Subscribe(id string, after uint64) ([]domain.Event, <-chan dom
 		m.mu.Unlock()
 	}, nil
 }
-func (m *Manager) Settings() domain.Settings { m.mu.RLock(); defer m.mu.RUnlock(); return m.settings }
+func (m *Manager) Settings() domain.Settings {
+	m.mu.RLock()
+	value := m.settings
+	notifier := m.notifier
+	m.mu.RUnlock()
+	value.DingTalkConfigured = notifier != nil && notifier.Configured()
+	return value
+}
 func (m *Manager) SetSettings(v domain.Settings) error {
 	defaults := domain.DefaultSettings()
 	if v.EventRetentionDays == 0 {
@@ -632,11 +774,17 @@ func (m *Manager) SetSettings(v domain.Settings) error {
 	if v.KeepaliveSummarySeconds < 0 || v.KeepaliveSummarySeconds > 604800 || v.KeepaliveSummarySuccesses < 0 || v.KeepaliveSummarySuccesses > 1_000_000 {
 		return errors.New("invalid keepalive summary settings")
 	}
+	if v.ReliabilityAlertMinSamples < 1 || v.ReliabilityAlertMinSamples > 10000 || v.ReliabilityAlertSuccessRate < 1 || v.ReliabilityAlertSuccessRate > 100 || v.ReliabilityAlertConsecutiveFailures < 1 || v.ReliabilityAlertConsecutiveFailures > 10000 || v.ReliabilityAlertP95Millis < 0 || v.ReliabilityAlertP95Millis > 86_400_000 || v.ReliabilityAlertCooldownSeconds < 0 || v.ReliabilityAlertCooldownSeconds > 604800 || v.ReliabilityAlertRecoverySuccesses < 1 || v.ReliabilityAlertRecoverySuccesses > 10000 {
+		return errors.New("invalid reliability alert settings")
+	}
 	if v.TimeoutSeconds < 1 || v.RetryIntervalSeconds < minRetryIntervalSeconds || v.KeepaliveIntervalSeconds < 1 || v.HistoryLimit < 1 {
 		return errors.New("invalid settings")
 	}
 	if v.EventRetentionDays < 1 || v.EventRetentionDays > 3650 || v.EventRetentionRows < 100 || v.EventRetentionRows > 1_000_000 || v.EventRetentionBytes < 1<<20 || v.EventRetentionBytes > 1<<30 {
 		return errors.New("invalid event retention settings")
+	}
+	if !domain.ValidUITheme(v.UITheme) {
+		return errors.New("invalid UI theme")
 	}
 	v.DingTalkConfigured = m.notifier != nil && m.notifier.Configured()
 	if err := m.store.SaveSettings(v); err != nil {
@@ -684,26 +832,129 @@ func (m *Manager) persistEvents() {
 			close(item.barrier)
 			continue
 		}
-		if err := m.store.SaveEvent(item.event, item.retention); err != nil {
-			m.persistenceErr.Store(err.Error())
+		if item.operationalEvent != nil {
+			if err := m.store.SaveEvent(*item.operationalEvent, item.retention); err != nil {
+				m.persistenceErr.Store(err.Error())
+			} else if item.operationalEvent.Type == "request_end" {
+				m.queueReliabilityEvaluation(*item.operationalEvent)
+			}
+		}
+		if item.jobEvent != nil {
+			if cache, ok := m.store.(store.JobEventStore); ok {
+				if err := cache.SaveJobEvent(item.jobID, *item.jobEvent, store.JobEventRetention{TTL: probeLogTTL, MaxRows: probeLogMaxRows, MaxBytes: probeLogMaxBytes}); err != nil {
+					m.persistenceErr.Store(err.Error())
+				}
+			}
 		}
 	}
 }
 
-func (m *Manager) FlushEvents() error {
-	barrier := make(chan struct{})
-	m.mu.RLock()
-	if m.closing {
-		m.mu.RUnlock()
-		return ErrShuttingDown
+func redactJobEvent(event domain.Event, rt *runtime) domain.Event {
+	secrets := []string{rt.opts.Prompt, rt.cfg.APIKey, string(rt.cfg.AuthJSON), rt.cfg.BaseURL, rt.cfg.ProxyURL, rt.cfg.CodexConfig}
+	for _, value := range rt.cfg.ClaudeEnv {
+		secrets = append(secrets, value)
 	}
-	m.eventQueue <- eventWrite{barrier: barrier}
-	m.mu.RUnlock()
-	<-barrier
+	event.Message = security.Redact(event.Message, secrets...)
+	if event.Data == nil {
+		return event
+	}
+	data, err := json.Marshal(event.Data)
+	if err != nil {
+		event.Data = nil
+		return event
+	}
+	var cloned map[string]any
+	if err := json.Unmarshal(data, &cloned); err != nil {
+		event.Data = nil
+		return event
+	}
+	event.Data = redactEventData(cloned, secrets)
+	return event
+}
+
+func safeOutputExcerpt(output string, rt *runtime) string {
+	secrets := []string{rt.opts.Prompt, rt.cfg.APIKey, string(rt.cfg.AuthJSON), rt.cfg.BaseURL, rt.cfg.ProxyURL, rt.cfg.CodexConfig}
+	for _, value := range rt.cfg.ClaudeEnv {
+		secrets = append(secrets, value)
+	}
+	value := security.Redact(output, secrets...)
+	if rt.opts.CLI == domain.CLICodex {
+		value = codexResponse(value)
+	}
+	value = strings.TrimSpace(value)
+	const limit = 2000
+	if len(value) > limit {
+		return value[:limit] + "\n…[TRUNCATED]"
+	}
+	return value
+}
+
+func codexResponse(output string) string {
+	const assistantMarker = "\ncodex\n"
+	if index := strings.LastIndex(output, assistantMarker); index >= 0 {
+		value := output[index+len(assistantMarker):]
+		if end := strings.Index(value, "\ntokens used\n"); end >= 0 {
+			value = value[:end]
+		}
+		return strings.TrimSpace(value)
+	}
+	parts := strings.Split(output, "\n--------\n")
+	if len(parts) >= 3 {
+		lines := strings.Split(parts[len(parts)-1], "\n")
+		for len(lines) > 0 {
+			line := strings.TrimSpace(lines[0])
+			if line != "" && line != "user" && line != "[REDACTED]" {
+				break
+			}
+			lines = lines[1:]
+		}
+		return strings.TrimSpace(strings.Join(lines, "\n"))
+	}
+	return strings.TrimSpace(output)
+}
+
+func redactEventData(values map[string]any, secrets []string) map[string]any {
+	for key, value := range values {
+		switch typed := value.(type) {
+		case string:
+			if key == "target" {
+				values[key] = sanitizeTarget(typed)
+			} else {
+				values[key] = security.Redact(typed, secrets...)
+			}
+		case map[string]any:
+			values[key] = redactEventData(typed, secrets)
+		case []any:
+			for index, item := range typed {
+				if text, ok := item.(string); ok {
+					typed[index] = security.Redact(text, secrets...)
+				} else if nested, ok := item.(map[string]any); ok {
+					typed[index] = redactEventData(nested, secrets)
+				}
+			}
+		}
+	}
+	return values
+}
+
+func (m *Manager) FlushEvents() error {
+	m.flushEventWrites()
 	if message := m.PersistenceError(); message != "" {
 		return errors.New(message)
 	}
 	return nil
+}
+
+func (m *Manager) flushEventWrites() {
+	barrier := make(chan struct{})
+	m.mu.RLock()
+	if m.closing {
+		m.mu.RUnlock()
+		return
+	}
+	m.eventQueue <- eventWrite{barrier: barrier}
+	m.mu.RUnlock()
+	<-barrier
 }
 
 func (m *Manager) PersistenceError() string {
@@ -743,6 +994,24 @@ func normalizedSettings(v domain.Settings) domain.Settings {
 	if v.RecoveryMergeSeconds < 0 {
 		v.RecoveryMergeSeconds = defaults.RecoveryMergeSeconds
 	}
+	if v.ReliabilityAlertMinSamples < 1 {
+		v.ReliabilityAlertMinSamples = defaults.ReliabilityAlertMinSamples
+	}
+	if v.ReliabilityAlertSuccessRate < 1 {
+		v.ReliabilityAlertSuccessRate = defaults.ReliabilityAlertSuccessRate
+	}
+	if v.ReliabilityAlertConsecutiveFailures < 1 {
+		v.ReliabilityAlertConsecutiveFailures = defaults.ReliabilityAlertConsecutiveFailures
+	}
+	if v.ReliabilityAlertP95Millis < 0 {
+		v.ReliabilityAlertP95Millis = defaults.ReliabilityAlertP95Millis
+	}
+	if v.ReliabilityAlertCooldownSeconds < 0 {
+		v.ReliabilityAlertCooldownSeconds = defaults.ReliabilityAlertCooldownSeconds
+	}
+	if v.ReliabilityAlertRecoverySuccesses < 1 {
+		v.ReliabilityAlertRecoverySuccesses = defaults.ReliabilityAlertRecoverySuccesses
+	}
 	if v.HistoryLimit < 1 {
 		v.HistoryLimit = defaults.HistoryLimit
 	}
@@ -754,6 +1023,9 @@ func normalizedSettings(v domain.Settings) domain.Settings {
 	}
 	if v.EventRetentionBytes < 1<<20 {
 		v.EventRetentionBytes = defaults.EventRetentionBytes
+	}
+	if !domain.ValidUITheme(v.UITheme) {
+		v.UITheme = defaults.UITheme
 	}
 	return v
 }
@@ -783,4 +1055,20 @@ func sanitizeTarget(raw string) string {
 	u.Fragment = ""
 	u.RawFragment = ""
 	return u.String()
+}
+
+func endpointParts(raw string) (string, string) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Hostname() == "" {
+		return "", ""
+	}
+	port := parsed.Port()
+	if port == "" {
+		if parsed.Scheme == "https" {
+			port = "443"
+		} else if parsed.Scheme == "http" {
+			port = "80"
+		}
+	}
+	return parsed.Hostname(), port
 }

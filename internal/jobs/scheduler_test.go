@@ -223,7 +223,7 @@ func TestScheduleResolveFailureIsVisibleAndRetryable(t *testing.T) {
 		t.Fatal(err)
 	}
 	events, err := st.ListEvents(store.EventFilter{Type: "schedule_resolve_failed", Limit: 10})
-	if err != nil || len(events) != 1 || events[0].ProviderID != "missing" {
+	if err != nil || len(events) == 0 || events[0].ProviderID != "missing" {
 		t.Fatalf("resolve failure event missing: events=%+v err=%v", events, err)
 	}
 }

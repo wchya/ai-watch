@@ -172,7 +172,7 @@ func TestLegacyJSONMigrationRunsOnce(t *testing.T) {
 	if err = reopened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 7 {
+	if versions != 10 {
 		t.Fatalf("got %d migration records", versions)
 	}
 }
@@ -484,7 +484,7 @@ func TestEventsListFilterCountAndClear(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	base := time.Date(2026, 7, 13, 0, 0, 0, 0, time.UTC)
 	values := []Event{
-		{At: base, Type: "job.started", Level: "info", ProviderID: "p1", JobID: "j1", Message: "started", Data: map[string]any{"attempt": float64(1)}},
+		{At: base, Type: "job.started", Level: "info", ProviderID: "p1", JobID: "j1", Message: "started", Data: map[string]any{"attempt": float64(1), "scheduleId": "schedule-1"}},
 		{At: base.Add(time.Minute), Type: "attempt.failed", Level: "warning", ProviderID: "p1", JobID: "j1", Message: "timeout"},
 		{At: base.Add(2 * time.Minute), Type: "job.started", Level: "info", ProviderID: "p2", JobID: "j2", Message: "started"},
 	}
@@ -506,6 +506,10 @@ func TestEventsListFilterCountAndClear(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ProviderID != "p2" {
 		t.Fatalf("unexpected filtered events: %+v", got)
+	}
+	got, err = store.ListEvents(EventFilter{ScheduleID: "schedule-1", Limit: 10})
+	if err != nil || len(got) != 1 || got[0].JobID != "j1" {
+		t.Fatalf("unexpected schedule events: %+v err=%v", got, err)
 	}
 	count, err := store.CountEvents(EventFilter{Level: "info"})
 	if err != nil {
@@ -571,6 +575,26 @@ func TestEventRetentionByAgeRowsAndBytes(t *testing.T) {
 			t.Fatalf("byte retention failed: %+v", result)
 		}
 	})
+}
+
+func TestJSONDeletesLegacyEventsByType(t *testing.T) {
+	store := New(t.TempDir())
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	if err := store.SaveEvent(Event{At: now, Type: "request_log", Message: "prompt"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveEvent(Event{At: now, Type: "request_end", Message: "safe"}); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := store.DeleteEventsByType("request_log")
+	if err != nil || deleted != 1 {
+		t.Fatalf("deleted=%d err=%v", deleted, err)
+	}
+	values, err := store.ListEvents(EventFilter{Limit: 10})
+	if err != nil || len(values) != 1 || values[0].Type != "request_end" {
+		t.Fatalf("values=%+v err=%v", values, err)
+	}
 }
 
 func TestEventsRejectSecretsAndForbiddenRawFields(t *testing.T) {

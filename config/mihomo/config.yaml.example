@@ -1,0 +1,27 @@
+# Safe startup configuration: AI Watch can reach Mihomo, while outbound traffic
+# remains direct until an operator supplies a private subscription/node config.
+mixed-port: 7890
+socks-port: 7891
+allow-lan: true
+bind-address: "*"
+mode: rule
+log-level: info
+ipv6: false
+
+# The controller is reachable only on the private Compose network because the
+# service publishes no host ports. Keep it private if you add a secret/API UI.
+external-controller: 0.0.0.0:9090
+secret: ""
+
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - DIRECT
+
+rules:
+  - MATCH,PROXY
+
+# Subscription URLs commonly embed long-lived credentials. Store real configs
+# outside this repository and point MIHOMO_CONFIG_FILE at that absolute path.
+# Never commit subscription URLs, controller secrets, or proxy passwords.

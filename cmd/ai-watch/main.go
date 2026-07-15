@@ -13,8 +13,8 @@ import (
 	"ai-watch/internal/api"
 	"ai-watch/internal/configscan"
 	"ai-watch/internal/jobs"
-	"ai-watch/internal/notify"
 	"ai-watch/internal/runner"
+	"ai-watch/internal/secureconfig"
 	"ai-watch/internal/store"
 )
 
@@ -27,18 +27,32 @@ func main() {
 	if err := executor.CleanupRuntimeJobs(); err != nil {
 		log.Fatalf("clean stale runtime jobs: %v", err)
 	}
-	st := store.New(dataDir)
+	redisURL := os.Getenv("AI_WATCH_REDIS_URL")
+	if redisURL == "" {
+		log.Fatal("AI_WATCH_REDIS_URL is required")
+	}
+	st := store.NewRedis(dataDir, redisURL)
 	if err := st.Err(); err != nil {
-		log.Fatalf("initialize SQLite store: %v", err)
+		log.Fatalf("initialize Redis store: %v", err)
 	}
 	defer st.Close()
-	manager := jobs.New(scanner, executor, st, notify.New(os.Getenv("DINGTALK_WEBHOOK_URL")))
+	syncCCSwitchProviders(scanner, st)
+	secureService := secureconfig.New(st, scanner, os.Getenv("DINGTALK_WEBHOOK_URL"))
+	if err := secureService.ImportEnvironmentDingTalk(); err != nil {
+		log.Fatalf("import DingTalk environment configuration: %v", err)
+	}
+	manager := jobs.New(secureService, executor, st, secureService)
+	if deleted, err := st.DeleteEventsByType("request_log"); err != nil {
+		log.Fatalf("remove legacy request log events: %v", err)
+	} else if deleted > 0 {
+		log.Printf("removed %d legacy request_log events from the operational ledger", deleted)
+	}
 	settings := manager.Settings()
 	if _, err := st.RetainEvents(store.EventRetention{MaxAge: time.Duration(settings.EventRetentionDays) * 24 * time.Hour, MaxRows: settings.EventRetentionRows, MaxBytes: settings.EventRetentionBytes}); err != nil {
 		log.Fatalf("apply startup event retention: %v", err)
 	}
 	defer manager.Shutdown()
-	srv := &http.Server{Addr: addr, Handler: api.New(scanner, manager, webDir, st).Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 70 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: api.New(scanner, manager, webDir, st).WithSecureConfig(secureService).Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 70 * time.Second}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -53,6 +67,57 @@ func main() {
 		log.Fatal(err)
 	}
 }
+
+func syncCCSwitchProviders(scanner *configscan.Scanner, st *store.Redis) {
+	now := time.Now().UTC()
+	status, err := st.LoadCCSwitchSyncStatus()
+	if err != nil {
+		log.Printf("load CC Switch sync status: %v", err)
+		status = store.CCSwitchSyncStatus{}
+	}
+	status.LastAttemptAt = now
+	if cached, cacheErr := st.ListCCSwitchProviders(); cacheErr == nil {
+		status.Count = len(cached)
+	}
+	if _, statErr := os.Stat(scanner.CCSwitchDB); statErr != nil {
+		status.SourceAvailable = false
+		status.Warning = "CC Switch startup source is unavailable"
+		if !errors.Is(statErr, os.ErrNotExist) {
+			log.Printf("inspect CC Switch startup source: %v", statErr)
+		}
+		if saveErr := st.SaveCCSwitchSyncStatus(status); saveErr != nil {
+			log.Printf("save CC Switch sync status: %v", saveErr)
+		}
+		return
+	}
+	status.SourceAvailable = true
+	providers, loadErr := scanner.LoadCCSwitchProviders()
+	if loadErr != nil {
+		status.Warning = "CC Switch startup sync failed"
+		log.Printf("CC Switch startup sync failed; using Redis snapshot: %v", loadErr)
+		if saveErr := st.SaveCCSwitchSyncStatus(status); saveErr != nil {
+			log.Printf("save CC Switch sync status: %v", saveErr)
+		}
+		return
+	}
+	if replaceErr := st.ReplaceCCSwitchProviders(providers); replaceErr != nil {
+		status.Warning = "CC Switch Redis snapshot replacement failed"
+		log.Printf("replace CC Switch Redis snapshot; using previous snapshot: %v", replaceErr)
+		if saveErr := st.SaveCCSwitchSyncStatus(status); saveErr != nil {
+			log.Printf("save CC Switch sync status: %v", saveErr)
+		}
+		return
+	}
+	success := time.Now().UTC()
+	status.LastSuccessAt = &success
+	status.Count = len(providers)
+	status.Warning = ""
+	if saveErr := st.SaveCCSwitchSyncStatus(status); saveErr != nil {
+		log.Printf("save CC Switch sync status: %v", saveErr)
+	}
+	log.Printf("CC Switch startup sync loaded %d providers into Redis", len(providers))
+}
+
 func getenv(k, fallback string) string {
 	if v := os.Getenv(k); v != "" {
 		return v

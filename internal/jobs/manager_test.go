@@ -12,6 +12,31 @@ import (
 	"time"
 )
 
+type cachedJobEventStore struct {
+	store.Store
+	mu     sync.Mutex
+	events map[string][]domain.Event
+}
+
+func (s *cachedJobEventStore) SaveJobEvent(jobID string, event domain.Event, _ store.JobEventRetention) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events[jobID] = append(s.events[jobID], event)
+	return nil
+}
+
+func (s *cachedJobEventStore) ListJobEvents(jobID string, after uint64) ([]domain.Event, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var values []domain.Event
+	for _, event := range s.events[jobID] {
+		if event.ID > after {
+			values = append(values, event)
+		}
+	}
+	return values, nil
+}
+
 type fakeResolver struct{ cfg domain.ResolvedConfig }
 
 func (f fakeResolver) Resolve(domain.CLI, string) (domain.ResolvedConfig, error) { return f.cfg, nil }
@@ -95,6 +120,105 @@ func TestProbeClearsOutputAndPersistsSummary(t *testing.T) {
 		if ev.Type == "output" || strings.Contains(ev.Message, secret) {
 			t.Fatal("completed job retained output")
 		}
+	}
+}
+
+func TestProbeCachesRedactedOutputForHistoricalReplay(t *testing.T) {
+	secret := "sk-cached-secret-value"
+	base := store.New(t.TempDir())
+	defer base.Close()
+	st := &cachedJobEventStore{Store: base, events: map[string][]domain.Event{}}
+	executor := execFunc(func(_ context.Context, _ string, _ domain.JobOptions, _ domain.ResolvedConfig, out func(string)) (runner.Result, error) {
+		out("Authorization: Bearer " + secret + " READY")
+		return runner.Result{Output: "READY", ExitCode: 0}, nil
+	})
+	m := New(fakeResolver{domain.ResolvedConfig{BaseURL: "https://example.test/v1", APIKey: secret}}, executor, st)
+	defer m.Shutdown()
+	job, err := m.Start(domain.JobOptions{Mode: domain.ModeProbe, RunOnce: true, CLI: domain.CLICodex})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitDone(t, m, job.ID)
+	replay, ch, cleanup, err := m.Subscribe(job.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+	for range ch {
+	}
+	var foundOutput bool
+	for _, event := range replay {
+		if strings.Contains(event.Message, secret) {
+			t.Fatalf("cached secret leaked: %+v", event)
+		}
+		if event.Type == "request_log" && strings.Contains(event.Message, "READY") {
+			foundOutput = true
+		}
+	}
+	if !foundOutput {
+		t.Fatalf("cached output missing: %+v", replay)
+	}
+}
+
+func TestKeepaliveDoesNotCacheDetailedOutput(t *testing.T) {
+	base := store.New(t.TempDir())
+	defer base.Close()
+	st := &cachedJobEventStore{Store: base, events: map[string][]domain.Event{}}
+	executor := execFunc(func(_ context.Context, _ string, _ domain.JobOptions, _ domain.ResolvedConfig, out func(string)) (runner.Result, error) {
+		out("READY")
+		return runner.Result{Output: "READY", ExitCode: 0}, nil
+	})
+	m := New(fakeResolver{}, executor, st)
+	defer m.Shutdown()
+	job, err := m.Start(domain.JobOptions{Mode: domain.ModeKeepalive, RunOnce: true, CLI: domain.CLICodex})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = waitDone(t, m, job.ID)
+	m.flushEventWrites()
+	if values, _ := st.ListJobEvents(job.ID, 0); len(values) != 0 {
+		t.Fatalf("keepalive output was cached: %+v", values)
+	}
+}
+
+func TestRequestEventsHaveUniquePairedIDsAndStructuredResult(t *testing.T) {
+	base := store.New(t.TempDir())
+	defer base.Close()
+	st := &cachedJobEventStore{Store: base, events: map[string][]domain.Event{}}
+	executor := execFunc(func(_ context.Context, _ string, _ domain.JobOptions, _ domain.ResolvedConfig, out func(string)) (runner.Result, error) {
+		out("READY")
+		return runner.Result{Output: "READY", ExitCode: 0}, nil
+	})
+	m := New(fakeResolver{domain.ResolvedConfig{BaseURL: "https://example.test/v1", ProxyMode: domain.ProxyDirect}}, executor, st)
+	job, err := m.Start(domain.JobOptions{Mode: domain.ModeProbe, RunOnce: true, CLI: domain.CLICodex})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitDone(t, m, job.ID)
+	if err := m.FlushEvents(); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := st.ListJobEvents(job.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var startID, endID string
+	for _, event := range replay {
+		if event.Type == "request_start" {
+			startID, _ = event.Data["requestId"].(string)
+			if event.Data["target"] != "https://example.test/v1" || event.Data["proxyMode"] != string(domain.ProxyDirect) {
+				t.Fatalf("request start metadata missing: %+v", event.Data)
+			}
+		}
+		if event.Type == "request_end" {
+			endID, _ = event.Data["requestId"].(string)
+			if event.Data["status"] != "success" || event.Data["classification"] != string(domain.AttemptSuccess) {
+				t.Fatalf("request end metadata missing: %+v", event.Data)
+			}
+		}
+	}
+	if startID == "" || startID != endID {
+		t.Fatalf("request events are not paired: start=%q end=%q events=%+v", startID, endID, replay)
 	}
 }
 
@@ -613,5 +737,12 @@ func TestSanitizeTargetPreservesSafePath(t *testing.T) {
 	got := sanitizeTarget("https://user:pass@example.com:8443/gateway/v1/models?api_key=secret#debug")
 	if want := "https://example.com:8443/gateway/v1/models"; got != want {
 		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestCodexResponseExtractsAssistantText(t *testing.T) {
+	output := "OpenAI Codex v0.144.4\n--------\nworkdir: /app\nmodel: gpt-5.6-sol\n--------\nuser\n[REDACTED]\n\ncodex\nREADY\ntokens used\n8,187\n"
+	if got := codexResponse(output); got != "READY" {
+		t.Fatalf("got %q", got)
 	}
 }
