@@ -370,6 +370,33 @@ test('计划未知状态不会导致页面黑屏', async ({ page }) => {
   assertClean(mock)
 })
 
+test('计划任务终端支持最近任务回放、无任务禁用和读取失败恢复', async ({ page }) => {
+  const mock = await installApiMock(page)
+  await page.goto('/schedules')
+
+  const replayButton = page.getByRole('button', { name: '查看实时终端：未知状态计划' })
+  await expect(replayButton).toBeEnabled()
+  await expect(replayButton).toHaveAttribute('title', '回放最近一轮终端输出')
+  await replayButton.click()
+  await expect(page.getByRole('dialog', { name: '测活终端输出' })).toBeVisible()
+  await expect(page.locator('.terminal-output')).toContainText('[PROMPT REDACTED]')
+  await expect(page.locator('.terminal-output')).toContainText('供应商返回：READY')
+  await page.getByRole('button', { name: '关闭终端并返回任务列表' }).click()
+
+  const emptyButton = page.getByRole('button', { name: '查看实时终端：Claude 建议组巡检' })
+  await expect(emptyButton).toBeDisabled()
+  await expect(emptyButton).toHaveAttribute('title', '尚无可回放的终端输出')
+
+  mock.failNextJobRead()
+  await replayButton.click()
+  await expect(page.getByText('最近任务已不可用，可等待下一次运行')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '计划任务' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '查看运行日志：未知状态计划' })).toBeEnabled()
+  expect(mock.consoleErrors).toContain('Failed to load resource: the server responded with a status of 404 (Not Found)')
+  mock.consoleErrors.splice(0)
+  assertClean(mock)
+})
+
 test('测活终端显示脱敏命令、实时输出和返回摘要', async ({ page }, testInfo) => {
   const mock = await installApiMock(page)
   await page.goto('/')
@@ -404,16 +431,35 @@ test('极昼主题覆盖钉钉配置、计划操作栏和页面底部', async ({
   assertClean(mock)
 })
 
+test('极昼主题下本地供应商测活按钮保持清晰层级和交互反馈', async ({ page }) => {
+  const mock = await installApiMock(page)
+  await page.goto('/providers')
+  await page.getByRole('button', { name: /界面主题/ }).click()
+  await page.getByRole('menuitemradio', { name: /极昼控制台/ }).click()
+
+  const probe = page.getByRole('button', { name: '测活：Ray 主线路' })
+  await expect(probe).toBeVisible()
+  await expect(probe).toHaveCSS('color', 'rgb(8, 127, 131)')
+  await expect(probe).toHaveCSS('min-height', '44px')
+  await expect.poll(() => probe.evaluate(element => getComputedStyle(element).backgroundImage)).toContain('linear-gradient')
+  await probe.hover()
+  await expect(probe).toHaveCSS('color', 'rgb(255, 255, 255)')
+  await expect(probe).toHaveCSS('background-color', 'rgb(8, 127, 131)')
+  assertClean(mock)
+})
+
 test('可靠性告警设置可以热更新保存', async ({ page }) => {
   const mock = await installApiMock(page)
   await page.goto('/')
   await openView(page, '设置与通知')
   await expect(page.getByText('Provider 可靠性告警')).toBeVisible()
   await page.getByRole('checkbox', { name: /启用可靠性告警/ }).check()
+  await page.getByLabel('连续失败告警间隔').fill('4')
   await page.getByLabel('成功率下限').fill('85')
   await page.getByRole('button', { name: '保存设置' }).click()
   await expect.poll(() => mock.settingsWrites.at(-1)?.reliabilityAlertEnabled).toBe(true)
   expect(mock.settingsWrites.at(-1)?.reliabilityAlertSuccessRate).toBe(85)
+  expect(mock.settingsWrites.at(-1)?.reliabilityAlertConsecutiveFailures).toBe(4)
   assertClean(mock)
 })
 

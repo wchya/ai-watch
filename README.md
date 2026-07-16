@@ -126,6 +126,7 @@ Common options:
 | `CLAUDE_CONFIG_DIR` | `${HOME}/.claude` | Host Claude configuration directory |
 | `CC_SWITCH_CONFIG_DIR` | `${HOME}/.cc-switch` | Host CC Switch directory used during startup sync |
 | `AI_WATCH_CC_SWITCH_SYNC_TIMEOUT_SECONDS` | `10` | Timeout for copying and querying the CC Switch database |
+| `AI_WATCH_RUNTIME_TMPFS_SIZE` | `256m` | In-memory runtime workspace for concurrent jobs and temporary CC Switch snapshots |
 | `MIHOMO_CONFIG_FILE` | `./config/mihomo/config.yaml.example` | Read-only Mihomo configuration file |
 | `AI_WATCH_DEFAULT_PROXY_URL` | `http://mihomo:7890` | Default provider proxy inside Compose |
 | `DINGTALK_WEBHOOK_URL` | empty | Optional DingTalk webhook imported into application configuration |
@@ -293,6 +294,15 @@ docker compose restart ai-watch
 ```
 
 If the new synchronization fails, AI Watch continues using the last successful Redis snapshot. Check the Diagnostics page and application logs for details.
+
+### Runtime reports `no space left on device`
+
+`/run/ai-watch` is an in-memory filesystem used for temporary job credentials, CLI configuration, and CC Switch snapshots. Increase `AI_WATCH_RUNTIME_TMPFS_SIZE` in `.env`, then recreate the application container:
+
+```bash
+AI_WATCH_RUNTIME_TMPFS_SIZE=512m
+docker compose up -d --force-recreate ai-watch
+```
 
 ### Health checks fail
 

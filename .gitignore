@@ -13,3 +13,10 @@
 /frontend/vite.config.d.ts
 *.log
 *.tmp
+**/__pycache__/
+**/*.pyc
+.trellis
+.trellis/
+.cluade/
+.cursor/
+.codex/

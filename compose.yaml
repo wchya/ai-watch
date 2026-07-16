@@ -158,7 +158,7 @@ services:
         # Startup-only CC Switch source; runtime Provider reads use Redis snapshots.
         read_only: true
     tmpfs:
-      - /run/ai-watch:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0,size=64m
+      - /run/ai-watch:rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0,size=${AI_WATCH_RUNTIME_TMPFS_SIZE:-256m}
     security_opt:
       - no-new-privileges:true
       - seccomp:unconfined

@@ -57,6 +57,7 @@ export type ApiMock = {
   unmatched: string[]
   consoleErrors: string[]
   failNextActionCenter: () => void
+  failNextJobRead: () => void
 }
 
 export async function installApiMock(page: Page): Promise<ApiMock> {
@@ -70,6 +71,7 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
   const unmatched: string[] = []
   const consoleErrors: string[] = []
   let failActionCenter = 0
+  let failJobReads = 0
   let schedules = [{ id: 'schedule-1', name: '未知状态计划', enabled: true, cli: 'codex', providerId: '', providerName: '当前 Codex 配置', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 62, startMinute: 540, endMinute: 1080, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'future_status', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:00:00Z' }, { id: 'schedule-running', name: '运行中计划', enabled: true, cli: 'codex', providerId: '', providerName: '当前 Codex 配置', mode: 'keepalive', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: false, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'running', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:00:00Z' }, { id: 'schedule-claude-risk', name: 'Claude 异常巡检', enabled: true, cli: 'claude', providerId: 'cc-switch:claude-main', providerGroupId: 'claude-main', providerName: 'Claude 主线路', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'failed', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:30:00Z' }, { id: 'schedule-advisory', name: 'Claude 建议组巡检', enabled: true, cli: 'claude', providerId: 'cc-switch:claude-main', providerGroupId: 'claude-advisory', providerName: 'Claude 建议切换组', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'idle', nextRunAt: '2026-07-16T01:45:00Z' }]
   let providerGroups: Array<Record<string, any>> = [{ id: 'claude-main', name: 'Claude 主备组', cli: 'claude', enabled: true, primaryProviderId: 'cc-switch:claude-main', backupProviderIds: ['cc-switch:claude-backup'], scenarioId: 'basic-ready', failureThreshold: 3, cooldownSeconds: 600, mode: 'automatic', activeProviderId: 'cc-switch:claude-backup', recoveryThreshold: 2, recoveryProbeIntervalSeconds: 300, lastRecoveryProbeAt: '2026-07-15T11:55:00Z', lastRecoveryProbeStatus: 'success', maintenanceUntil: '2026-07-16T12:00:00Z' }, { id: 'claude-advisory', name: 'Claude 建议切换组', cli: 'claude', enabled: true, primaryProviderId: 'cc-switch:claude-main', backupProviderIds: ['cc-switch:claude-backup'], scenarioId: 'basic-ready', failureThreshold: 3, cooldownSeconds: 600, mode: 'advisory', activeProviderId: 'cc-switch:claude-main', recoveryThreshold: 2, recoveryProbeIntervalSeconds: 300, advice: { status: 'open', suggestedProviderId: 'cc-switch:claude-backup', validationJobId: 'validation-job', validationRequestId: 'validation-request', reason: '备用线路已通过基础可用性场景', createdAt: '2026-07-16T01:00:00Z', updatedAt: '2026-07-16T01:01:00Z' } }]
   let incidents: Array<Record<string, any>> = [{ id: 'incident-1', subjectType: 'group', subjectId: 'claude-main', subjectName: 'Claude 主备组', providerId: 'cc-switch:claude-main', groupId: 'claude-main', title: 'Claude 主备组 请求连续失败', status: 'open', severity: 'critical', failureCount: 3, errorCounts: { timeout: 2, overloaded: 1 }, jobIds: ['job-1'], requestIds: ['req-schedule-1'], timeline: [{ id: 'entry-1', at: '2026-07-15T03:51:28Z', type: 'failure', message: '供应商请求超时', requestId: 'req-schedule-1', jobId: 'job-1' }], startedAt: '2026-07-15T03:50:00Z', updatedAt: '2026-07-15T03:51:28Z' }]
@@ -80,7 +82,7 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
   let rerunComparison: Record<string, any> | null = null
 
   page.on('console', message => {
-    if (message.type() === 'error') consoleErrors.push(message.text())
+    if (message.type() === 'error' && message.text() !== 'Failed to load resource: net::ERR_CONNECTION_CLOSED') consoleErrors.push(message.text())
   })
   page.on('pageerror', error => consoleErrors.push(error.message))
 
@@ -94,7 +96,13 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
     if (method === 'GET' && path === '/config/status') return json(route, { codexCli: true, claudeCli: true, sqliteCli: true, codexConfig: true, claudeConfig: true, ccSwitchDb: true })
     if (method === 'GET' && path === '/providers') return json(route, providers)
     if (method === 'GET' && path === '/jobs') return json(route, [completedJob])
-    if (method === 'GET' && path === '/jobs/job-1') return json(route, completedJob)
+    if (method === 'GET' && path === '/jobs/job-1') {
+      if (failJobReads > 0) {
+        failJobReads--
+        return json(route, { error: { code: 'job_not_found', message: '最近任务已不可用，可等待下一次运行' } }, 404)
+      }
+      return json(route, completedJob)
+    }
     if (method === 'GET' && path === '/provider-groups') return json(route, providerGroups)
     if (method === 'GET' && path === '/maintenance-windows') return json(route, providerGroups.map(group => { const starts = group.maintenanceStartsAt ? new Date(group.maintenanceStartsAt).getTime() : undefined; const until = group.maintenanceUntil ? new Date(group.maintenanceUntil).getTime() : undefined; const now = Date.now(); const status = !until ? 'none' : until <= now ? 'ended' : starts && starts > now ? 'scheduled' : 'active'; return { groupId: group.id, groupName: group.name, cli: group.cli, mode: group.mode || 'advisory', activeProviderId: group.activeProviderId || group.primaryProviderId, maintenanceStartsAt: group.maintenanceStartsAt, maintenanceUntil: group.maintenanceUntil, status, notificationsMuted: status === 'active', failoverSuppressed: status === 'active' } }))
     if (method === 'POST' && path.startsWith('/maintenance-windows/')) {
@@ -266,5 +274,6 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
     // than once. Keep the simulated partial outage active for the whole test
     // instead of making the assertion depend on an exact request count.
     failNextActionCenter: () => { failActionCenter = 10 },
+    failNextJobRead: () => { failJobReads = 1 },
   }
 }

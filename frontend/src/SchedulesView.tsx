@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, AlertCircle, Bot, CalendarClock, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Clock3, Command, Edit3, FileText,
   Gauge, LoaderCircle, PauseCircle, Play, Plus, RefreshCw, ShieldCheck, Square, ExternalLink,
-  TimerReset, Trash2, X,
+  Terminal, TimerReset, Trash2, X,
 } from 'lucide-react'
 import { api } from './api'
 import { useDelayedRefresh } from './useDelayedRefresh'
@@ -105,7 +105,7 @@ function ScheduleStatus({ status = 'idle' }: { status?: ScheduleLastStatus }) {
   return <span className={`status-pill ${meta.tone}`}><i/>{meta.label}</span>
 }
 
-export function SchedulesView({ providers, defaultOptions, openRequest }: { providers: Provider[]; defaultOptions: JobOptions; openRequest: (requestId: string) => void }) {
+export function SchedulesView({ providers, defaultOptions, openRequest, openJob }: { providers: Provider[]; defaultOptions: JobOptions; openRequest: (requestId: string) => void; openJob: (job: JobSummary) => void }) {
   const [schedules, setSchedules] = useState<Schedule[]>([])
   const [total, setTotal] = useState(0)
   const [limit, setLimit] = useState(200)
@@ -120,6 +120,7 @@ export function SchedulesView({ providers, defaultOptions, openRequest }: { prov
   const [changingId, setChangingId] = useState('')
   const [bulkAction, setBulkAction] = useState<BulkJobAction | null>(null)
   const [logTarget, setLogTarget] = useState<Schedule | null>(null)
+  const [terminalLoadingId, setTerminalLoadingId] = useState('')
   const [scenarios, setScenarios] = useState<TestScenario[]>([])
   const [providerGroups, setProviderGroups] = useState<ProviderFailoverGroup[]>([])
   const requestSequence = useRef(0)
@@ -255,6 +256,19 @@ export function SchedulesView({ providers, defaultOptions, openRequest }: { prov
       setBulkAction(null)
     }
   }
+  const openTerminal = async (schedule: Schedule) => {
+    if (!schedule.lastJobId || terminalLoadingId) return
+    setTerminalLoadingId(schedule.id)
+    setError('')
+    setMessage('')
+    try {
+      openJob(await api.getJob(schedule.lastJobId))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '最近任务已不可用，可等待下一次运行')
+    } finally {
+      setTerminalLoadingId('')
+    }
+  }
 
   return <div className={`page schedules-page ${selected.size ? 'has-bulk-bar' : ''}`}>
     <section className="page-heading schedules-heading"><div><span className="eyebrow"><CalendarClock/>自动巡检</span><h1>计划任务</h1><p>按时区与时间窗口自动发起测活或保活。规则只引用本地 Provider，不保存 Base URL、API Key、Prompt 或通知凭证。</p></div><button className="primary hero-action" onClick={() => setEditor('new')}><Plus/>新建计划</button></section>
@@ -277,13 +291,13 @@ export function SchedulesView({ providers, defaultOptions, openRequest }: { prov
 
     <section className="panel schedule-list-panel">
       <header className="schedule-list-head"><label className="schedule-check"><input type="checkbox" checked={filtered.length > 0 && filtered.slice(0, 50).every(schedule => selected.has(schedule.id))} onChange={toggleAllVisible}/><i><Check/></i><span>选择当前结果</span></label><span>{filtered.length} 条规则</span></header>
-      {loading ? <div className="schedule-loading"><LoaderCircle className="spinning"/><span>正在读取计划任务</span></div> : filtered.length ? <div className="schedule-list">{filtered.map(schedule => { const running = scheduleRunning(schedule); const changing = changingId === schedule.id; return <article className={`schedule-row ${!schedule.enabled ? 'paused' : ''} ${running ? 'running' : ''}`} key={schedule.id} aria-busy={changing}>
+      {loading ? <div className="schedule-loading"><LoaderCircle className="spinning"/><span>正在读取计划任务</span></div> : filtered.length ? <div className="schedule-list">{filtered.map(schedule => { const running = scheduleRunning(schedule); const changing = changingId === schedule.id; const terminalLoading = terminalLoadingId === schedule.id; return <article className={`schedule-row ${!schedule.enabled ? 'paused' : ''} ${running ? 'running' : ''}`} data-status={running ? 'running' : schedule.lastStatus || 'idle'} key={schedule.id} aria-busy={changing || terminalLoading}>
         <label className="schedule-check row-check"><input type="checkbox" checked={selected.has(schedule.id)} disabled={running || (!selected.has(schedule.id) && selected.size >= 50)} onChange={() => toggleSelected(schedule.id)}/><i><Check/></i><span className="sr-only">选择 {schedule.name}</span></label>
         <CliMark cli={schedule.cli}/>
         <div className="schedule-identity"><div><strong>{schedule.name}</strong><ScheduleStatus status={running ? 'running' : schedule.lastStatus}/>{running && <em className="schedule-running-badge">运行中 · 已锁定</em>}</div><span>{schedule.providerName || schedule.providerId || '当前配置'} · {modeLabel(schedule.mode)}</span></div>
         <div className="schedule-window"><span><Clock3/>执行窗口</span><strong>{weekdayLabel(schedule.weekdaysMask)}</strong><small>{minuteToTime(schedule.startMinute)}–{minuteToTime(schedule.endMinute)} · {schedule.timezone}</small></div>
         <div className="schedule-next"><span>下一次 / 最近一次</span><strong>{schedule.enabled ? formatDateTime(schedule.nextRunAt) : '已暂停'}</strong><small>{formatDateTime(schedule.lastOccurrenceAt)}</small></div>
-        <div className="schedule-row-actions"><button className="icon-button schedule-log-button" disabled={changing} aria-label={`查看运行日志：${schedule.name}`} title="查看该计划产生的请求日志" onClick={() => setLogTarget(schedule)}><FileText/></button>{running ? <button className="schedule-state stop" disabled={changing} aria-label={`停止运行：${schedule.name}`} onClick={() => void stopRunning(schedule)}>{changing ? <LoaderCircle className="spinning"/> : <Square/>}<span>{changing ? '停止中' : '停止'}</span></button> : <button className={`schedule-state ${schedule.enabled ? 'on' : ''}`} disabled={changing} aria-pressed={schedule.enabled} aria-label={`${schedule.enabled ? '暂停' : '启用'}：${schedule.name}`} onClick={() => void toggleEnabled(schedule)}>{changing ? <LoaderCircle className="spinning"/> : schedule.enabled ? <PauseCircle/> : <Play/>}<span>{changing ? schedule.enabled ? '暂停中' : '启用中' : schedule.enabled ? '暂停' : '启用'}</span></button>}<button className="icon-button schedule-edit-button" disabled={running || changing} aria-label={`编辑：${schedule.name}`} onClick={() => setEditor(schedule)}><Edit3/></button><button className="icon-button danger-icon schedule-delete-button" disabled={running || changing} aria-label={`删除：${schedule.name}`} onClick={() => setDeleteTarget(schedule)}><Trash2/></button></div>
+        <div className="schedule-row-actions"><div className="schedule-observe-actions"><button className="schedule-action-button schedule-terminal-button" disabled={changing || terminalLoading || !schedule.lastJobId} aria-label={`查看实时终端：${schedule.name}`} title={schedule.lastJobId ? running ? '查看当前任务的实时终端输出' : '回放最近一轮终端输出' : '尚无可回放的终端输出'} onClick={() => void openTerminal(schedule)}>{terminalLoading ? <LoaderCircle className="spinning"/> : <Terminal/>}<span>{terminalLoading ? '连接中' : running ? '实时终端' : '终端'}</span></button><button className="schedule-action-button schedule-log-button" disabled={changing} aria-label={`查看运行日志：${schedule.name}`} title="查看该计划产生的请求日志" onClick={() => setLogTarget(schedule)}><FileText/><span>请求日志</span></button></div><div className="schedule-manage-actions">{running ? <button className="schedule-state stop" disabled={changing} aria-label={`停止运行：${schedule.name}`} onClick={() => void stopRunning(schedule)}>{changing ? <LoaderCircle className="spinning"/> : <Square/>}<span>{changing ? '停止中' : '停止'}</span></button> : <button className={`schedule-state ${schedule.enabled ? 'on' : ''}`} disabled={changing} aria-pressed={schedule.enabled} aria-label={`${schedule.enabled ? '暂停' : '启用'}：${schedule.name}`} onClick={() => void toggleEnabled(schedule)}>{changing ? <LoaderCircle className="spinning"/> : schedule.enabled ? <PauseCircle/> : <Play/>}<span>{changing ? schedule.enabled ? '暂停中' : '启用中' : schedule.enabled ? '暂停' : '启用'}</span></button>}<button className="icon-button schedule-edit-button" disabled={running || changing} aria-label={`编辑：${schedule.name}`} onClick={() => setEditor(schedule)}><Edit3/></button><button className="icon-button danger-icon schedule-delete-button" disabled={running || changing} aria-label={`删除：${schedule.name}`} onClick={() => setDeleteTarget(schedule)}><Trash2/></button></div></div>
       </article>})}</div> : <div className="schedule-empty"><div><CalendarClock/></div><strong>{schedules.length ? '没有匹配的计划任务' : '还没有计划任务'}</strong><p>{schedules.length ? '调整客户端或状态筛选，查看其他规则。' : '创建第一条自动巡检规则，定时观察 Provider 可用性。'}</p>{!schedules.length && <button className="primary" onClick={() => setEditor('new')}><Plus/>新建计划</button>}</div>}
     </section>
 

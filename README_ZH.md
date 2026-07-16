@@ -126,6 +126,7 @@ cp .env.example .env
 | `CLAUDE_CONFIG_DIR` | `${HOME}/.claude` | 宿主机 Claude 配置目录 |
 | `CC_SWITCH_CONFIG_DIR` | `${HOME}/.cc-switch` | 启动同步使用的宿主机 CC Switch 目录 |
 | `AI_WATCH_CC_SWITCH_SYNC_TIMEOUT_SECONDS` | `10` | 复制和查询 CC Switch 数据库的超时时间 |
+| `AI_WATCH_RUNTIME_TMPFS_SIZE` | `256m` | 并发任务和 CC Switch 临时快照使用的内存运行目录容量 |
 | `MIHOMO_CONFIG_FILE` | `./config/mihomo/config.yaml.example` | Mihomo 只读配置文件 |
 | `AI_WATCH_DEFAULT_PROXY_URL` | `http://mihomo:7890` | Compose 内默认 Provider 代理 |
 | `DINGTALK_WEBHOOK_URL` | 空 | 可选的钉钉 Webhook，启动时导入应用配置 |
@@ -293,6 +294,15 @@ docker compose restart ai-watch
 ```
 
 如果本次同步失败，AI Watch 会继续使用 Redis 中最后一次成功快照。可通过系统诊断页面和应用日志查看详情。
+
+### 运行时报 `no space left on device`
+
+`/run/ai-watch` 是保存临时任务凭证、CLI 配置和 CC Switch 快照的内存文件系统。在 `.env` 中增大 `AI_WATCH_RUNTIME_TMPFS_SIZE`，然后重新创建应用容器：
+
+```bash
+AI_WATCH_RUNTIME_TMPFS_SIZE=512m
+docker compose up -d --force-recreate ai-watch
+```
 
 ### 健康检查失败
 

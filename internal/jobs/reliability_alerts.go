@@ -12,11 +12,12 @@ import (
 )
 
 type reliabilityAlertState struct {
-	Alerted           bool
-	LastAlert         time.Time
-	RecoverySuccesses int
-	Suppressed        bool
-	Loaded            bool
+	Alerted               bool
+	LastAlert             time.Time
+	LastFailureAlertCount int
+	RecoverySuccesses     int
+	Suppressed            bool
+	Loaded                bool
 }
 
 func (m *Manager) queueReliabilityEvaluation(event store.Event) {
@@ -40,6 +41,9 @@ func (m *Manager) queueReliabilityEvaluation(event store.Event) {
 }
 
 func (m *Manager) evaluateReliabilityAlert(event store.Event) {
+	m.reliabilityAlertMu.Lock()
+	defer m.reliabilityAlertMu.Unlock()
+
 	m.mu.RLock()
 	settings := m.settings
 	m.mu.RUnlock()
@@ -68,27 +72,38 @@ func (m *Manager) evaluateReliabilityAlert(event store.Event) {
 	if provider == nil {
 		return
 	}
-	reasons := reliabilityAlertReasons(provider.Metrics, settings)
+	activeReasons := reliabilityAlertReasons(provider.Metrics, settings)
 	now := event.At.UTC()
 	state := m.reliabilityState(providerKey, event.ProviderID)
-	if len(reasons) > 0 {
+	if provider.Metrics.ConsecutiveFailures < state.LastFailureAlertCount {
+		state.LastFailureAlertCount = 0
+	}
+	triggerReasons, failureIntervalReached := reliabilityAlertTriggerReasons(provider.Metrics, settings, state.LastFailureAlertCount)
+	if len(activeReasons) > 0 {
 		state.RecoverySuccesses = 0
+		if len(triggerReasons) == 0 {
+			m.storeReliabilityState(providerKey, state)
+			return
+		}
 		cooldown := time.Duration(settings.ReliabilityAlertCooldownSeconds) * time.Second
-		if state.Alerted && cooldown > 0 && now.Sub(state.LastAlert) < cooldown {
+		if !failureIntervalReached && state.Alerted && cooldown > 0 && now.Sub(state.LastAlert) < cooldown {
 			if !state.Suppressed {
-				m.saveReliabilityAlertEvent(event, "reliability_alert_suppressed", "可靠性告警处于冷却期", providerKey, provider.Name, reasons, provider.Metrics)
+				m.saveReliabilityAlertEvent(event, "reliability_alert_suppressed", "可靠性告警处于冷却期", providerKey, provider.Name, triggerReasons, provider.Metrics)
 				state.Suppressed = true
 			}
 			m.storeReliabilityState(providerKey, state)
 			return
 		}
-		message := reliabilityAlertMarkdown(provider.Name, cli, reasons, provider.Metrics, now)
+		message := reliabilityAlertMarkdown(provider.Name, cli, triggerReasons, provider.Metrics, now)
 		deliveryErr := m.sendReliabilityMessage("reliability_alert", "AI Watch Provider 可靠性告警", message)
 		typ, text := "reliability_alert_triggered", "Provider 可靠性阈值已触发"
 		if deliveryErr != nil {
 			typ, text = "reliability_alert_delivery_failed", "Provider 可靠性告警发送失败"
 		}
-		m.saveReliabilityAlertEvent(event, typ, text, providerKey, provider.Name, reasons, provider.Metrics)
+		m.saveReliabilityAlertEvent(event, typ, text, providerKey, provider.Name, triggerReasons, provider.Metrics)
+		if failureIntervalReached {
+			state.LastFailureAlertCount = provider.Metrics.ConsecutiveFailures
+		}
 		state.Alerted, state.LastAlert, state.Suppressed = true, now, false
 		m.storeReliabilityState(providerKey, state)
 		return
@@ -126,6 +141,24 @@ func reliabilityAlertReasons(metrics reliability.Metrics, settings domain.Settin
 	return reasons
 }
 
+func reliabilityAlertTriggerReasons(metrics reliability.Metrics, settings domain.Settings, lastFailureAlertCount int) ([]string, bool) {
+	var reasons []string
+	if metrics.Completed >= settings.ReliabilityAlertMinSamples && metrics.SuccessRate != nil && *metrics.SuccessRate*100 < float64(settings.ReliabilityAlertSuccessRate) {
+		reasons = append(reasons, fmt.Sprintf("24 小时成功率 %.1f%% < %d%%", *metrics.SuccessRate*100, settings.ReliabilityAlertSuccessRate))
+	}
+	failureIntervalReached := settings.ReliabilityAlertConsecutiveFailures > 0 &&
+		metrics.ConsecutiveFailures >= settings.ReliabilityAlertConsecutiveFailures &&
+		metrics.ConsecutiveFailures%settings.ReliabilityAlertConsecutiveFailures == 0 &&
+		metrics.ConsecutiveFailures > lastFailureAlertCount
+	if failureIntervalReached {
+		reasons = append(reasons, fmt.Sprintf("连续失败 %d 次（每 %d 次告警）", metrics.ConsecutiveFailures, settings.ReliabilityAlertConsecutiveFailures))
+	}
+	if settings.ReliabilityAlertP95Millis > 0 && metrics.Completed >= settings.ReliabilityAlertMinSamples && metrics.P95DurationMillis != nil && *metrics.P95DurationMillis > int64(settings.ReliabilityAlertP95Millis) {
+		reasons = append(reasons, fmt.Sprintf("P95 %dms > %dms", *metrics.P95DurationMillis, settings.ReliabilityAlertP95Millis))
+	}
+	return reasons, failureIntervalReached
+}
+
 func (m *Manager) reliabilityState(key, providerID string) reliabilityAlertState {
 	m.mu.Lock()
 	if m.notifications.reliability == nil {
@@ -147,6 +180,11 @@ func (m *Manager) reliabilityState(key, providerID string) reliabilityAlertState
 			}
 			state.LastAlert = event.At
 			state.Alerted = typ != "reliability_alert_recovered"
+			if state.Alerted {
+				state.LastFailureAlertCount = eventDataInt(event.Data, "consecutiveFailures")
+			} else {
+				state.LastFailureAlertCount = 0
+			}
 		}
 	}
 	state.Loaded = true
@@ -199,6 +237,20 @@ func eventJobString(event store.Event, key string) string {
 func eventDataString(data map[string]any, key string) string {
 	value, _ := data[key].(string)
 	return strings.TrimSpace(value)
+}
+func eventDataInt(data map[string]any, key string) int {
+	switch value := data[key].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	case float32:
+		return int(value)
+	default:
+		return 0
+	}
 }
 func alertLevel(typ string) string {
 	if typ == "reliability_alert_recovered" {

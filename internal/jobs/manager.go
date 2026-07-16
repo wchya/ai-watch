@@ -47,35 +47,36 @@ type Notifier interface {
 }
 
 type Manager struct {
-	mu                sync.RWMutex
-	resolver          Resolver
-	executor          Executor
-	store             store.Store
-	jobs              map[string]*runtime
-	locks             map[string]string
-	history           []domain.Summary
-	settings          domain.Settings
-	notifier          Notifier
-	ctx               context.Context
-	cancel            context.CancelFunc
-	wg                sync.WaitGroup
-	shutdown          sync.Once
-	closing           bool
-	eventQueue        chan eventWrite
-	eventWG           sync.WaitGroup
-	persistenceErr    atomic.Value
-	scheduleJobs      map[string]string
-	scheduleWake      chan struct{}
-	scheduleStarted   chan struct{}
-	notifications     notificationState
-	notificationSlots chan struct{}
-	digestMu          sync.Mutex
-	digestSentDate    string
-	failoverMu        sync.Mutex
-	groupMutationMu   sync.Mutex
-	failoverRunning   map[string]bool
-	incidentMu        sync.Mutex
-	notificationWG    sync.WaitGroup
+	mu                 sync.RWMutex
+	resolver           Resolver
+	executor           Executor
+	store              store.Store
+	jobs               map[string]*runtime
+	locks              map[string]string
+	history            []domain.Summary
+	settings           domain.Settings
+	notifier           Notifier
+	ctx                context.Context
+	cancel             context.CancelFunc
+	wg                 sync.WaitGroup
+	shutdown           sync.Once
+	closing            bool
+	eventQueue         chan eventWrite
+	eventWG            sync.WaitGroup
+	persistenceErr     atomic.Value
+	scheduleJobs       map[string]string
+	scheduleWake       chan struct{}
+	scheduleStarted    chan struct{}
+	notifications      notificationState
+	notificationSlots  chan struct{}
+	reliabilityAlertMu sync.Mutex
+	digestMu           sync.Mutex
+	digestSentDate     string
+	failoverMu         sync.Mutex
+	groupMutationMu    sync.Mutex
+	failoverRunning    map[string]bool
+	incidentMu         sync.Mutex
+	notificationWG     sync.WaitGroup
 }
 
 type runtime struct {
