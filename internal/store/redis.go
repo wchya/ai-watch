@@ -93,7 +93,6 @@ type Redis struct {
 	aead      cipher.AEAD
 	settings  domain.Settings
 	summaries []domain.Summary
-	examples  []domain.ProviderExample
 	schedules []domain.Schedule
 	manual    []domain.ManualProvider
 	ccSwitch  []domain.CCSwitchProvider
@@ -153,6 +152,9 @@ func (r *Redis) open() error {
 	}
 	if err := r.migrateSQLite(ctx); err != nil {
 		return err
+	}
+	if err := r.client.Del(ctx, r.key("provider-examples")).Err(); err != nil {
+		return fmt.Errorf("remove retired provider examples: %w", err)
 	}
 	if err := r.seedDefaults(ctx); err != nil {
 		return err
@@ -222,16 +224,11 @@ func (r *Redis) Close() error {
 type RedisPrewarmResult struct {
 	Settings          int `json:"settings"`
 	Summaries         int `json:"summaries"`
-	ProviderExamples  int `json:"providerExamples"`
 	Schedules         int `json:"schedules"`
 	ManualProviders   int `json:"manualProviders"`
 	CCSwitchProviders int `json:"ccSwitchProviders"`
 	DingTalk          int `json:"dingTalk"`
 }
-
-func (r *Redis) AdminClient() redis.UniversalClient { return r.client }
-
-func (r *Redis) Prefix() string { return r.prefix }
 
 func (r *Redis) Prewarm(ctx context.Context) (RedisPrewarmResult, error) {
 	r.prewarmMu.Lock()
@@ -244,10 +241,6 @@ func (r *Redis) Prewarm(ctx context.Context) (RedisPrewarmResult, error) {
 		return RedisPrewarmResult{}, err
 	}
 	summaries, err := r.loadSummariesRedis(ctx)
-	if err != nil {
-		return RedisPrewarmResult{}, err
-	}
-	examples, err := r.listExamplesRedis(ctx)
 	if err != nil {
 		return RedisPrewarmResult{}, err
 	}
@@ -268,7 +261,7 @@ func (r *Redis) Prewarm(ctx context.Context) (RedisPrewarmResult, error) {
 		return RedisPrewarmResult{}, err
 	}
 	r.mu.Lock()
-	r.settings, r.summaries, r.examples, r.schedules = settings, summaries, examples, schedules
+	r.settings, r.summaries, r.schedules = settings, summaries, schedules
 	r.manual, r.ccSwitch, r.dingTalk = manual, ccSwitch, dingTalk
 	r.mu.Unlock()
 	dingTalkCount := 0
@@ -278,7 +271,6 @@ func (r *Redis) Prewarm(ctx context.Context) (RedisPrewarmResult, error) {
 	return RedisPrewarmResult{
 		Settings:          1,
 		Summaries:         len(summaries),
-		ProviderExamples:  len(examples),
 		Schedules:         len(schedules),
 		ManualProviders:   len(manual),
 		CCSwitchProviders: len(ccSwitch),
@@ -322,120 +314,11 @@ func (r *Redis) loadSettingsRedis(ctx context.Context) (domain.Settings, error) 
 	if err != nil {
 		return domain.Settings{}, fmt.Errorf("load settings: %w", err)
 	}
-	var value domain.Settings
+	value := domain.DefaultSettings()
 	if err = json.Unmarshal(b, &value); err != nil {
 		return domain.Settings{}, fmt.Errorf("decode settings: %w", err)
 	}
 	return value, nil
-}
-
-func (r *Redis) ListProviderExamples() ([]domain.ProviderExample, error) {
-	if err := r.ready(); err != nil {
-		return nil, err
-	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	result := make([]domain.ProviderExample, len(r.examples))
-	copy(result, r.examples)
-	return result, nil
-}
-
-func (r *Redis) UpsertProviderExample(value domain.ProviderExample) (domain.ProviderExample, error) {
-	if err := r.ready(); err != nil {
-		return domain.ProviderExample{}, err
-	}
-	r.writeMu.Lock()
-	defer r.writeMu.Unlock()
-	var err error
-	if value, err = normalizeProviderExample(value); err != nil {
-		return domain.ProviderExample{}, err
-	}
-	value.UpdatedAt = time.Now().UTC()
-	if err = r.hsetJSON(context.Background(), r.key("provider-examples"), value.ID, value); err != nil {
-		return domain.ProviderExample{}, err
-	}
-	r.cacheExample(value)
-	return value, nil
-}
-
-func (r *Redis) DeleteProviderExample(id string) (bool, error) {
-	if err := r.ready(); err != nil {
-		return false, err
-	}
-	r.writeMu.Lock()
-	defer r.writeMu.Unlock()
-	id = strings.TrimSpace(id)
-	if !providerExampleID.MatchString(id) {
-		return false, errors.New("invalid provider example id")
-	}
-	deleted, err := r.client.HDel(context.Background(), r.key("provider-examples"), id).Result()
-	if err == nil && deleted > 0 {
-		r.removeCachedExample(id)
-	}
-	return deleted > 0, err
-}
-
-func (r *Redis) listExamplesRedis(ctx context.Context) ([]domain.ProviderExample, error) {
-	var values []domain.ProviderExample
-	if err := r.hvalsJSON(ctx, r.key("provider-examples"), &values); err != nil {
-		return nil, err
-	}
-	sort.Slice(values, func(i, j int) bool {
-		if values[i].CLI != values[j].CLI {
-			return values[i].CLI == domain.CLICodex
-		}
-		if values[i].Name != values[j].Name {
-			return values[i].Name < values[j].Name
-		}
-		return values[i].ID < values[j].ID
-	})
-	return values, nil
-}
-
-func (r *Redis) refreshExamples(ctx context.Context) error {
-	values, err := r.listExamplesRedis(ctx)
-	if err == nil {
-		r.mu.Lock()
-		r.examples = values
-		r.mu.Unlock()
-	}
-	return err
-}
-
-func (r *Redis) cacheExample(value domain.ProviderExample) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	found := false
-	for index := range r.examples {
-		if r.examples[index].ID == value.ID {
-			r.examples[index] = value
-			found = true
-			break
-		}
-	}
-	if !found {
-		r.examples = append(r.examples, value)
-	}
-	sort.Slice(r.examples, func(i, j int) bool {
-		if r.examples[i].CLI != r.examples[j].CLI {
-			return r.examples[i].CLI == domain.CLICodex
-		}
-		if r.examples[i].Name != r.examples[j].Name {
-			return r.examples[i].Name < r.examples[j].Name
-		}
-		return r.examples[i].ID < r.examples[j].ID
-	})
-}
-
-func (r *Redis) removeCachedExample(id string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for index := range r.examples {
-		if r.examples[index].ID == id {
-			r.examples = append(r.examples[:index], r.examples[index+1:]...)
-			return
-		}
-	}
 }
 
 func (r *Redis) ListSchedules() ([]domain.Schedule, error) {
@@ -489,7 +372,6 @@ value.lastOccurrenceKey = ARGV[2]
 value.lastStatus = ARGV[3]
 value.lastJobId = ARGV[4]
 value.lastOccurrenceAt = ARGV[5]
-value.updatedAt = ARGV[6]
 local encoded = cjson.encode(value)
 redis.call('HSET', KEYS[1], ARGV[1], encoded)
 return encoded
@@ -552,9 +434,8 @@ func (r *Redis) MarkScheduleRun(id, occurrence, status, jobID string, at time.Ti
 	}
 	r.writeMu.Lock()
 	defer r.writeMu.Unlock()
-	now := time.Now().UTC()
 	raw, err := markScheduleRunScript.Run(context.Background(), r.client, []string{r.key("schedules")},
-		strings.TrimSpace(id), occurrence, status, jobID, at.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)).Text()
+		strings.TrimSpace(id), occurrence, status, jobID, at.UTC().Format(time.RFC3339Nano)).Text()
 	if errors.Is(err, redis.Nil) {
 		return nil
 	}
@@ -918,9 +799,11 @@ func eventMatches(value Event, filter EventFilter) bool {
 	if scheduleID == "" {
 		scheduleID, _ = value.Data["scheduleId"].(string)
 	}
+	requestID, _ := value.Data["requestId"].(string)
 	return (filter.ProviderID == "" || value.ProviderID == filter.ProviderID) &&
 		(filter.JobID == "" || value.JobID == filter.JobID) &&
 		(filter.ScheduleID == "" || scheduleID == filter.ScheduleID) &&
+		(filter.RequestID == "" || requestID == filter.RequestID) &&
 		(filter.Type == "" || value.Type == filter.Type) &&
 		(filter.Level == "" || value.Level == filter.Level) &&
 		(filter.Since.IsZero() || !value.At.Before(filter.Since)) &&
@@ -1014,7 +897,7 @@ func (r *Redis) CountEvents(filter EventFilter) (int64, error) {
 	}
 	ctx := context.Background()
 	minScore, maxScore := eventScoreBounds(filter)
-	if filter.ProviderID == "" && filter.JobID == "" && filter.Type == "" && filter.Level == "" {
+	if filter.ProviderID == "" && filter.JobID == "" && filter.ScheduleID == "" && filter.RequestID == "" && filter.Type == "" && filter.Level == "" {
 		return r.client.ZCount(ctx, r.key("events", "index"), minScore, maxScore).Result()
 	}
 	var count int64
@@ -1759,19 +1642,6 @@ func (r *Redis) seedDefaults(ctx context.Context) error {
 			return err
 		}
 	}
-	count, err := r.client.HLen(ctx, r.key("provider-examples")).Result()
-	if err != nil {
-		return err
-	}
-	if count == 0 {
-		now := time.Now().UTC()
-		for i, value := range defaultProviderExamples() {
-			value.UpdatedAt = now.Add(time.Duration(i) * time.Nanosecond)
-			if err = r.hsetJSON(ctx, r.key("provider-examples"), value.ID, value); err != nil {
-				return err
-			}
-		}
-	}
 	return nil
 }
 
@@ -1803,15 +1673,6 @@ func (r *Redis) migrateSQLite(ctx context.Context) error {
 	b, _ := json.Marshal(settings)
 	if err = r.client.Set(ctx, r.key("settings"), b, 0).Err(); err != nil {
 		return err
-	}
-	if values, readErr := legacy.ListProviderExamples(); readErr != nil {
-		return readErr
-	} else {
-		for _, value := range values {
-			if err = r.hsetJSON(ctx, r.key("provider-examples"), value.ID, value); err != nil {
-				return err
-			}
-		}
 	}
 	if values, readErr := legacy.ListSchedules(); readErr != nil {
 		return readErr

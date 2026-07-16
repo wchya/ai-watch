@@ -127,6 +127,10 @@ func (r *Runner) Run(ctx context.Context, jobID string, opts domain.JobOptions, 
 	go func() { done <- cmd.Wait() }()
 	select {
 	case err := <-done:
+		// The CLI leader can exit while MCP servers, plugin syncs or other
+		// grandchildren remain alive in its process group. Always drain the
+		// group so a completed job returns the container to its idle footprint.
+		reapProcessGroup(cmd.Process.Pid)
 		collector.Flush()
 		return finish(Result{ExitCode: exitCode(err), Output: collector.String()}), nil
 	case <-ctx.Done():
@@ -164,6 +168,25 @@ func (r *Runner) cliVersion(cli domain.CLI) string {
 }
 
 func terminateGroup(pid int) { _ = syscall.Kill(-pid, syscall.SIGTERM) }
+
+func reapProcessGroup(pid int) {
+	if pid <= 0 || !processGroupAlive(pid) {
+		return
+	}
+	terminateGroup(pid)
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for processGroupAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if processGroupAlive(pid) {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	}
+}
+
+func processGroupAlive(pid int) bool {
+	err := syscall.Kill(-pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
 func exitCode(err error) int {
 	if err == nil {
 		return 0

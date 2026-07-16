@@ -1,13 +1,14 @@
 package store
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,7 +33,6 @@ var ErrScheduleLimit = errors.New("schedule limit reached")
 var (
 	forbiddenEventKey = regexp.MustCompile(`(?i)(^|[_-])(api[_-]?key|auth|authorization|credential|output|prompt|secret|token|webhook)([_-]|$)`)
 	credentialValue   = regexp.MustCompile(`(?i)(sk-[a-z0-9_-]{8,}|access_token=|bearer\s+[a-z0-9._~+/=-]{8,})`)
-	providerExampleID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 	scheduleID        = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 )
 
@@ -45,6 +45,7 @@ type JSON struct {
 	dbPath  string
 	db      *sql.DB
 	initErr error
+	aead    cipher.AEAD
 }
 
 type Event struct {
@@ -63,6 +64,7 @@ type EventFilter struct {
 	ProviderID string
 	JobID      string
 	ScheduleID string
+	RequestID  string
 	Type       string
 	Level      string
 	Since      time.Time
@@ -96,6 +98,15 @@ type Diagnostics struct {
 
 func New(dir string) *JSON {
 	s := &JSON{dir: dir, dbPath: filepath.Join(dir, databaseName)}
+	configuredKey := os.Getenv("AI_WATCH_MASTER_KEY")
+	if configuredKey == "" {
+		configuredKey = os.Getenv("AI_WATCH_ENCRYPTION_KEY")
+	}
+	if key, err := loadEncryptionKey(dir, configuredKey); err == nil && len(key) == 32 {
+		if block, blockErr := aes.NewCipher(key); blockErr == nil {
+			s.aead, _ = cipher.NewGCM(block)
+		}
+	}
 	s.initErr = s.open()
 	return s
 }
@@ -284,7 +295,85 @@ func (s *JSON) migrate() error {
 			return err
 		}
 	}
+	if !applied[11] {
+		if err := s.applyReliabilityDigestV11(); err != nil {
+			return err
+		}
+	}
+	if !applied[12] {
+		if err := s.applyTestScenariosV12(); err != nil {
+			return err
+		}
+	}
+	if !applied[13] {
+		if err := s.applyProviderGroupsV13(); err != nil {
+			return err
+		}
+	}
+	if !applied[14] {
+		if err := s.applyIncidentsV14(); err != nil {
+			return err
+		}
+	}
+	if !applied[15] {
+		if err := s.applyProviderGroupSchedulesV15(); err != nil {
+			return err
+		}
+	}
+	if !applied[16] {
+		if err := s.applyIncidentPostmortemsV16(); err != nil {
+			return err
+		}
+	}
+	if !applied[17] {
+		if err := s.applyNotificationRoutingV17(); err != nil {
+			return err
+		}
+	}
+	if !applied[18] {
+		if err := s.applyProviderExamplesCleanupV18(); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (s *JSON) applyProviderExamplesCleanupV18() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin provider examples cleanup migration: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`DROP TABLE IF EXISTS provider_examples`); err != nil {
+		return fmt.Errorf("drop provider examples table: %w", err)
+	}
+	if _, err = tx.Exec(`INSERT INTO schema_migrations(version, applied_at_ns) VALUES(18, ?)`, time.Now().UTC().UnixNano()); err != nil {
+		return fmt.Errorf("record provider examples cleanup migration: %w", err)
+	}
+	return tx.Commit()
+}
+
+func (s *JSON) applyReliabilityDigestV11() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin reliability digest migration: %w", err)
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`ALTER TABLE settings ADD COLUMN reliability_digest_enabled INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE settings ADD COLUMN reliability_digest_hour INTEGER NOT NULL DEFAULT 9`,
+		`ALTER TABLE settings ADD COLUMN reliability_digest_minute INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE settings ADD COLUMN reliability_digest_timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai'`,
+		`ALTER TABLE settings ADD COLUMN reliability_digest_range TEXT NOT NULL DEFAULT '24h'`,
+	} {
+		if _, err = tx.Exec(statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+			return fmt.Errorf("add reliability digest setting: %w", err)
+		}
+	}
+	if _, err = tx.Exec(`INSERT INTO schema_migrations(version, applied_at_ns) VALUES(11, ?)`, time.Now().UTC().UnixNano()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *JSON) applyScheduleEventLinkV10() error {
@@ -456,11 +545,6 @@ func (s *JSON) applyProviderExamplesV4() error {
 		return fmt.Errorf("index provider examples: %w", err)
 	}
 	now := time.Now().UTC()
-	for offset, example := range defaultProviderExamples() {
-		if err = upsertProviderExampleTx(tx, example, now.Add(time.Duration(offset)*time.Nanosecond)); err != nil {
-			return fmt.Errorf("seed provider example: %w", err)
-		}
-	}
 	if _, err = tx.Exec(`INSERT INTO schema_migrations(version, applied_at_ns) VALUES(4, ?)`, now.UnixNano()); err != nil {
 		return fmt.Errorf("record provider examples migration: %w", err)
 	}
@@ -468,29 +552,6 @@ func (s *JSON) applyProviderExamplesV4() error {
 		return fmt.Errorf("commit provider examples migration: %w", err)
 	}
 	return nil
-}
-
-func defaultProviderExamples() []domain.ProviderExample {
-	return []domain.ProviderExample{
-		{
-			ID:          "codex-openai-compatible",
-			Name:        "Codex OpenAI-Compatible",
-			CLI:         domain.CLICodex,
-			BaseURL:     "https://api.openai.com/v1",
-			Model:       "gpt-5",
-			Provider:    "openai",
-			Description: "Codex Responses API 示例；凭据需通过运行环境单独提供。",
-		},
-		{
-			ID:          "claude-anthropic-compatible",
-			Name:        "Claude Anthropic-Compatible",
-			CLI:         domain.CLIClaude,
-			BaseURL:     "https://api.anthropic.com",
-			Model:       "sonnet",
-			Provider:    "anthropic",
-			Description: "Claude Code Anthropic API 示例；凭据需通过运行环境单独提供。",
-		},
-	}
 }
 
 func (s *JSON) applySettingsRetentionV3() error {
@@ -540,6 +601,11 @@ func (s *JSON) applySchemaV1() error {
 			reliability_alert_cooldown_seconds INTEGER NOT NULL DEFAULT 1800,
 			reliability_alert_recovery_successes INTEGER NOT NULL DEFAULT 2,
 			reliability_alert_recovery_enabled INTEGER NOT NULL DEFAULT 1,
+			reliability_digest_enabled INTEGER NOT NULL DEFAULT 0,
+			reliability_digest_hour INTEGER NOT NULL DEFAULT 9,
+			reliability_digest_minute INTEGER NOT NULL DEFAULT 0,
+			reliability_digest_timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+			reliability_digest_range TEXT NOT NULL DEFAULT '24h',
 			history_limit INTEGER NOT NULL,
 			event_retention_days INTEGER NOT NULL DEFAULT 30,
 			event_retention_rows INTEGER NOT NULL DEFAULT 5000,
@@ -685,12 +751,13 @@ func (s *JSON) LoadSettings() (domain.Settings, error) {
 		return domain.Settings{}, err
 	}
 	var value domain.Settings
-	var configured, alertEnabled, recoveryEnabled int
+	var configured, alertEnabled, recoveryEnabled, digestEnabled int
 	err := s.db.QueryRow(`SELECT timeout_seconds, retry_interval_seconds, keepalive_interval_seconds,
 		keepalive_summary_seconds, keepalive_summary_successes, probe_progress_seconds, recovery_merge_seconds,
 		reliability_alert_enabled, reliability_alert_min_samples, reliability_alert_success_rate,
 		reliability_alert_consecutive_failures, reliability_alert_p95_millis, reliability_alert_cooldown_seconds,
 		reliability_alert_recovery_successes, reliability_alert_recovery_enabled,
+		reliability_digest_enabled, reliability_digest_hour, reliability_digest_minute, reliability_digest_timezone, reliability_digest_range,
 		history_limit, event_retention_days, event_retention_rows, event_retention_bytes,
 		ui_theme, dingtalk_configured FROM settings WHERE id = 1`).Scan(
 		&value.TimeoutSeconds, &value.RetryIntervalSeconds, &value.KeepaliveIntervalSeconds,
@@ -699,6 +766,7 @@ func (s *JSON) LoadSettings() (domain.Settings, error) {
 		&alertEnabled, &value.ReliabilityAlertMinSamples, &value.ReliabilityAlertSuccessRate,
 		&value.ReliabilityAlertConsecutiveFailures, &value.ReliabilityAlertP95Millis, &value.ReliabilityAlertCooldownSeconds,
 		&value.ReliabilityAlertRecoverySuccesses, &recoveryEnabled,
+		&digestEnabled, &value.ReliabilityDigestHour, &value.ReliabilityDigestMinute, &value.ReliabilityDigestTimezone, &value.ReliabilityDigestRange,
 		&value.HistoryLimit, &value.EventRetentionDays, &value.EventRetentionRows,
 		&value.EventRetentionBytes, &value.UITheme, &configured,
 	)
@@ -711,6 +779,7 @@ func (s *JSON) LoadSettings() (domain.Settings, error) {
 	value.DingTalkConfigured = configured != 0
 	value.ReliabilityAlertEnabled = alertEnabled != 0
 	value.ReliabilityAlertRecoveryEnabled = recoveryEnabled != 0
+	value.ReliabilityDigestEnabled = digestEnabled != 0
 	return value, nil
 }
 
@@ -738,9 +807,10 @@ func saveSettingsDB(exec sqlExecer, value domain.Settings, now time.Time) error 
 		reliability_alert_enabled, reliability_alert_min_samples, reliability_alert_success_rate,
 		reliability_alert_consecutive_failures, reliability_alert_p95_millis, reliability_alert_cooldown_seconds,
 		reliability_alert_recovery_successes, reliability_alert_recovery_enabled,
+		reliability_digest_enabled, reliability_digest_hour, reliability_digest_minute, reliability_digest_timezone, reliability_digest_range,
 		history_limit, event_retention_days, event_retention_rows, event_retention_bytes,
 		ui_theme, dingtalk_configured, updated_at_ns
-	) VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		timeout_seconds = excluded.timeout_seconds,
 		retry_interval_seconds = excluded.retry_interval_seconds,
@@ -757,6 +827,11 @@ func saveSettingsDB(exec sqlExecer, value domain.Settings, now time.Time) error 
 		reliability_alert_cooldown_seconds = excluded.reliability_alert_cooldown_seconds,
 		reliability_alert_recovery_successes = excluded.reliability_alert_recovery_successes,
 		reliability_alert_recovery_enabled = excluded.reliability_alert_recovery_enabled,
+		reliability_digest_enabled = excluded.reliability_digest_enabled,
+		reliability_digest_hour = excluded.reliability_digest_hour,
+		reliability_digest_minute = excluded.reliability_digest_minute,
+		reliability_digest_timezone = excluded.reliability_digest_timezone,
+		reliability_digest_range = excluded.reliability_digest_range,
 		history_limit = excluded.history_limit,
 		event_retention_days = excluded.event_retention_days,
 		event_retention_rows = excluded.event_retention_rows,
@@ -770,6 +845,7 @@ func saveSettingsDB(exec sqlExecer, value domain.Settings, now time.Time) error 
 		boolInt(value.ReliabilityAlertEnabled), value.ReliabilityAlertMinSamples, value.ReliabilityAlertSuccessRate,
 		value.ReliabilityAlertConsecutiveFailures, value.ReliabilityAlertP95Millis, value.ReliabilityAlertCooldownSeconds,
 		value.ReliabilityAlertRecoverySuccesses, boolInt(value.ReliabilityAlertRecoveryEnabled),
+		boolInt(value.ReliabilityDigestEnabled), value.ReliabilityDigestHour, value.ReliabilityDigestMinute, value.ReliabilityDigestTimezone, value.ReliabilityDigestRange,
 		value.HistoryLimit, value.EventRetentionDays, value.EventRetentionRows,
 		value.EventRetentionBytes, value.UITheme, boolInt(value.DingTalkConfigured), now.UnixNano(),
 	)
@@ -783,111 +859,10 @@ func saveSettingsTx(tx *sql.Tx, value domain.Settings, now time.Time) error {
 	return saveSettingsDB(tx, value, now)
 }
 
-func (s *JSON) ListProviderExamples() ([]domain.ProviderExample, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.ready(); err != nil {
-		return nil, err
-	}
-	rows, err := s.db.Query(`SELECT id, name, cli, base_url, model, provider, description, updated_at_ns
-		FROM provider_examples
-		ORDER BY CASE cli WHEN 'codex' THEN 0 ELSE 1 END, name, id`)
-	if err != nil {
-		return nil, fmt.Errorf("list provider examples: %w", err)
-	}
-	defer rows.Close()
-	examples := make([]domain.ProviderExample, 0)
-	for rows.Next() {
-		var example domain.ProviderExample
-		var cli string
-		var updatedAt int64
-		if err = rows.Scan(&example.ID, &example.Name, &cli, &example.BaseURL, &example.Model,
-			&example.Provider, &example.Description, &updatedAt); err != nil {
-			return nil, fmt.Errorf("scan provider example: %w", err)
-		}
-		example.CLI = domain.CLI(cli)
-		example.UpdatedAt = time.Unix(0, updatedAt).UTC()
-		examples = append(examples, example)
-	}
-	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate provider examples: %w", err)
-	}
-	return examples, nil
-}
-
-func (s *JSON) UpsertProviderExample(example domain.ProviderExample) (domain.ProviderExample, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.ready(); err != nil {
-		return domain.ProviderExample{}, err
-	}
-	var err error
-	if example, err = normalizeProviderExample(example); err != nil {
-		return domain.ProviderExample{}, err
-	}
-	example.UpdatedAt = time.Now().UTC()
-	if err = upsertProviderExampleDB(s.db, example); err != nil {
-		return domain.ProviderExample{}, err
-	}
-	s.ensurePrivateFiles()
-	return example, nil
-}
-
-func (s *JSON) DeleteProviderExample(id string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.ready(); err != nil {
-		return false, err
-	}
-	id = strings.TrimSpace(id)
-	if !providerExampleID.MatchString(id) {
-		return false, errors.New("invalid provider example id")
-	}
-	result, err := s.db.Exec(`DELETE FROM provider_examples WHERE id = ?`, id)
-	if err != nil {
-		return false, fmt.Errorf("delete provider example: %w", err)
-	}
-	deleted, err := result.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("count deleted provider example: %w", err)
-	}
-	return deleted > 0, nil
-}
-
-func upsertProviderExampleTx(tx *sql.Tx, example domain.ProviderExample, updatedAt time.Time) error {
-	var err error
-	if example, err = normalizeProviderExample(example); err != nil {
-		return err
-	}
-	example.UpdatedAt = updatedAt.UTC()
-	return upsertProviderExampleDB(tx, example)
-}
-
-func upsertProviderExampleDB(exec sqlExecer, example domain.ProviderExample) error {
-	_, err := exec.Exec(`INSERT INTO provider_examples(
-		id, name, cli, base_url, model, provider, description, updated_at_ns
-	) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(id) DO UPDATE SET
-		name = excluded.name,
-		cli = excluded.cli,
-		base_url = excluded.base_url,
-		model = excluded.model,
-		provider = excluded.provider,
-		description = excluded.description,
-		updated_at_ns = excluded.updated_at_ns`,
-		example.ID, example.Name, string(example.CLI), example.BaseURL, example.Model,
-		example.Provider, example.Description, example.UpdatedAt.UnixNano(),
-	)
-	if err != nil {
-		return fmt.Errorf("save provider example: %w", err)
-	}
-	return nil
-}
-
-const scheduleSelect = `SELECT id, name, enabled, cli, provider_id, mode, timezone,
+const scheduleSelect = `SELECT id, name, enabled, cli, provider_id, provider_group_id, mode, timezone,
 	weekdays_mask, start_minute, end_minute, until_success, timeout_seconds,
 	retry_interval_seconds, keepalive_interval_seconds, failure_threshold, model,
-	fallback_model, last_occurrence_key, last_status, last_job_id, last_run_at_ns,
+		fallback_model, scenario_id, last_occurrence_key, last_status, last_job_id, last_run_at_ns,
 	created_at_ns, updated_at_ns FROM schedules`
 
 func (s *JSON) ListSchedules() ([]domain.Schedule, error) {
@@ -960,27 +935,27 @@ func (s *JSON) UpsertSchedule(value domain.Schedule) (domain.Schedule, error) {
 	}
 	value.UpdatedAt = now
 	_, err = s.db.Exec(`INSERT INTO schedules(
-		id, name, enabled, cli, provider_id, mode, timezone, weekdays_mask,
+		id, name, enabled, cli, provider_id, provider_group_id, mode, timezone, weekdays_mask,
 		start_minute, end_minute, until_success, timeout_seconds,
 		retry_interval_seconds, keepalive_interval_seconds, failure_threshold,
-		model, fallback_model, last_occurrence_key, last_status, last_job_id,
+			model, fallback_model, scenario_id, last_occurrence_key, last_status, last_job_id,
 		last_run_at_ns, created_at_ns, updated_at_ns
-	) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		name = excluded.name, enabled = excluded.enabled, cli = excluded.cli,
-		provider_id = excluded.provider_id, mode = excluded.mode,
+		provider_id = excluded.provider_id, provider_group_id = excluded.provider_group_id, mode = excluded.mode,
 		timezone = excluded.timezone, weekdays_mask = excluded.weekdays_mask,
 		start_minute = excluded.start_minute, end_minute = excluded.end_minute,
 		until_success = excluded.until_success, timeout_seconds = excluded.timeout_seconds,
 		retry_interval_seconds = excluded.retry_interval_seconds,
 		keepalive_interval_seconds = excluded.keepalive_interval_seconds,
 		failure_threshold = excluded.failure_threshold, model = excluded.model,
-		fallback_model = excluded.fallback_model, updated_at_ns = excluded.updated_at_ns`,
-		value.ID, value.Name, boolInt(value.Enabled), string(value.CLI), value.ProviderID,
+			fallback_model = excluded.fallback_model, scenario_id = excluded.scenario_id, updated_at_ns = excluded.updated_at_ns`,
+		value.ID, value.Name, boolInt(value.Enabled), string(value.CLI), value.ProviderID, value.ProviderGroupID,
 		string(value.Mode), value.Timezone, value.WeekdaysMask, value.StartMinute,
 		value.EndMinute, boolInt(value.UntilSuccess), value.TimeoutSeconds,
 		value.RetryIntervalSeconds, value.KeepaliveIntervalSeconds,
-		value.FailureThreshold, value.Model, value.FallbackModel,
+		value.FailureThreshold, value.Model, value.FallbackModel, value.ScenarioID,
 		value.LastOccurrenceKey, value.LastStatus, value.LastJobID,
 		nullTimeNS(value.LastOccurrenceAt), value.CreatedAt.UnixNano(), value.UpdatedAt.UnixNano(),
 	)
@@ -1032,11 +1007,11 @@ func scanSchedule(row rowScanner) (domain.Schedule, error) {
 	var cli, mode string
 	var lastRun sql.NullInt64
 	var createdAt, updatedAt int64
-	if err := row.Scan(&value.ID, &value.Name, &enabled, &cli, &value.ProviderID,
+	if err := row.Scan(&value.ID, &value.Name, &enabled, &cli, &value.ProviderID, &value.ProviderGroupID,
 		&mode, &value.Timezone, &value.WeekdaysMask, &value.StartMinute,
 		&value.EndMinute, &untilSuccess, &value.TimeoutSeconds,
 		&value.RetryIntervalSeconds, &value.KeepaliveIntervalSeconds,
-		&value.FailureThreshold, &value.Model, &value.FallbackModel,
+		&value.FailureThreshold, &value.Model, &value.FallbackModel, &value.ScenarioID,
 		&value.LastOccurrenceKey, &value.LastStatus, &value.LastJobID, &lastRun,
 		&createdAt, &updatedAt); err != nil {
 		return domain.Schedule{}, err
@@ -1055,9 +1030,11 @@ func normalizeSchedule(value domain.Schedule) (domain.Schedule, error) {
 	value.ID = strings.TrimSpace(value.ID)
 	value.Name = strings.TrimSpace(value.Name)
 	value.ProviderID = strings.TrimSpace(value.ProviderID)
+	value.ProviderGroupID = strings.TrimSpace(value.ProviderGroupID)
 	value.Timezone = strings.TrimSpace(value.Timezone)
 	value.Model = strings.TrimSpace(value.Model)
 	value.FallbackModel = strings.TrimSpace(value.FallbackModel)
+	value.ScenarioID = strings.TrimSpace(value.ScenarioID)
 	if value.ID != "" && !scheduleID.MatchString(value.ID) {
 		return domain.Schedule{}, errors.New("invalid schedule id")
 	}
@@ -1071,6 +1048,12 @@ func normalizeSchedule(value domain.Schedule) (domain.Schedule, error) {
 	// CLI configuration. Non-empty IDs reference discovered or manual providers.
 	if len(value.ProviderID) > 256 {
 		return domain.Schedule{}, errors.New("schedule providerId must not exceed 256 bytes")
+	}
+	if value.ProviderGroupID != "" && !scenarioID.MatchString(value.ProviderGroupID) {
+		return domain.Schedule{}, errors.New("invalid schedule providerGroupId")
+	}
+	if value.ScenarioID != "" && !scenarioID.MatchString(value.ScenarioID) {
+		return domain.Schedule{}, errors.New("invalid schedule scenarioId")
 	}
 	if value.Mode != domain.ModeProbe && value.Mode != domain.ModeKeepalive {
 		return domain.Schedule{}, errors.New("schedule mode must be probe or keepalive")
@@ -1499,6 +1482,10 @@ func eventWhere(filter EventFilter) (string, []any) {
 		clauses = append(clauses, "(schedule_id = ? OR json_extract(data_json, '$.scheduleId') = ?)")
 		args = append(args, filter.ScheduleID, filter.ScheduleID)
 	}
+	if filter.RequestID != "" {
+		clauses = append(clauses, "json_extract(data_json, '$.requestId') = ?")
+		args = append(args, filter.RequestID)
+	}
 	if filter.Type != "" {
 		clauses = append(clauses, "type = ?")
 		args = append(args, filter.Type)
@@ -1519,44 +1506,6 @@ func eventWhere(filter EventFilter) (string, []any) {
 		return "", args
 	}
 	return " WHERE " + strings.Join(clauses, " AND "), args
-}
-
-func normalizeProviderExample(example domain.ProviderExample) (domain.ProviderExample, error) {
-	example.ID = strings.ToLower(strings.TrimSpace(example.ID))
-	example.Name = strings.TrimSpace(example.Name)
-	example.BaseURL = strings.TrimSpace(example.BaseURL)
-	example.Model = strings.TrimSpace(example.Model)
-	example.Provider = strings.TrimSpace(example.Provider)
-	example.Description = strings.TrimSpace(example.Description)
-	if !providerExampleID.MatchString(example.ID) {
-		return domain.ProviderExample{}, errors.New("provider example id must use lowercase letters, numbers, dot, underscore, or hyphen")
-	}
-	if example.Name == "" || len(example.Name) > 160 {
-		return domain.ProviderExample{}, errors.New("provider example name is required and must not exceed 160 bytes")
-	}
-	if example.CLI != domain.CLICodex && example.CLI != domain.CLIClaude {
-		return domain.ProviderExample{}, errors.New("provider example cli must be codex or claude")
-	}
-	if len(example.BaseURL) > 2048 || len(example.Model) > 256 || len(example.Provider) > 160 || len(example.Description) > 2048 {
-		return domain.ProviderExample{}, errors.New("provider example field is too long")
-	}
-	parsed, err := url.Parse(example.BaseURL)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return domain.ProviderExample{}, errors.New("provider example baseUrl must be an absolute HTTP(S) URL")
-	}
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return domain.ProviderExample{}, errors.New("provider example baseUrl must not contain credentials, query parameters, or fragments")
-	}
-	for field, value := range map[string]string{
-		"name": example.Name, "baseUrl": example.BaseURL, "model": example.Model,
-		"provider": example.Provider, "description": example.Description,
-	} {
-		if credentialValue.MatchString(value) {
-			return domain.ProviderExample{}, fmt.Errorf("provider example %s contains credential-like data", field)
-		}
-	}
-	example.BaseURL = strings.TrimRight(example.BaseURL, "/")
-	return example, nil
 }
 
 func prepareEvent(value Event) (Event, []byte, error) {

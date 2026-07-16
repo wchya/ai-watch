@@ -66,8 +66,15 @@ type Manager struct {
 	persistenceErr    atomic.Value
 	scheduleJobs      map[string]string
 	scheduleWake      chan struct{}
+	scheduleStarted   chan struct{}
 	notifications     notificationState
 	notificationSlots chan struct{}
+	digestMu          sync.Mutex
+	digestSentDate    string
+	failoverMu        sync.Mutex
+	groupMutationMu   sync.Mutex
+	failoverRunning   map[string]bool
+	incidentMu        sync.Mutex
 	notificationWG    sync.WaitGroup
 }
 
@@ -105,17 +112,27 @@ func New(res Resolver, exec Executor, st store.Store, notifier ...Notifier) *Man
 		n = notifier[0]
 	}
 	settings.DingTalkConfigured = n != nil && n.Configured()
-	m := &Manager{resolver: res, executor: exec, store: st, jobs: map[string]*runtime{}, locks: map[string]string{}, history: history, settings: settings, notifier: n, ctx: ctx, cancel: cancel, eventQueue: make(chan eventWrite, 1024), scheduleJobs: map[string]string{}, scheduleWake: make(chan struct{}, 1), notificationSlots: make(chan struct{}, 4)}
+	m := &Manager{resolver: res, executor: exec, store: st, jobs: map[string]*runtime{}, locks: map[string]string{}, history: history, settings: settings, notifier: n, ctx: ctx, cancel: cancel, eventQueue: make(chan eventWrite, 1024), scheduleJobs: map[string]string{}, scheduleWake: make(chan struct{}, 1), scheduleStarted: make(chan struct{}), notificationSlots: make(chan struct{}, 4), failoverRunning: map[string]bool{}}
 	m.persistenceErr.Store("")
 	m.eventWG.Add(1)
 	go m.persistEvents()
 	m.wg.Add(1)
 	go m.scheduleLoop()
+	m.wg.Add(1)
+	go m.reliabilityDigestLoop()
 	return m
 }
 
 func (m *Manager) Start(opts domain.JobOptions) (domain.Job, error) {
 	return m.start(opts, "", "")
+}
+
+func (m *Manager) StartForSchedule(opts domain.JobOptions, scheduleID string) (domain.Job, error) {
+	scheduleID = strings.TrimSpace(scheduleID)
+	if scheduleID == "" {
+		return m.Start(opts)
+	}
+	return m.start(opts, scheduleID, fmt.Sprintf("manual:%d", time.Now().UTC().UnixNano()))
 }
 
 func (m *Manager) start(opts domain.JobOptions, scheduleID, occurrenceKey string) (domain.Job, error) {
@@ -124,6 +141,27 @@ func (m *Manager) start(opts domain.JobOptions, scheduleID, occurrenceKey string
 	}
 	if opts.CLI != domain.CLICodex && opts.CLI != domain.CLIClaude {
 		return domain.Job{}, errors.New("cli must be codex or claude")
+	}
+	if opts.ScenarioID != "" {
+		scenarios, ok := m.store.(store.TestScenarioStore)
+		if !ok {
+			return domain.Job{}, errors.New("test scenarios are unavailable")
+		}
+		scenario, err := scenarios.GetTestScenario(opts.ScenarioID)
+		if err != nil {
+			return domain.Job{}, fmt.Errorf("resolve test scenario: %w", err)
+		}
+		if !scenario.Enabled {
+			return domain.Job{}, errors.New("test scenario is disabled")
+		}
+		if scenario.CLI != "" && scenario.CLI != opts.CLI {
+			return domain.Job{}, errors.New("test scenario does not support selected cli")
+		}
+		opts.Prompt, opts.Expected = scenario.Prompt, scenario.Expected
+		opts.ScenarioName, opts.AssertionType = scenario.Name, scenario.AssertionType
+		if scenario.TimeoutSeconds > 0 && opts.TimeoutSeconds == 0 {
+			opts.TimeoutSeconds = scenario.TimeoutSeconds
+		}
 	}
 	m.mu.RLock()
 	defaults := m.settings
@@ -166,7 +204,7 @@ func (m *Manager) start(opts domain.JobOptions, scheduleID, occurrenceKey string
 	if opts.Mode == domain.ModeKeepalive {
 		phase = domain.JobPhaseKeepalive
 	}
-	job := domain.Job{ID: id, Mode: opts.Mode, RunOnce: opts.RunOnce, CLI: opts.CLI, ProviderID: cfg.ProviderID, ProviderName: cfg.ProviderName, Provider: cfg.Provider, Target: sanitizeTarget(cfg.BaseURL), Model: first(opts.Model, cfg.Model), MaskedKey: security.Mask(cfg.APIKey), Status: domain.JobQueued, Phase: phase, StartedAt: now}
+	job := domain.Job{ID: id, Mode: opts.Mode, RunOnce: opts.RunOnce, CLI: opts.CLI, ProviderID: cfg.ProviderID, ProviderName: cfg.ProviderName, Provider: cfg.Provider, Target: sanitizeTarget(cfg.BaseURL), Model: first(opts.Model, cfg.Model), ScenarioID: opts.ScenarioID, ScenarioName: opts.ScenarioName, MaskedKey: security.Mask(cfg.APIKey), Status: domain.JobQueued, Phase: phase, StartedAt: now}
 	rt := &runtime{job: job, opts: opts, cfg: cfg, lock: lock, ctx: ctx, cancel: cancel, subscribers: map[chan domain.Event]struct{}{}, scheduleID: scheduleID, occurrenceKey: occurrenceKey}
 	m.mu.Lock()
 	if m.closing {
@@ -256,6 +294,7 @@ func (m *Manager) run(rt *runtime) {
 		m.publishLocked(rt, "attempt_start", fmt.Sprintf("第 %d 次调用", attempt), map[string]any{"attempt": attempt})
 		m.publishLocked(rt, "request_start", "请求开始", map[string]any{
 			"requestId": requestID, "attempt": attempt, "mode": rt.opts.Mode,
+			"scenarioId": rt.opts.ScenarioID, "scenarioName": rt.opts.ScenarioName, "assertionType": rt.opts.AssertionType,
 			"cli": rt.opts.CLI, "providerId": rt.job.ProviderID, "target": rt.cfg.BaseURL,
 			"proxyMode": rt.cfg.ProxyMode, "startedAt": requestStarted,
 			"triggerSource": triggerSource, "clientIP": rt.opts.ClientIP, "phase": rt.job.Phase,
@@ -271,13 +310,13 @@ func (m *Manager) run(rt *runtime) {
 		})
 		cancel()
 		if err != nil {
-			m.publish(rt, "request_end", "请求启动失败", map[string]any{"requestId": requestID, "attempt": attempt, "status": "start_failed", "error": err.Error(), "durationMillis": time.Since(requestStarted).Milliseconds(), "startedAt": requestStarted, "endedAt": time.Now().UTC(), "cli": rt.opts.CLI, "providerId": rt.job.ProviderID, "triggerSource": triggerSource, "phase": rt.job.Phase, "model": first(rt.opts.Model, rt.cfg.Model)})
+			m.publish(rt, "request_end", "请求启动失败", map[string]any{"requestId": requestID, "attempt": attempt, "status": "start_failed", "scenarioId": rt.opts.ScenarioID, "scenarioName": rt.opts.ScenarioName, "assertionType": rt.opts.AssertionType, "errorStage": "launch", "errorType": "start_failed", "retryable": false, "error": err.Error(), "durationMillis": time.Since(requestStarted).Milliseconds(), "startedAt": requestStarted, "endedAt": time.Now().UTC(), "cli": rt.opts.CLI, "providerId": rt.job.ProviderID, "triggerSource": triggerSource, "phase": rt.job.Phase, "model": first(rt.opts.Model, rt.cfg.Model)})
 			m.publish(rt, "error", "CLI 启动失败", map[string]any{"error": err.Error(), "requestId": requestID})
 			m.clearOutput(rt)
 			m.finish(rt, domain.JobFailed, domain.AttemptFatal, "任务执行失败")
 			return
 		}
-		state := classify.Result(rt.opts.CLI, res.ExitCode, res.Output, rt.opts.Expected, res.TimedOut, res.Stopped)
+		state := classify.ResultWithAssertion(rt.opts.CLI, res.ExitCode, res.Output, rt.opts.AssertionType, rt.opts.Expected, res.TimedOut, res.Stopped)
 		if res.StartedAt.IsZero() {
 			res.StartedAt = requestStarted
 		}
@@ -304,8 +343,12 @@ func (m *Manager) run(rt *runtime) {
 			nextAttemptAt = &next
 		}
 		errorType := ""
+		errorStage := ""
+		retryable := false
 		if state != domain.AttemptSuccess {
 			errorType = string(state)
+			errorStage = "execution"
+			retryable = state != domain.AttemptStopped && state != domain.AttemptFatal
 		}
 		responseExcerpt := safeOutputExcerpt(res.Output, rt)
 		errorMessage := ""
@@ -319,7 +362,7 @@ func (m *Manager) run(rt *runtime) {
 				}
 			}
 		}
-		m.publish(rt, "request_end", "请求结束", map[string]any{"requestId": requestID, "attempt": attempt, "status": requestStatus, "durationMillis": res.DurationMillis, "startedAt": res.StartedAt, "endedAt": res.EndedAt, "exitCode": res.ExitCode, "classification": state, "cli": rt.opts.CLI, "providerId": rt.job.ProviderID, "triggerSource": triggerSource, "phase": rt.job.Phase, "model": first(rt.opts.Model, rt.cfg.Model), "cliExecutable": res.CLIExecutable, "cliVersion": res.CLIVersion, "nextAttemptAt": nextAttemptAt, "errorType": errorType, "error": errorMessage, "responseExcerpt": responseExcerpt})
+		m.publish(rt, "request_end", "请求结束", map[string]any{"requestId": requestID, "attempt": attempt, "status": requestStatus, "scenarioId": rt.opts.ScenarioID, "scenarioName": rt.opts.ScenarioName, "assertionType": rt.opts.AssertionType, "durationMillis": res.DurationMillis, "startedAt": res.StartedAt, "endedAt": res.EndedAt, "exitCode": res.ExitCode, "classification": state, "cli": rt.opts.CLI, "providerId": rt.job.ProviderID, "triggerSource": triggerSource, "phase": rt.job.Phase, "model": first(rt.opts.Model, rt.cfg.Model), "cliExecutable": res.CLIExecutable, "cliVersion": res.CLIVersion, "nextAttemptAt": nextAttemptAt, "errorStage": errorStage, "errorType": errorType, "retryable": retryable, "error": errorMessage, "responseExcerpt": responseExcerpt})
 		m.mu.Lock()
 		rt.job.LatestAttempt = state
 		m.clearOutputLocked(rt)
@@ -541,7 +584,11 @@ func (m *Manager) notify(job domain.Job, attempt domain.AttemptStatus) {
 			<-m.notificationSlots
 			m.notificationWG.Done()
 		}()
-		_ = notifier.Notify(context.Background(), job, attempt)
+		if routed, ok := notifier.(routedJobNotifier); ok {
+			_ = routed.NotifyRouted(context.Background(), "job_notification", job, attempt)
+		} else {
+			_ = notifier.Notify(context.Background(), job, attempt)
+		}
 	}()
 }
 
@@ -591,6 +638,14 @@ func (m *Manager) publishLocked(rt *runtime, typ, msg string, data map[string]an
 			}
 			safeEvent.Data["scheduleId"] = rt.scheduleID
 		}
+		if typ == "request_end" && rt.opts.ProviderGroupID != "" {
+			safeEvent.Data["providerGroupId"] = rt.opts.ProviderGroupID
+			if groups, ok := m.store.(store.ProviderGroupStore); ok {
+				if group, err := groups.GetProviderGroup(rt.opts.ProviderGroupID); err == nil {
+					safeEvent.Data["maintenanceActive"] = domain.ProviderGroupMaintenanceActive(group, e.At)
+				}
+			}
+		}
 		value := store.Event{At: e.At, Type: typ, Level: level, ProviderID: rt.job.ProviderID, JobID: rt.job.ID, ScheduleID: rt.scheduleID, Message: safeEvent.Message, Data: safeEvent.Data}
 		operationalEvent = &value
 	}
@@ -606,6 +661,10 @@ func (m *Manager) publishLocked(rt *runtime, typ, msg string, data map[string]an
 	}
 	if item.operationalEvent != nil || item.jobEvent != nil {
 		m.eventQueue <- item
+	}
+	if operationalEvent != nil && operationalEvent.Type == "request_end" {
+		m.queueFailoverEvaluation(*operationalEvent)
+		m.queueIncidentEvaluation(*operationalEvent)
 	}
 }
 
@@ -776,6 +835,12 @@ func (m *Manager) SetSettings(v domain.Settings) error {
 	}
 	if v.ReliabilityAlertMinSamples < 1 || v.ReliabilityAlertMinSamples > 10000 || v.ReliabilityAlertSuccessRate < 1 || v.ReliabilityAlertSuccessRate > 100 || v.ReliabilityAlertConsecutiveFailures < 1 || v.ReliabilityAlertConsecutiveFailures > 10000 || v.ReliabilityAlertP95Millis < 0 || v.ReliabilityAlertP95Millis > 86_400_000 || v.ReliabilityAlertCooldownSeconds < 0 || v.ReliabilityAlertCooldownSeconds > 604800 || v.ReliabilityAlertRecoverySuccesses < 1 || v.ReliabilityAlertRecoverySuccesses > 10000 {
 		return errors.New("invalid reliability alert settings")
+	}
+	if v.ReliabilityDigestHour < 0 || v.ReliabilityDigestHour > 23 || v.ReliabilityDigestMinute < 0 || v.ReliabilityDigestMinute > 59 || (v.ReliabilityDigestRange != "24h" && v.ReliabilityDigestRange != "7d" && v.ReliabilityDigestRange != "30d") {
+		return errors.New("invalid reliability digest settings")
+	}
+	if _, err := time.LoadLocation(v.ReliabilityDigestTimezone); err != nil {
+		return errors.New("invalid reliability digest timezone")
 	}
 	if v.TimeoutSeconds < 1 || v.RetryIntervalSeconds < minRetryIntervalSeconds || v.KeepaliveIntervalSeconds < 1 || v.HistoryLimit < 1 {
 		return errors.New("invalid settings")
@@ -1011,6 +1076,18 @@ func normalizedSettings(v domain.Settings) domain.Settings {
 	}
 	if v.ReliabilityAlertRecoverySuccesses < 1 {
 		v.ReliabilityAlertRecoverySuccesses = defaults.ReliabilityAlertRecoverySuccesses
+	}
+	if v.ReliabilityDigestHour < 0 || v.ReliabilityDigestHour > 23 {
+		v.ReliabilityDigestHour = defaults.ReliabilityDigestHour
+	}
+	if v.ReliabilityDigestMinute < 0 || v.ReliabilityDigestMinute > 59 {
+		v.ReliabilityDigestMinute = defaults.ReliabilityDigestMinute
+	}
+	if _, err := time.LoadLocation(v.ReliabilityDigestTimezone); err != nil {
+		v.ReliabilityDigestTimezone = defaults.ReliabilityDigestTimezone
+	}
+	if v.ReliabilityDigestRange != "24h" && v.ReliabilityDigestRange != "7d" && v.ReliabilityDigestRange != "30d" {
+		v.ReliabilityDigestRange = defaults.ReliabilityDigestRange
 	}
 	if v.HistoryLimit < 1 {
 		v.HistoryLimit = defaults.HistoryLimit

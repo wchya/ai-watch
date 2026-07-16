@@ -1,6 +1,7 @@
 package classify
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 
@@ -19,6 +20,10 @@ var patterns = map[domain.CLI]struct{ fatal, overload *regexp.Regexp }{
 }
 
 func Result(cli domain.CLI, exitCode int, output, expected string, timedOut, stopped bool) domain.AttemptStatus {
+	return ResultWithAssertion(cli, exitCode, output, "contains", expected, timedOut, stopped)
+}
+
+func ResultWithAssertion(cli domain.CLI, exitCode int, output, assertionType, expected string, timedOut, stopped bool) domain.AttemptStatus {
 	if stopped {
 		return domain.AttemptStopped
 	}
@@ -32,8 +37,33 @@ func Result(cli domain.CLI, exitCode int, output, expected string, timedOut, sto
 	if p.overload != nil && p.overload.MatchString(output) {
 		return domain.AttemptOverloaded
 	}
-	if exitCode == 0 && strings.Contains(output, expected) {
+	if exitCode == 0 && assertionMatches(output, assertionType, expected) {
 		return domain.AttemptSuccess
 	}
 	return domain.AttemptUnmatched
+}
+
+func assertionMatches(output, assertionType, expected string) bool {
+	switch assertionType {
+	case "exact":
+		return strings.TrimSpace(output) == strings.TrimSpace(expected)
+	case "regex":
+		pattern, err := regexp.Compile(expected)
+		return err == nil && pattern.MatchString(output)
+	case "json":
+		trimmed := strings.TrimSpace(output)
+		var value any
+		if json.Unmarshal([]byte(trimmed), &value) == nil {
+			_, object := value.(map[string]any)
+			return object
+		}
+		start, end := strings.Index(trimmed, "{"), strings.LastIndex(trimmed, "}")
+		if start < 0 || end <= start || json.Unmarshal([]byte(trimmed[start:end+1]), &value) != nil {
+			return false
+		}
+		_, object := value.(map[string]any)
+		return object
+	default:
+		return strings.Contains(output, expected)
+	}
 }

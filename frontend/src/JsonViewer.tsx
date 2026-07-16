@@ -39,7 +39,8 @@ export function JSONValuePreview({ raw, compact = false }: { raw: string; compac
   }
 
   if (!parsed.isJSON) {
-    return <div className={`value-preview text ${open ? 'open' : ''}`}>
+    const numeric = raw.trim() !== '' && Number.isFinite(Number(raw.trim()))
+    return <div className={`value-preview text ${numeric ? 'numeric' : ''} ${open ? 'open' : ''}`}>
       <button className="value-preview-main" onClick={() => setOpen(current => !current)} title={raw}><code>{raw || '空字符串'}</code></button>
       <button className="value-copy" onClick={() => void copy()} aria-label="复制原始值">{copied ? <Check/> : <Copy/>}</button>
     </div>

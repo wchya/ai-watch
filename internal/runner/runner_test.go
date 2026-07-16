@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +49,33 @@ func TestRunTimeout(t *testing.T) {
 	if !res.TimedOut {
 		t.Fatalf("expected timeout: %+v", res)
 	}
+}
+
+func TestRunReapsBackgroundProcessAfterSuccessfulLeaderExit(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux process-group semantics are validated in the container build")
+	}
+	root := t.TempDir()
+	bin := filepath.Join(root, "codex")
+	readyFile := filepath.Join(root, "child.ready")
+	terminatedFile := filepath.Join(root, "child.terminated")
+	script := "#!/bin/sh\nsh -c 'trap \"\" HUP; trap \"touch " + terminatedFile + "; exit 0\" TERM; touch " + readyFile + "; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &\nwhile [ ! -f '" + readyFile + "' ]; do sleep 0.01; done\nprintf READY\n"
+	if err := os.WriteFile(bin, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	r := &Runner{CodexBin: bin, RuntimeDir: filepath.Join(root, "run"), MaxOutputBytes: 4096}
+	res, err := r.Run(context.Background(), "reap-child", domain.JobOptions{CLI: domain.CLICodex, Prompt: "probe"}, domain.ResolvedConfig{Source: "cc-switch", Provider: "openai", CodexConfig: "model_provider='openai'"}, nil)
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("run failed: result=%+v err=%v", res, err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, err = os.Stat(terminatedFile); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("background process did not receive termination after successful job completion")
 }
 
 func TestCodexRunPassesRequestedModel(t *testing.T) {

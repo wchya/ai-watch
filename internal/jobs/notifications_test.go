@@ -51,7 +51,7 @@ func TestNotificationAggregationIsBoundedAndTriggeredByCount(t *testing.T) {
 	m.notificationWG.Wait()
 }
 
-func TestRecoveryMergesProvidersAndManualStatusUsesMessageNotifier(t *testing.T) {
+func TestRecoveryMergesProviders(t *testing.T) {
 	n := &messageTestNotifier{messages: make(chan string, 2)}
 	m := &Manager{
 		notifier: n, notificationSlots: make(chan struct{}, 4),
@@ -67,17 +67,6 @@ func TestRecoveryMergesProvidersAndManualStatusUsesMessageNotifier(t *testing.T)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("merged recovery notification was not sent")
-	}
-	if err := m.SendStatusSummary(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case message := <-n.messages:
-		if !strings.Contains(message, "AI Watch 状态汇总") {
-			t.Fatalf("unexpected status summary: %s", message)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("manual status summary was not sent")
 	}
 	m.notificationWG.Wait()
 }

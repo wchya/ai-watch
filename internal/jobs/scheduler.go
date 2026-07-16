@@ -22,12 +22,18 @@ func (m *Manager) scheduleLoop() {
 	ticker := time.NewTicker(scheduleReconcileInterval)
 	defer ticker.Stop()
 	m.reconcileSchedules(time.Now().UTC())
+	m.reconcileProviderGroupRecovery(time.Now().UTC())
+	close(m.scheduleStarted)
 	for {
 		select {
 		case <-ticker.C:
-			m.reconcileSchedules(time.Now().UTC())
+			now := time.Now().UTC()
+			m.reconcileSchedules(now)
+			m.reconcileProviderGroupRecovery(now)
 		case <-m.scheduleWake:
-			m.reconcileSchedules(time.Now().UTC())
+			now := time.Now().UTC()
+			m.reconcileSchedules(now)
+			m.reconcileProviderGroupRecovery(now)
 		case <-m.ctx.Done():
 			return
 		}
@@ -48,6 +54,9 @@ func (m *Manager) ListSchedules() ([]domain.Schedule, error) {
 	}
 	now := time.Now().UTC()
 	for index := range values {
+		if resolved, resolveErr := m.scheduleWithActiveProvider(values[index]); resolveErr == nil {
+			values[index] = resolved
+		}
 		values[index].NextRunAt = nextScheduleRun(values[index], now)
 	}
 	return values, nil
@@ -75,6 +84,13 @@ func (m *Manager) UpsertSchedule(value domain.Schedule) (domain.Schedule, error)
 	}
 	if value.Timezone == "" {
 		value.Timezone = "Asia/Shanghai"
+	}
+	if value.ProviderGroupID != "" {
+		resolved, resolveErr := m.scheduleWithActiveProvider(value)
+		if resolveErr != nil {
+			return domain.Schedule{}, resolveErr
+		}
+		value.ProviderID = resolved.ProviderID
 	}
 	saved, err := m.store.UpsertSchedule(value)
 	if err != nil {
@@ -150,6 +166,16 @@ func (m *Manager) reconcileSchedules(now time.Time) {
 	activeIDs := make(map[string]bool, len(schedules))
 	candidates := make([]scheduleCandidate, 0, len(schedules))
 	for _, schedule := range schedules {
+		if schedule.ProviderGroupID != "" {
+			resolved, resolveErr := m.scheduleWithActiveProvider(schedule)
+			if resolveErr != nil {
+				if schedule.LastStatus != "resolve_failed" || schedule.LastOccurrenceAt == nil || now.Sub(*schedule.LastOccurrenceAt) >= 5*time.Minute {
+					_ = m.store.MarkScheduleRun(schedule.ID, occurrenceKeyForFailure(schedule, now), "resolve_failed", "", now)
+				}
+				continue
+			}
+			schedule = resolved
+		}
 		occurrence, active := scheduleOccurrence(schedule, now)
 		if !schedule.Enabled || !active {
 			m.stopScheduleJob(schedule.ID)
@@ -221,6 +247,34 @@ func (m *Manager) reconcileSchedules(now time.Time) {
 	}
 }
 
+func (m *Manager) scheduleWithActiveProvider(schedule domain.Schedule) (domain.Schedule, error) {
+	if schedule.ProviderGroupID == "" {
+		return schedule, nil
+	}
+	groups, ok := m.store.(store.ProviderGroupStore)
+	if !ok {
+		return domain.Schedule{}, errors.New("provider group store is unavailable")
+	}
+	group, err := groups.GetProviderGroup(schedule.ProviderGroupID)
+	if err != nil {
+		return domain.Schedule{}, err
+	}
+	if !group.Enabled || group.CLI != schedule.CLI {
+		return domain.Schedule{}, errors.New("provider group is disabled or incompatible with schedule cli")
+	}
+	schedule.ProviderID = group.ActiveProviderID
+	if schedule.ProviderID == "" {
+		schedule.ProviderID = group.PrimaryProviderID
+	}
+	schedule.ProviderName = group.Name
+	return schedule, nil
+}
+
+func occurrenceKeyForFailure(schedule domain.Schedule, now time.Time) string {
+	occurrence, _ := scheduleOccurrence(schedule, now)
+	return occurrence
+}
+
 func scheduleJobOptions(schedule domain.Schedule) domain.JobOptions {
 	return domain.JobOptions{
 		Mode: schedule.Mode, RunOnce: schedule.Mode == domain.ModeProbe && !schedule.UntilSuccess,
@@ -229,8 +283,8 @@ func scheduleJobOptions(schedule domain.Schedule) domain.JobOptions {
 		RetryIntervalSeconds:     schedule.RetryIntervalSeconds,
 		KeepaliveIntervalSeconds: schedule.KeepaliveIntervalSeconds,
 		FailureThreshold:         schedule.FailureThreshold, Model: schedule.Model,
-		FallbackModel: schedule.FallbackModel,
-		TriggerSource: "scheduler", ClientIP: "scheduler",
+		FallbackModel: schedule.FallbackModel, ScenarioID: schedule.ScenarioID,
+		TriggerSource: "scheduler", ClientIP: "scheduler", ProviderGroupID: schedule.ProviderGroupID,
 	}
 }
 

@@ -59,11 +59,25 @@ type Provider struct {
 	Model          string         `json:"model,omitempty"`
 	Historical     bool           `json:"historical"`
 	LastStatus     string         `json:"lastStatus,omitempty"`
+	LastRequestID  string         `json:"lastRequestId,omitempty"`
 	LastRequestAt  *time.Time     `json:"lastRequestAt,omitempty"`
 	LastSuccessAt  *time.Time     `json:"lastSuccessAt,omitempty"`
 	LastFailureAt  *time.Time     `json:"lastFailureAt,omitempty"`
 	Metrics        Metrics        `json:"metrics"`
 	Recommendation Recommendation `json:"recommendation"`
+	Remediation    *Remediation   `json:"remediation,omitempty"`
+}
+
+type Remediation struct {
+	ProviderGroupID   string        `json:"providerGroupId,omitempty"`
+	CanValidateBackup bool          `json:"canValidateBackup"`
+	Schedules         []ScheduleRef `json:"schedules"`
+}
+
+type ScheduleRef struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
 }
 
 type Recommendation struct {
@@ -101,6 +115,7 @@ type sample struct {
 	name        string
 	model       string
 	status      string
+	requestID   string
 	duration    int64
 	hasDuration bool
 }
@@ -175,6 +190,7 @@ func Build(reader EventReader, selectedRange string, now time.Time, activeProvid
 				at := item.at
 				provider.LastRequestAt = &at
 				provider.LastStatus = item.status
+				provider.LastRequestID = item.requestID
 			}
 			if item.status == "success" && provider.LastSuccessAt == nil {
 				at := item.at
@@ -341,7 +357,7 @@ func eventSample(event store.Event) (sample, bool) {
 		return sample{}, false
 	}
 	duration, hasDuration := int64Value(data["durationMillis"])
-	return sample{at: event.At.UTC(), providerKey: cli + ":" + keyID, cli: cli, providerID: providerID, name: stringValue(job["providerName"]), model: stringValue(job["model"]), status: status, duration: duration, hasDuration: hasDuration && duration >= 0}, true
+	return sample{at: event.At.UTC(), providerKey: cli + ":" + keyID, cli: cli, providerID: providerID, name: stringValue(job["providerName"]), model: stringValue(job["model"]), status: status, requestID: stringValue(data["requestId"]), duration: duration, hasDuration: hasDuration && duration >= 0}, true
 }
 
 func normalizeStatus(value string) string {

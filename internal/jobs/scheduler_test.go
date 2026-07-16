@@ -19,6 +19,23 @@ func (f resolverFunc) Resolve(cli domain.CLI, providerID string) (domain.Resolve
 	return f(cli, providerID)
 }
 
+func TestScheduleUsesProviderGroupActiveMember(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	group, err := st.UpsertProviderGroup(domain.ProviderGroup{ID: "codex-auto", Name: "Codex 自动组", CLI: domain.CLICodex, Enabled: true, PrimaryProviderID: "primary", BackupProviderIDs: []string{"backup"}, ActiveProviderID: "backup", Mode: "automatic", ScenarioID: "basic-ready", FailureThreshold: 3, RecoveryThreshold: 2, CooldownSeconds: 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(resolverFunc(func(domain.CLI, string) (domain.ResolvedConfig, error) { return domain.ResolvedConfig{}, nil }), execFunc(func(context.Context, string, domain.JobOptions, domain.ResolvedConfig, func(string)) (runner.Result, error) {
+		return runner.Result{}, nil
+	}), st)
+	defer m.Shutdown()
+	resolved, err := m.scheduleWithActiveProvider(domain.Schedule{CLI: domain.CLICodex, ProviderID: "primary", ProviderGroupID: group.ID})
+	if err != nil || resolved.ProviderID != "backup" || resolved.ProviderName != group.Name {
+		t.Fatalf("resolved=%+v err=%v", resolved, err)
+	}
+}
+
 func TestScheduleOccurrenceUsesGoWeekdayMaskAndSupportsOvernight(t *testing.T) {
 	base := domain.Schedule{
 		ID: "rule", Timezone: "Asia/Shanghai", WeekdaysMask: 62,
@@ -58,7 +75,11 @@ func TestScheduledProbeRunsOncePerOccurrence(t *testing.T) {
 	})
 	m := New(resolver, executor, st)
 	defer m.Shutdown()
-	time.Sleep(20 * time.Millisecond) // let the startup reconciliation finish
+	select {
+	case <-m.scheduleStarted:
+	case <-time.After(time.Second):
+		t.Fatal("startup schedule reconciliation did not finish")
+	}
 	schedule, err := st.UpsertSchedule(domain.Schedule{
 		ID: "probe-once", Name: "Probe once", Enabled: true, CLI: domain.CLICodex,
 		ProviderID: "provider-1", Mode: domain.ModeProbe, Timezone: "UTC",
@@ -103,11 +124,14 @@ func TestScheduledProbeRunsOncePerOccurrence(t *testing.T) {
 }
 
 func TestScheduleJobOptionsMapsProbeUntilSuccessToRunOnce(t *testing.T) {
-	once := scheduleJobOptions(domain.Schedule{Mode: domain.ModeProbe, UntilSuccess: false})
+	once := scheduleJobOptions(domain.Schedule{Mode: domain.ModeProbe, UntilSuccess: false, ProviderGroupID: "group-a"})
 	continuous := scheduleJobOptions(domain.Schedule{Mode: domain.ModeProbe, UntilSuccess: true})
 	keepalive := scheduleJobOptions(domain.Schedule{Mode: domain.ModeKeepalive, UntilSuccess: false})
 	if !once.RunOnce || continuous.RunOnce || keepalive.RunOnce {
 		t.Fatalf("unexpected schedule execution mapping: once=%+v continuous=%+v keepalive=%+v", once, continuous, keepalive)
+	}
+	if once.ProviderGroupID != "group-a" {
+		t.Fatalf("provider group attribution was not copied to job options: %+v", once)
 	}
 
 	now := time.Now().UTC()

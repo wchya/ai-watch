@@ -1,8 +1,26 @@
 export type Cli = 'codex' | 'claude'
 export type JobMode = 'probe' | 'keepalive'
-export type JobStatus = 'starting' | 'running' | 'success' | 'fatal' | 'stopped' | 'failed'
+export type JobStatus = 'queued' | 'starting' | 'running' | 'success' | 'fatal' | 'stopped' | 'failed'
 export type AttemptStatus = 'success' | 'timeout' | 'overloaded' | 'fatal' | 'unmatched' | 'stopped'
 export type JobPhase = 'probe' | 'keepalive' | 'recovery_probe'
+
+export type IncidentStatus = 'open' | 'acknowledged' | 'muted' | 'resolved'
+export interface IncidentEntry { id: string; at: string; type: string; message: string; requestId: string; jobId?: string; data?: Record<string, unknown> }
+export interface Incident {
+  id: string; subjectType: 'provider' | 'group'; subjectId: string; subjectName?: string; providerId?: string; groupId?: string
+  title: string; summary?: string; status: IncidentStatus; severity: 'warning' | 'critical'; failureCount: number
+  errorCounts?: Record<string, number>; jobIds?: string[]; requestIds?: string[]; timeline: IncidentEntry[]; note?: string
+  startedAt: string; updatedAt: string; acknowledgedAt?: string; mutedUntil?: string; resolvedAt?: string
+}
+
+export interface PostmortemAction { text: string; owner?: string; completed: boolean }
+export interface IncidentPostmortem {
+  incidentId: string; status: 'draft' | 'completed'; title: string; subject: string; severity: 'warning' | 'critical'
+  startedAt: string; resolvedAt?: string; durationSeconds: number; failureCount: number; errorCounts: Record<string, number>
+  jobIds: string[]; requestIds: string[]; timeline: IncidentEntry[]; recoverySummary: string
+  rootCause: string; mitigation: string; owner: string; actions: PostmortemAction[]
+  createdAt: string; updatedAt: string; completedAt?: string
+}
 
 export interface HealthItem {
   id: string
@@ -82,6 +100,11 @@ export interface DingTalkConfigWrite {
   clearStored?: boolean
 }
 
+export type NotificationMessageType = 'incident_opened' | 'incident_recovered' | 'reliability_alert' | 'reliability_recovered' | 'reliability_digest' | 'job_notification'
+export interface NotificationChannel { id:string; name:string; description?:string; type:'dingtalk'; enabled:boolean; configured:boolean; maskedWebhook?:string; createdAt:string; updatedAt:string }
+export interface NotificationChannelWrite { id?:string; name:string; description?:string; type:'dingtalk'; enabled?:boolean; webhookUrl?:string }
+export interface NotificationRoutes { routes:Record<NotificationMessageType,string>; updatedAt?:string }
+
 export interface ProviderState {
   status: 'idle' | 'queued' | 'running' | 'recovering' | JobStatus
   phase?: JobPhase
@@ -97,18 +120,135 @@ export interface ProviderState {
   nextScheduledAt?: string
 }
 
-export interface ProviderExample {
+export interface TestScenario {
   id: string
   name: string
-  cli: Cli
-  baseUrl?: string
-  model?: string
-  provider?: string
   description?: string
+  cli?: Cli | ''
+  enabled: boolean
+  prompt: string
+  assertionType: 'contains' | 'exact' | 'regex' | 'json'
+  expected?: string
+  timeoutSeconds?: number
+  builtIn?: boolean
+  createdAt?: string
   updatedAt?: string
 }
 
-export type ProviderExampleWriteRequest = Omit<ProviderExample, 'updatedAt'>
+export type TestScenarioWriteRequest = Omit<TestScenario, 'builtIn' | 'createdAt' | 'updatedAt'>
+
+export interface ScenarioComparisonItem {
+  providerId: string
+  providerName?: string
+  jobId?: string
+  requestId?: string
+  status: string
+  durationMillis?: number
+  errorType?: string
+  error?: string
+  responseExcerpt?: string
+  startedAt?: string
+  endedAt?: string
+}
+
+export interface ScenarioComparison {
+  id: string
+  scenarioId: string
+  scenarioName: string
+  cli: Cli
+  status: 'running' | 'completed' | 'partial_failed'
+  createdAt: string
+  items: ScenarioComparisonItem[]
+}
+
+export interface ScenarioComparisonListResult {
+  items: ScenarioComparison[]
+  total: number
+  retentionLimited: boolean
+}
+
+export interface FailoverAdvice {
+  status: 'validating' | 'open' | 'recovered' | string
+  primaryRequestId?: string
+  suggestedProviderId?: string
+  validationJobId?: string
+  validationRequestId?: string
+  reason?: string
+  createdAt: string
+  updatedAt: string
+  recoveredAt?: string
+  appliedAt?: string
+}
+
+export interface ProviderFailoverGroup {
+  id: string
+  name: string
+  cli: Cli
+  enabled: boolean
+  primaryProviderId: string
+  backupProviderIds: string[]
+  scenarioId: string
+  failureThreshold: number
+  cooldownSeconds: number
+  mode: 'advisory' | 'automatic'
+  activeProviderId: string
+  recoveryThreshold: number
+  recoveryProbeIntervalSeconds: number
+  lastRecoveryProbeAt?: string
+  lastRecoveryProbeStatus?: string
+  maintenanceStartsAt?: string
+  maintenanceUntil?: string
+  sloEnabled?: boolean
+  sloTargetPercent?: number
+  sloWindow?: '24h' | '7d' | '30d'
+  sloMinimumSamples?: number
+  lastSwitchedAt?: string
+  advice?: FailoverAdvice
+  createdAt?: string
+  updatedAt?: string
+}
+
+export type ProviderFailoverGroupWrite = Omit<ProviderFailoverGroup, 'advice' | 'lastRecoveryProbeAt' | 'lastRecoveryProbeStatus' | 'createdAt' | 'updatedAt'>
+
+export interface MaintenanceWindow {
+  groupId: string
+  groupName: string
+  cli: Cli
+  mode: 'advisory' | 'automatic'
+  activeProviderId: string
+  maintenanceStartsAt?: string
+  maintenanceUntil?: string
+  status: 'none' | 'scheduled' | 'active' | 'ended'
+  notificationsMuted: boolean
+  failoverSuppressed: boolean
+}
+
+export interface ServiceLevelObjective {
+  groupId: string; groupName: string; cli: Cli; enabled: boolean; targetPercent: number; window: '24h' | '7d' | '30d'; minimumSamples: number
+  status: 'disabled' | 'insufficient' | 'healthy' | 'burning' | 'critical' | 'exhausted'
+  samples: number; successes: number; failures: number; excluded: number; successRate: number; allowedFailures: number
+  remainingBudget: number; consumedPercent: number; burnRate: number; windowStartedAt: string
+}
+
+export interface ProviderGroupEvaluation {
+  groupId: string
+  mode: 'advisory' | 'automatic'
+  activeProviderId: string
+  candidateProviderId: string
+  recommendation: 'validating'
+  job: JobSummary
+  hostConfigChanged: false
+}
+
+export interface ProviderGroupSwitchResult {
+  groupId: string
+  previousProviderId: string
+  activeProviderId: string
+  validationRequestId?: string
+  affectedScheduleCount: number
+  switched: boolean
+  hostConfigChanged: false
+}
 
 export interface JobSummary {
   id: string
@@ -118,6 +258,8 @@ export interface JobSummary {
   providerId?: string
   providerName?: string
   model?: string
+  scenarioId?: string
+  scenarioName?: string
   status: JobStatus
   phase?: JobPhase
   lastAttemptStatus?: AttemptStatus
@@ -149,6 +291,7 @@ export interface JobOptions {
   fallbackModel?: string
   sessionName?: string
   notifyOnComplete: boolean
+  scenarioId?: string
 }
 
 export interface StartJobRequest {
@@ -178,10 +321,17 @@ export interface AppSettings {
   reliabilityAlertCooldownSeconds: number
   reliabilityAlertRecoverySuccesses: number
   reliabilityAlertRecoveryEnabled: boolean
+  reliabilityDigestEnabled: boolean
+  reliabilityDigestHour: number
+  reliabilityDigestMinute: number
+  reliabilityDigestTimezone: string
+  reliabilityDigestRange: ReliabilityRange
   browserNotifications: boolean
   dingTalkConfigured: boolean
   uiTheme: 'deep-ocean' | 'graphite-signal' | 'arctic-daylight'
 }
+
+export interface ReliabilityDigestPreview { title: string; content: string; range: ReliabilityRange; generatedAt: string }
 
 export interface JobEvent {
   id?: string
@@ -205,6 +355,55 @@ export interface OperationalEvent {
   scheduleId?: string
   message?: string
   data?: Record<string, unknown>
+}
+
+export interface RequestDetail {
+  requestId: string
+  jobId?: string
+  scheduleId?: string
+  providerId?: string
+  attempt?: number
+  mode?: string
+  phase?: string
+  cli?: Cli
+  model?: string
+  provider?: string
+  configSource?: string
+  triggerSource?: string
+  clientIP?: string
+  target?: string
+  targetHost?: string
+  targetPort?: string
+  dnsIPs?: string[]
+  dnsError?: string
+  proxyMode?: string
+  proxyEndpoint?: string
+  cliExecutable?: string
+  cliVersion?: string
+  status: string
+  classification?: string
+  startedAt: string
+  endedAt?: string
+  durationMillis?: number
+  exitCode?: number
+  errorStage?: string
+  errorType?: string
+  error?: string
+  retryable?: boolean
+  responseExcerpt?: string
+  nextAttemptAt?: string
+  input: {
+    promptBytes?: number
+    promptSHA256?: string
+    timeoutSeconds?: number
+    runOnce: boolean
+    codexRequestRetries?: number
+    codexStreamRetries?: number
+    claudeMaxRetries?: number
+    fallbackModel?: string
+  }
+  complete: boolean
+  recommendation: string
 }
 
 export interface EventQuery {
@@ -276,7 +475,7 @@ export interface SystemDiagnostics {
   }
 }
 
-export type ScheduleLastStatus = JobStatus | 'idle' | 'skipped'
+export type ScheduleLastStatus = JobStatus | 'idle' | 'skipped' | 'queued'
 
 export interface Schedule {
   id: string
@@ -284,6 +483,7 @@ export interface Schedule {
   enabled: boolean
   cli: Cli
   providerId: string
+  providerGroupId?: string
   providerName?: string
   mode: JobMode
   timezone: string
@@ -297,6 +497,7 @@ export interface Schedule {
   failureThreshold: number
   model?: string
   fallbackModel?: string
+  scenarioId?: string
   lastOccurrenceAt?: string
   lastStatus?: ScheduleLastStatus
   lastJobId?: string
@@ -320,6 +521,7 @@ export type BulkJobAction = 'probe' | 'probe_once' | 'keepalive' | 'keepalive_on
 export interface BulkJobTarget {
   targetId: string
   scheduleId?: string
+  scenarioId?: string
   cli: Cli
   providerId: string
   timeoutSeconds?: number
@@ -350,82 +552,6 @@ export interface BulkJobResult {
 }
 
 export interface ApiErrorBody { error?: string; message?: string; code?: string }
-
-export type RedisDataType = 'string' | 'hash' | 'list' | 'set' | 'zset' | string
-
-export interface RedisOverview {
-  connected: boolean
-  version?: string
-  mode?: string
-  keyCount: number
-  usedMemoryBytes: number
-  usedMemoryHuman?: string
-  maxMemoryBytes: number
-  connectedClients: number
-  expiringKeys: number
-  hitRate: number
-  uptimeSeconds: number
-  latencyMs: number
-}
-
-export interface RedisKeySummary {
-  key: string
-  type: RedisDataType
-  ttlMillis: number
-  persistent: boolean
-  size: number
-  memoryBytes?: number
-}
-
-export interface RedisHashEntry { field: string; value: string }
-export interface RedisZSetEntry { member: string; score: number }
-
-export interface RedisKeyDetail extends RedisKeySummary {
-  encoding?: string
-  version: string
-  cursor?: string
-  nextCursor?: string
-  truncated?: boolean
-  value?: string | string[] | RedisHashEntry[] | RedisZSetEntry[]
-}
-
-export interface RedisKeyListResult {
-  keys: RedisKeySummary[]
-  cursor: string
-  nextCursor: string
-}
-
-export interface RedisPrewarmSnapshots {
-  settings: number
-  summaries: number
-  providerExamples: number
-  schedules: number
-  manualProviders: number
-  ccSwitchProviders: number
-  dingTalk: number
-}
-
-export interface RedisPrewarmResult {
-  durationMs: number
-  snapshots: RedisPrewarmSnapshots
-}
-
-export interface RedisMutationInput {
-  key: string
-  operation: string
-  version: string
-  confirmKey?: string
-  value?: string
-  field?: string
-  member?: string
-  score?: number
-  index?: number
-}
-
-export interface RedisMutationResult {
-  key: RedisKeyDetail
-  prewarm?: RedisPrewarmSnapshots
-}
 
 export type ReliabilityRange = '24h' | '7d' | '30d'
 
@@ -458,6 +584,7 @@ export interface ReliabilityProvider {
   model?: string
   historical: boolean
   lastStatus?: string
+  lastRequestId?: string
   lastRequestAt?: string
   lastSuccessAt?: string
   lastFailureAt?: string
@@ -467,6 +594,11 @@ export interface ReliabilityProvider {
     title: string
     reasons: string[]
     action: string
+  }
+  remediation?: {
+    providerGroupId?: string
+    canValidateBackup: boolean
+    schedules: Array<{ id: string; name: string; enabled: boolean }>
   }
 }
 

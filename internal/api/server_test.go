@@ -79,13 +79,13 @@ func TestHealthReturnsUnavailableWhenRedisStops(t *testing.T) {
 	}
 }
 
-func TestSettingsAcceptReliabilityAlertFields(t *testing.T) {
+func TestSettingsAcceptReliabilityFields(t *testing.T) {
 	st := store.New(t.TempDir())
 	defer st.Close()
 	manager := jobs.New(apiResolver{}, apiExecutor{}, st, nil)
 	defer manager.Shutdown()
 	handler := New(configscan.New(), manager, "", st).Handler()
-	body := `{"reliabilityAlertEnabled":true,"reliabilityAlertMinSamples":9,"reliabilityAlertSuccessRate":85,"reliabilityAlertConsecutiveFailures":4,"reliabilityAlertP95Millis":1200,"reliabilityAlertCooldownSeconds":600,"reliabilityAlertRecoverySuccesses":3,"reliabilityAlertRecoveryEnabled":false,"uiTheme":"graphite-signal"}`
+	body := `{"reliabilityAlertEnabled":true,"reliabilityAlertMinSamples":9,"reliabilityAlertSuccessRate":85,"reliabilityAlertConsecutiveFailures":4,"reliabilityAlertP95Millis":1200,"reliabilityAlertCooldownSeconds":600,"reliabilityAlertRecoverySuccesses":3,"reliabilityAlertRecoveryEnabled":false,"reliabilityDigestEnabled":true,"reliabilityDigestHour":18,"reliabilityDigestMinute":35,"reliabilityDigestTimezone":"Asia/Tokyo","reliabilityDigestRange":"7d","uiTheme":"graphite-signal"}`
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body)))
 	if recorder.Code != http.StatusOK {
@@ -95,8 +95,38 @@ func TestSettingsAcceptReliabilityAlertFields(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &saved); err != nil {
 		t.Fatal(err)
 	}
-	if !saved.ReliabilityAlertEnabled || saved.ReliabilityAlertMinSamples != 9 || saved.ReliabilityAlertSuccessRate != 85 || saved.ReliabilityAlertConsecutiveFailures != 4 || saved.ReliabilityAlertP95Millis != 1200 || saved.ReliabilityAlertCooldownSeconds != 600 || saved.ReliabilityAlertRecoverySuccesses != 3 || saved.ReliabilityAlertRecoveryEnabled || saved.UITheme != domain.UIThemeGraphiteSignal {
+	if !saved.ReliabilityAlertEnabled || saved.ReliabilityAlertMinSamples != 9 || saved.ReliabilityAlertSuccessRate != 85 || saved.ReliabilityAlertConsecutiveFailures != 4 || saved.ReliabilityAlertP95Millis != 1200 || saved.ReliabilityAlertCooldownSeconds != 600 || saved.ReliabilityAlertRecoverySuccesses != 3 || saved.ReliabilityAlertRecoveryEnabled || !saved.ReliabilityDigestEnabled || saved.ReliabilityDigestHour != 18 || saved.ReliabilityDigestMinute != 35 || saved.ReliabilityDigestTimezone != "Asia/Tokyo" || saved.ReliabilityDigestRange != "7d" || saved.UITheme != domain.UIThemeGraphiteSignal {
 		t.Fatalf("reliability settings were not saved: %+v", saved)
+	}
+}
+
+func TestRequestDetailAggregatesSafeRequestEvents(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := st.SaveEvent(store.Event{At: now, Type: "request_start", JobID: "job-1", ProviderID: "ray", Data: map[string]any{
+		"requestId": "request-1", "attempt": 2, "cli": "codex", "model": "gpt-test", "target": "https://example.test/v1", "proxyMode": "default", "startedAt": now,
+		"requestBody": map[string]any{"promptBytes": 12, "promptSHA256": "abcdef", "timeoutSeconds": 15, "runOnce": true, "expectedText": "SECRET-NOT-RETURNED"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	ended := now.Add(125 * time.Millisecond)
+	if err := st.SaveEvent(store.Event{At: ended, Type: "request_end", JobID: "job-1", ProviderID: "ray", Data: map[string]any{
+		"requestId": "request-1", "status": "success", "classification": "success", "durationMillis": 125, "exitCode": 0, "responseExcerpt": "READY", "endedAt": ended,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(configscan.New(), nil, "", st).Handler()
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/requests/request-1", nil))
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusOK || !strings.Contains(body, `"requestId":"request-1"`) || !strings.Contains(body, `"responseExcerpt":"READY"`) || !strings.Contains(body, `"complete":true`) || strings.Contains(body, "SECRET-NOT-RETURNED") {
+		t.Fatalf("request detail status=%d body=%s", recorder.Code, body)
+	}
+	notFound := httptest.NewRecorder()
+	handler.ServeHTTP(notFound, httptest.NewRequest(http.MethodGet, "/api/requests/missing", nil))
+	if notFound.Code != http.StatusNotFound || !strings.Contains(notFound.Body.String(), "request_not_found") {
+		t.Fatalf("missing status=%d body=%s", notFound.Code, notFound.Body.String())
 	}
 }
 
@@ -120,7 +150,7 @@ func TestDiagnosticsIsReadOnlyAndDoesNotExposeSensitivePathsOrOutput(t *testing.
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	body := w.Body.String()
-	if w.Code != http.StatusOK || !strings.Contains(body, `"schemaVersion":10`) || !strings.Contains(body, `"pathLabel":"codex-safe"`) || !strings.Contains(body, `"directoryEntries":1`) {
+	if w.Code != http.StatusOK || !strings.Contains(body, `"schemaVersion":18`) || !strings.Contains(body, `"pathLabel":"codex-safe"`) || !strings.Contains(body, `"directoryEntries":1`) {
 		t.Fatalf("diagnostics status=%d body=%s", w.Code, body)
 	}
 	for _, forbidden := range []string{root, "temporary-secret-name", "webhook", "apiKey", "DINGTALK_WEBHOOK_URL"} {
@@ -130,25 +160,118 @@ func TestDiagnosticsIsReadOnlyAndDoesNotExposeSensitivePathsOrOutput(t *testing.
 	}
 }
 
-func TestNotificationTestAndStatusReuseConfiguredNotifier(t *testing.T) {
+func TestNotificationTestUsesConfiguredNotifier(t *testing.T) {
 	st := store.New(t.TempDir())
 	defer st.Close()
-	n := &apiNotifier{messages: make(chan string, 2)}
+	n := &apiNotifier{messages: make(chan string, 1)}
 	manager := jobs.New(apiResolver{}, apiExecutor{}, st, n)
 	defer manager.Shutdown()
 	h := New(configscan.New(), manager, "", st).Handler()
-	for _, path := range []string{"/api/notifications/test", "/api/notifications/status"} {
-		r := httptest.NewRequest(http.MethodPost, path, nil)
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"sent":true`) {
-			t.Fatalf("%s: status=%d body=%s", path, w.Code, w.Body.String())
+	r := httptest.NewRequest(http.MethodPost, "/api/notifications/test", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"sent":true`) {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	select {
+	case <-n.messages:
+	case <-time.After(time.Second):
+		t.Fatal("notification test did not use notifier")
+	}
+}
+
+func TestTestScenarioCRUD(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	handler := New(nil, nil, "", st).Handler()
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/test-scenarios", nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "basic-ready") {
+		t.Fatalf("list scenarios status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	body := strings.NewReader(`{"id":"custom-json","name":"JSON test","enabled":true,"prompt":"return json","assertionType":"json"}`)
+	recorder = httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/test-scenarios", body)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "custom-json") {
+		t.Fatalf("save scenario status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodDelete, "/api/test-scenarios?id=custom-json", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("delete scenario status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestProviderGroupCRUD(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	manager := jobs.New(apiResolver{}, apiExecutor{}, st)
+	defer manager.Shutdown()
+	handler := New(configscan.New(), manager, "", st).Handler()
+	body := strings.NewReader(`{"id":"codex-main","name":"Codex 主备组","cli":"codex","enabled":true,"primaryProviderId":"primary","backupProviderIds":["backup"],"scenarioId":"basic-ready","failureThreshold":3,"cooldownSeconds":600,"mode":"automatic","recoveryThreshold":2}`)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/provider-groups", body))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"id":"codex-main"`) {
+		t.Fatalf("save status=%d body=%s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/provider-groups", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Codex 主备组") {
+		t.Fatalf("list status=%d body=%s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/provider-groups/codex-main/evaluate", nil))
+	if w.Code != http.StatusAccepted || !strings.Contains(w.Body.String(), `"mode":"automatic"`) || !strings.Contains(w.Body.String(), `"recommendation":"validating"`) || !strings.Contains(w.Body.String(), `"hostConfigChanged":false`) {
+		t.Fatalf("evaluate status=%d body=%s", w.Code, w.Body.String())
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		group, getErr := st.GetProviderGroup("codex-main")
+		if getErr == nil && group.ActiveProviderID == "backup" && group.Advice != nil && group.Advice.Status == "open" {
+			break
 		}
-		select {
-		case <-n.messages:
-		case <-time.After(time.Second):
-			t.Fatalf("%s did not use notifier", path)
-		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	group, err := st.GetProviderGroup("codex-main")
+	if err != nil || group.ActiveProviderID != "backup" || group.Advice == nil || group.Advice.Status != "open" {
+		t.Fatalf("automatic evaluation did not activate backup: group=%+v err=%v", group, err)
+	}
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/api/provider-groups?id=codex-main", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"deleted":true`) {
+		t.Fatalf("delete status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestApplyProviderGroupAdvice(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	manager := jobs.New(apiResolver{}, apiExecutor{}, st)
+	defer manager.Shutdown()
+	now := time.Now().UTC()
+	group, err := st.UpsertProviderGroup(domain.ProviderGroup{ID: "codex-advisory", Name: "Codex 建议组", CLI: domain.CLICodex, Enabled: true, PrimaryProviderID: "primary", BackupProviderIDs: []string{"backup"}, ActiveProviderID: "primary", ScenarioID: "basic-ready", Mode: "advisory", Advice: &domain.FailoverAdvice{Status: "open", SuggestedProviderID: "backup", ValidationJobID: "validation-job", ValidationRequestID: "validation-request", CreatedAt: now, UpdatedAt: now}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.UpsertSchedule(domain.Schedule{ID: "bound", Name: "绑定计划", Enabled: true, CLI: domain.CLICodex, ProviderID: "primary", ProviderGroupID: group.ID, Mode: domain.ModeProbe, Timezone: "UTC", WeekdaysMask: 127, StartMinute: 0, EndMinute: 1440, UntilSuccess: true, TimeoutSeconds: 5, RetryIntervalSeconds: 1, KeepaliveIntervalSeconds: 60, FailureThreshold: 3}); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(configscan.New(), manager, "", st).Handler()
+	payload := fmt.Sprintf(`{"suggestedProviderId":"backup","adviceUpdatedAt":%q,"confirmGroupId":"codex-advisory"}`, group.Advice.UpdatedAt.Format(time.RFC3339Nano))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/provider-groups/codex-advisory/apply-advice", strings.NewReader(payload)))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"activeProviderId":"backup"`) || !strings.Contains(w.Body.String(), `"affectedScheduleCount":1`) || !strings.Contains(w.Body.String(), `"hostConfigChanged":false`) {
+		t.Fatalf("apply status=%d body=%s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/provider-groups/codex-advisory/apply-advice", strings.NewReader(payload)))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"switched":false`) {
+		t.Fatalf("idempotent status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 
@@ -232,6 +355,14 @@ func TestReliabilityAggregatesRequestEventsAndRejectsInvalidRange(t *testing.T) 
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "invalid_reliability_range") {
 		t.Fatalf("invalid range status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
+	for _, format := range []string{"csv", "json"} {
+		recorder = httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/reliability/export?range=24h&format="+format, nil))
+		body = recorder.Body.String()
+		if recorder.Code != http.StatusOK || !strings.Contains(recorder.Header().Get("Content-Disposition"), "ai-watch-reliability-24h-") || strings.Contains(body, "private-response-sample") {
+			t.Fatalf("export %s status=%d headers=%v body=%s", format, recorder.Code, recorder.Header(), body)
+		}
+	}
 }
 
 func TestRequestClientIPUsesRemoteAddrOnly(t *testing.T) {
@@ -277,64 +408,6 @@ func TestEventsListPaginationAndValidation(t *testing.T) {
 	}
 }
 
-func TestProviderExamplesCRUDRejectsSecrets(t *testing.T) {
-	st := store.New(t.TempDir())
-	defer st.Close()
-	h := New(configscan.New(), nil, "", st).Handler()
-
-	r := httptest.NewRequest(http.MethodGet, "/api/provider-examples", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"id":"codex-openai-compatible"`) || !strings.Contains(w.Body.String(), `"id":"claude-anthropic-compatible"`) {
-		t.Fatalf("list provider examples: status=%d body=%s", w.Code, w.Body.String())
-	}
-
-	example := domain.ProviderExample{
-		ID: "custom-codex", Name: "Custom Codex", CLI: domain.CLICodex,
-		BaseURL: "https://example.test/v1", Model: "gpt-test", Provider: "custom",
-		Description: "Non-sensitive template",
-	}
-	body, err := json.Marshal(example)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r = httptest.NewRequest(http.MethodPost, "/api/provider-examples", strings.NewReader(string(body)))
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"id":"custom-codex"`) || !strings.Contains(w.Body.String(), `"updatedAt"`) {
-		t.Fatalf("save provider example: status=%d body=%s", w.Code, w.Body.String())
-	}
-
-	r = httptest.NewRequest(http.MethodPost, "/api/provider-examples", strings.NewReader(`{
-		"id":"leaky","name":"Leaky","cli":"codex","baseUrl":"https://example.test","apiKey":"sk-abcdefghijklmnop"
-	}`))
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "unknown field") {
-		t.Fatalf("secret field was not rejected: status=%d body=%s", w.Code, w.Body.String())
-	}
-	examples, err := st.ListProviderExamples()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(examples) != 3 {
-		t.Fatalf("invalid request changed provider examples: %+v", examples)
-	}
-
-	r = httptest.NewRequest(http.MethodDelete, "/api/provider-examples?id=custom-codex", nil)
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"deleted":true`) {
-		t.Fatalf("delete provider example: status=%d body=%s", w.Code, w.Body.String())
-	}
-	r = httptest.NewRequest(http.MethodDelete, "/api/provider-examples?id=custom-codex", nil)
-	w = httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("missing provider example status=%d body=%s", w.Code, w.Body.String())
-	}
-}
-
 func TestSchedulesCRUDRejectsRuntimeSecretsAndBulkIsItemized(t *testing.T) {
 	st := store.New(t.TempDir())
 	defer st.Close()
@@ -374,11 +447,11 @@ func TestSchedulesCRUDRejectsRuntimeSecretsAndBulkIsItemized(t *testing.T) {
 		t.Fatalf("list schedules: status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	bulk := `{"action":"probe_once","items":[{"targetId":"provider-2","cli":"codex","providerId":"provider-2"}]}`
+	bulk := `{"action":"probe_once","items":[{"targetId":"provider-2","cli":"codex","providerId":"provider-2","scenarioId":"basic-ready"}]}`
 	r = httptest.NewRequest(http.MethodPost, "/api/jobs/bulk", strings.NewReader(bulk))
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"accepted":1`) || !strings.Contains(w.Body.String(), `"failed":0`) || !strings.Contains(w.Body.String(), `"targetId":"provider-2"`) || !strings.Contains(w.Body.String(), `"runOnce":true`) {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"accepted":1`) || !strings.Contains(w.Body.String(), `"failed":0`) || !strings.Contains(w.Body.String(), `"targetId":"provider-2"`) || !strings.Contains(w.Body.String(), `"runOnce":true`) || !strings.Contains(w.Body.String(), `"scenarioId":"basic-ready"`) {
 		t.Fatalf("bulk jobs: status=%d body=%s", w.Code, w.Body.String())
 	}
 
@@ -433,5 +506,44 @@ func TestScheduleAllowsCurrentProviderWithEmptyID(t *testing.T) {
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusCreated || !strings.Contains(w.Body.String(), `"providerId":""`) {
 		t.Fatalf("current provider schedule status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestScheduleCRUDPreservesProviderGroupBinding(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	manager := jobs.New(apiResolver{}, apiExecutor{}, st)
+	defer manager.Shutdown()
+	if _, err := st.UpsertProviderGroup(domain.ProviderGroup{
+		ID: "codex-main", Name: "Codex 主备组", CLI: domain.CLICodex, Enabled: true,
+		PrimaryProviderID: "primary", BackupProviderIDs: []string{"backup"},
+		ActiveProviderID: "primary", ScenarioID: "basic-ready", Mode: "advisory",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := New(configscan.New(), manager, "", st).Handler()
+	body := `{"name":"主备计划","enabled":false,"cli":"codex","providerId":"primary","providerGroupId":"codex-main","mode":"probe","timezone":"UTC","weekdaysMask":127,"startMinute":0,"endMinute":1,"untilSuccess":true,"timeoutSeconds":15,"retryIntervalSeconds":2,"keepaliveIntervalSeconds":120,"failureThreshold":3}`
+	r := httptest.NewRequest(http.MethodPost, "/api/schedules", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusCreated || !strings.Contains(w.Body.String(), `"providerGroupId":"codex-main"`) {
+		t.Fatalf("create provider group schedule: status=%d body=%s", w.Code, w.Body.String())
+	}
+	var created domain.Schedule
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil || created.ID == "" {
+		t.Fatalf("decode provider group schedule: value=%+v err=%v", created, err)
+	}
+
+	enabledBody := strings.Replace(body, `"enabled":false`, `"enabled":true`, 1)
+	r = httptest.NewRequest(http.MethodPut, "/api/schedules/"+created.ID, strings.NewReader(enabledBody))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"providerGroupId":"codex-main"`) {
+		t.Fatalf("enable provider group schedule: status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	values, err := st.ListSchedules()
+	if err != nil || len(values) != 1 || !values[0].Enabled || values[0].ProviderGroupID != "codex-main" {
+		t.Fatalf("provider group binding not persisted: values=%+v err=%v", values, err)
 	}
 }

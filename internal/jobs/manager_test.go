@@ -222,6 +222,38 @@ func TestRequestEventsHaveUniquePairedIDsAndStructuredResult(t *testing.T) {
 	}
 }
 
+func TestJobResolvesSyntheticScenarioAtStart(t *testing.T) {
+	st := store.New(t.TempDir())
+	defer st.Close()
+	_, err := st.UpsertTestScenario(domain.TestScenario{ID: "scenario-exact", Name: "Exact READY", CLI: domain.CLICodex, Enabled: true, Prompt: "synthetic prompt", AssertionType: "exact", Expected: "READY", TimeoutSeconds: 22})
+	if err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan domain.JobOptions, 1)
+	executor := execFunc(func(_ context.Context, _ string, opts domain.JobOptions, _ domain.ResolvedConfig, _ func(string)) (runner.Result, error) {
+		received <- opts
+		return runner.Result{Output: "READY\n", ExitCode: 0}, nil
+	})
+	m := New(fakeResolver{domain.ResolvedConfig{BaseURL: "https://example.test/v1"}}, executor, st)
+	defer m.Shutdown()
+	job, err := m.Start(domain.JobOptions{Mode: domain.ModeProbe, RunOnce: true, CLI: domain.CLICodex, ScenarioID: "scenario-exact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := waitDone(t, m, job.ID)
+	if done.Status != domain.JobSuccess || done.ScenarioID != "scenario-exact" || done.ScenarioName != "Exact READY" {
+		t.Fatalf("unexpected scenario job: %+v", done)
+	}
+	select {
+	case opts := <-received:
+		if opts.Prompt != "synthetic prompt" || opts.Expected != "READY" || opts.AssertionType != "exact" || opts.TimeoutSeconds != 22 {
+			t.Fatalf("scenario was not resolved into runtime options: %+v", opts)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scenario job was not executed")
+	}
+}
+
 func TestRunOnceFinishesAfterExactlyOneAttempt(t *testing.T) {
 	tests := []struct {
 		name        string

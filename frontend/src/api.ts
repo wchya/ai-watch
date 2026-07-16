@@ -1,10 +1,9 @@
 import type {
-  AppSettings, BulkJobRequest, BulkJobResult, DashboardData, EventListResult, EventQuery,
-  DingTalkConfig, DingTalkConfigWrite, JobEvent, JobPhase, JobStatus, JobSummary, ManualProvider, ManualProviderWrite, OperationalEvent, Provider, ProviderExample,
-  ProviderExampleWriteRequest, Schedule, ScheduleListResult, ScheduleWriteRequest, StartJobRequest,
-  SystemDiagnostics, RedisKeyDetail, RedisKeyListResult, RedisMutationInput, RedisMutationResult,
-  RedisOverview, RedisPrewarmResult,
-  ReliabilityData, ReliabilityRange,
+  AppSettings, BulkJobRequest, BulkJobResult, Cli, DashboardData, EventListResult, EventQuery,
+  DingTalkConfig, DingTalkConfigWrite, Incident, IncidentPostmortem, IncidentStatus, JobEvent, JobPhase, JobStatus, JobSummary, MaintenanceWindow, ManualProvider, ManualProviderWrite, NotificationChannel, NotificationChannelWrite, NotificationRoutes, OperationalEvent, PostmortemAction, Provider, ProviderFailoverGroup, ProviderFailoverGroupWrite, ProviderGroupEvaluation, ProviderGroupSwitchResult, ServiceLevelObjective,
+  ScenarioComparison, ScenarioComparisonListResult, Schedule, ScheduleListResult, ScheduleWriteRequest, StartJobRequest, TestScenario, TestScenarioWriteRequest,
+  SystemDiagnostics,
+  ReliabilityData, ReliabilityRange, ReliabilityDigestPreview, RequestDetail,
 } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '/api'
@@ -35,11 +34,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
+async function requestText(path: string): Promise<string> {
+  const response = await fetch(`${API_BASE}${path}`)
+  if (!response.ok) throw new ApiError(`请求失败 (${response.status})`, response.status)
+  return response.text()
+}
+
 interface RawProvider { id: string; name: string; cli: 'codex' | 'claude'; current: boolean; enabled?: boolean; model?: string; baseUrl?: string; maskedKey?: string; proxyMode?: Provider['proxyMode']; hasProxyUrl?: boolean; maskedProxyUrl?: string; state?: Provider['state'] }
 interface RawJob {
   id: string; mode: 'probe' | 'keepalive'; cli: 'codex' | 'claude'; providerId?: string;
   runOnce?: boolean;
-  providerName?: string; model?: string; status: string; phase?: JobPhase; latestAttempt?: JobSummary['lastAttemptStatus'];
+  providerName?: string; model?: string; scenarioId?: string; scenarioName?: string; status: string; phase?: JobPhase; latestAttempt?: JobSummary['lastAttemptStatus'];
   attempts: number; startedAt: string; endedAt?: string; nextAttemptAt?: string; elapsedMillis: number
 }
 interface RawSettings {
@@ -62,6 +67,11 @@ interface RawSettings {
   reliabilityAlertCooldownSeconds?: number
   reliabilityAlertRecoverySuccesses?: number
   reliabilityAlertRecoveryEnabled?: boolean
+  reliabilityDigestEnabled?: boolean
+  reliabilityDigestHour?: number
+  reliabilityDigestMinute?: number
+  reliabilityDigestTimezone?: string
+  reliabilityDigestRange?: ReliabilityRange
   dingTalkConfigured?: boolean
   uiTheme?: AppSettings['uiTheme']
 }
@@ -94,6 +104,8 @@ interface RawSchedule {
   provider_id?: string
   providerName?: string
   provider_name?: string
+  providerGroupId?: string
+  provider_group_id?: string
   mode: 'probe' | 'keepalive'
   timezone: string
   weekdaysMask?: number
@@ -115,6 +127,8 @@ interface RawSchedule {
   model?: string
   fallbackModel?: string
   fallback_model?: string
+  scenarioId?: string
+  scenario_id?: string
   lastOccurrenceAt?: string
   last_occurrence_at?: string
   lastStatus?: Schedule['lastStatus']
@@ -132,7 +146,7 @@ interface RawSchedule {
 const normalizeStatus = (status: string): JobStatus => status === 'queued' ? 'starting' : status as JobStatus
 const normalizeJob = (job: RawJob): JobSummary => ({
   id: job.id, mode: job.mode, runOnce: job.runOnce, cli: job.cli, providerId: job.providerId, providerName: job.providerName,
-  model: job.model, status: normalizeStatus(job.status), phase: job.phase, lastAttemptStatus: job.latestAttempt,
+  model: job.model, scenarioId: job.scenarioId, scenarioName: job.scenarioName, status: normalizeStatus(job.status), phase: job.phase, lastAttemptStatus: job.latestAttempt,
   attemptCount: job.attempts, startedAt: job.startedAt, endedAt: job.endedAt,
   nextAttemptAt: job.nextAttemptAt, elapsedMs: job.elapsedMillis,
 })
@@ -156,6 +170,7 @@ const normalizeSchedule = (schedule: RawSchedule): Schedule => ({
   enabled: schedule.enabled,
   cli: schedule.cli,
   providerId: schedule.providerId ?? schedule.provider_id ?? '',
+  providerGroupId: schedule.providerGroupId ?? schedule.provider_group_id ?? '',
   providerName: schedule.providerName ?? schedule.provider_name,
   mode: schedule.mode,
   timezone: schedule.timezone || 'Asia/Shanghai',
@@ -169,6 +184,7 @@ const normalizeSchedule = (schedule: RawSchedule): Schedule => ({
   failureThreshold: schedule.failureThreshold ?? schedule.failure_threshold ?? 3,
   model: schedule.model,
   fallbackModel: schedule.fallbackModel ?? schedule.fallback_model,
+  scenarioId: schedule.scenarioId ?? schedule.scenario_id,
   lastOccurrenceAt: schedule.lastOccurrenceAt ?? schedule.last_occurrence_at,
   lastStatus: schedule.lastStatus ?? schedule.last_status,
   lastJobId: schedule.lastJobId ?? schedule.last_job_id,
@@ -202,7 +218,31 @@ export function normalizeEvent(raw: unknown): JobEvent {
 
 export const api = {
   diagnostics: () => request<SystemDiagnostics>('/diagnostics'),
+  requestDetail: (requestId: string) => request<RequestDetail>(`/requests/${encodeURIComponent(requestId)}`),
   reliability: (range: ReliabilityRange) => request<ReliabilityData>(`/reliability?range=${encodeURIComponent(range)}`),
+  reliabilityAction: (body: { cli: Cli; providerId: string; action: 'retest' | 'validate_backup' | 'pause_schedules' }) => request<Record<string, unknown>>('/reliability/actions', { method: 'POST', body: JSON.stringify(body) }),
+  async reliabilityExport(range: ReliabilityRange, format: 'csv' | 'json') {
+    const response = await fetch(`${API_BASE}/reliability/export?range=${encodeURIComponent(range)}&format=${format}`)
+    if (!response.ok) throw new ApiError(`报告导出失败 (${response.status})`, response.status)
+    const disposition = response.headers.get('Content-Disposition') || ''
+    const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || `ai-watch-reliability-${range}.${format}`
+    return { blob: await response.blob(), filename }
+  },
+  reliabilityDigestPreview: () => request<ReliabilityDigestPreview>('/reliability/digest/preview'),
+  reliabilityDigestSend: () => request<ReliabilityDigestPreview>('/reliability/digest/send', { method: 'POST' }),
+  incidents: (status?: IncidentStatus) => request<Incident[]>(`/incidents${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  incident: (id: string) => request<Incident>(`/incidents/${encodeURIComponent(id)}`),
+  acknowledgeIncident: (id: string) => request<Incident>(`/incidents/${encodeURIComponent(id)}/acknowledge`, { method: 'POST' }),
+  noteIncident: (id: string, note: string) => request<Incident>(`/incidents/${encodeURIComponent(id)}/note`, { method: 'POST', body: JSON.stringify({ note }) }),
+  muteIncident: (id: string, seconds: number) => request<Incident>(`/incidents/${encodeURIComponent(id)}/mute`, { method: 'POST', body: JSON.stringify({ seconds }) }),
+  closeIncident: (id: string) => request<Incident>(`/incidents/${encodeURIComponent(id)}/close`, { method: 'POST' }),
+  reopenIncident: (id: string) => request<Incident>(`/incidents/${encodeURIComponent(id)}/reopen`, { method: 'POST' }),
+  incidentPostmortem: (id: string) => request<IncidentPostmortem>(`/incidents/${encodeURIComponent(id)}/postmortem`),
+  createIncidentPostmortem: (id: string) => request<IncidentPostmortem>(`/incidents/${encodeURIComponent(id)}/postmortem`, { method: 'POST' }),
+  saveIncidentPostmortem: (id: string, body: { rootCause: string; mitigation: string; owner: string; actions: PostmortemAction[] }) => request<IncidentPostmortem>(`/incidents/${encodeURIComponent(id)}/postmortem`, { method: 'PUT', body: JSON.stringify(body) }),
+  completeIncidentPostmortem: (id: string) => request<IncidentPostmortem>(`/incidents/${encodeURIComponent(id)}/postmortem/complete`, { method: 'POST' }),
+  reopenIncidentPostmortem: (id: string) => request<IncidentPostmortem>(`/incidents/${encodeURIComponent(id)}/postmortem/reopen`, { method: 'POST' }),
+  incidentPostmortemMarkdown: (id: string) => requestText(`/incidents/${encodeURIComponent(id)}/postmortem/markdown`),
   async dashboard(): Promise<DashboardData> {
     const [health, config, rawProviders, rawJobs] = await Promise.all([
       request<{ status: string; version?: string }>('/health'),
@@ -239,7 +279,7 @@ export const api = {
       retryIntervalSeconds: o.retryIntervalSeconds, keepaliveIntervalSeconds: o.keepaliveIntervalSeconds,
       failureThreshold: body.mode === 'keepalive' ? o.failureThreshold : undefined,
       codexRequestRetries: o.requestMaxRetries, codexStreamRetries: o.streamMaxRetries,
-      model: o.model || undefined, fallbackModel: o.fallbackModel || undefined, sessionName: o.sessionName || undefined,
+      model: o.model || undefined, fallbackModel: o.fallbackModel || undefined, sessionName: o.sessionName || undefined, scenarioId: o.scenarioId || undefined,
     }
     return normalizeJob(await request<RawJob>('/jobs', { method: 'POST', body: JSON.stringify(payload) }))
   },
@@ -265,6 +305,11 @@ export const api = {
       reliabilityAlertCooldownSeconds: raw.reliabilityAlertCooldownSeconds ?? 1800,
       reliabilityAlertRecoverySuccesses: raw.reliabilityAlertRecoverySuccesses ?? 2,
       reliabilityAlertRecoveryEnabled: raw.reliabilityAlertRecoveryEnabled ?? true,
+      reliabilityDigestEnabled: raw.reliabilityDigestEnabled ?? false,
+      reliabilityDigestHour: raw.reliabilityDigestHour ?? 9,
+      reliabilityDigestMinute: raw.reliabilityDigestMinute ?? 0,
+      reliabilityDigestTimezone: raw.reliabilityDigestTimezone ?? 'Asia/Shanghai',
+      reliabilityDigestRange: raw.reliabilityDigestRange ?? '24h',
       browserNotifications: local.browserNotifications ?? false,
       dingTalkConfigured: raw.dingTalkConfigured ?? false,
       uiTheme: raw.uiTheme ?? 'deep-ocean',
@@ -289,6 +334,11 @@ export const api = {
         reliabilityAlertCooldownSeconds: body.reliabilityAlertCooldownSeconds,
         reliabilityAlertRecoverySuccesses: body.reliabilityAlertRecoverySuccesses,
         reliabilityAlertRecoveryEnabled: body.reliabilityAlertRecoveryEnabled,
+        reliabilityDigestEnabled: body.reliabilityDigestEnabled,
+        reliabilityDigestHour: body.reliabilityDigestHour,
+        reliabilityDigestMinute: body.reliabilityDigestMinute,
+        reliabilityDigestTimezone: body.reliabilityDigestTimezone,
+        reliabilityDigestRange: body.reliabilityDigestRange,
         uiTheme: body.uiTheme,
       }),
     })
@@ -316,9 +366,26 @@ export const api = {
     const result = await request<{ deleted?: number } | undefined>('/events', { method: 'DELETE' })
     return result?.deleted ?? 0
   },
-  providerExamples: () => request<ProviderExample[]>('/provider-examples'),
-  saveProviderExample: (body: ProviderExampleWriteRequest) => request<ProviderExample>('/provider-examples', { method: 'POST', body: JSON.stringify(body) }),
-  deleteProviderExample: (id: string) => request<{ deleted: boolean; id: string }>(`/provider-examples?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  testScenarios: () => request<TestScenario[]>('/test-scenarios'),
+  saveTestScenario: (body: TestScenarioWriteRequest) => request<TestScenario>('/test-scenarios', { method: 'POST', body: JSON.stringify(body) }),
+  deleteTestScenario: (id: string) => request<{ deleted: boolean; id: string }>(`/test-scenarios?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  createScenarioComparison: (body: { scenarioId: string; cli: Cli; providerIds: string[] }) => request<ScenarioComparison>('/scenario-comparisons', { method: 'POST', body: JSON.stringify(body) }),
+  scenarioComparison: (id: string) => request<ScenarioComparison>(`/scenario-comparisons/${encodeURIComponent(id)}`),
+  scenarioComparisons: (status?: ScenarioComparison['status']) => request<ScenarioComparisonListResult>(`/scenario-comparisons${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+  rerunScenarioComparison: (id: string) => request<ScenarioComparison>(`/scenario-comparisons/${encodeURIComponent(id)}/rerun`, { method: 'POST' }),
+  providerGroups: () => request<ProviderFailoverGroup[]>('/provider-groups'),
+  saveProviderGroup: (body: ProviderFailoverGroupWrite) => request<ProviderFailoverGroup>('/provider-groups', { method: 'POST', body: JSON.stringify(body) }),
+  deleteProviderGroup: (id: string) => request<{ deleted: boolean; id: string }>(`/provider-groups?id=${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  evaluateProviderGroup: (id: string) => request<ProviderGroupEvaluation>(`/provider-groups/${encodeURIComponent(id)}/evaluate`, { method: 'POST' }),
+  applyProviderGroupAdvice: (id: string, body: { suggestedProviderId: string; adviceUpdatedAt: string; confirmGroupId: string }) => request<ProviderGroupSwitchResult>(`/provider-groups/${encodeURIComponent(id)}/apply-advice`, { method: 'POST', body: JSON.stringify(body) }),
+  maintenanceWindows: () => request<MaintenanceWindow[]>('/maintenance-windows'),
+  startMaintenance: (id: string, body: { startsAt?: string; until: string }) => request<MaintenanceWindow>(`/maintenance-windows/${encodeURIComponent(id)}/start`, { method: 'POST', body: JSON.stringify(body) }),
+  extendMaintenance: (id: string, seconds: number) => request<MaintenanceWindow>(`/maintenance-windows/${encodeURIComponent(id)}/extend`, { method: 'POST', body: JSON.stringify({ seconds }) }),
+  endMaintenance: (id: string) => request<MaintenanceWindow>(`/maintenance-windows/${encodeURIComponent(id)}/end`, { method: 'POST' }),
+  slos: () => request<ServiceLevelObjective[]>('/slos'),
+  configureSLO: (id: string, body: { targetPercent: number; window: ServiceLevelObjective['window']; minimumSamples: number }) => request<ServiceLevelObjective>(`/slos/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+  pauseSLO: (id: string) => request<ServiceLevelObjective>(`/slos/${encodeURIComponent(id)}/pause`, { method: 'POST' }),
+  resumeSLO: (id: string) => request<ServiceLevelObjective>(`/slos/${encodeURIComponent(id)}/resume`, { method: 'POST' }),
   manualProviders: () => request<ManualProvider[]>('/manual-providers'),
   createManualProvider: (body: ManualProviderWrite) => request<ManualProvider>('/manual-providers', { method: 'POST', body: JSON.stringify(body) }),
   updateManualProvider: (id: string, body: ManualProviderWrite) => {
@@ -328,6 +395,13 @@ export const api = {
   deleteManualProvider: (id: string) => request<{ deleted: boolean; id: string }>(`/manual-providers/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   dingTalkConfig: () => request<DingTalkConfig>('/notifications/dingtalk/config'),
   saveDingTalkConfig: (body: DingTalkConfigWrite) => request<DingTalkConfig>('/notifications/dingtalk/config', { method: 'PUT', body: JSON.stringify(body) }),
+  notificationChannels: () => request<NotificationChannel[]>('/notification-channels'),
+  createNotificationChannel: (body: NotificationChannelWrite) => request<NotificationChannel>('/notification-channels', { method: 'POST', body: JSON.stringify(body) }),
+  updateNotificationChannel: (id: string, body: NotificationChannelWrite) => request<NotificationChannel>(`/notification-channels/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+  deleteNotificationChannel: (id: string) => request<{deleted:boolean;id:string}>(`/notification-channels/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  testNotificationChannel: (id: string) => request<{sent:boolean;id:string}>(`/notification-channels/${encodeURIComponent(id)}/test`, { method: 'POST' }),
+  notificationRoutes: () => request<NotificationRoutes>('/notification-routes'),
+  saveNotificationRoutes: (body: NotificationRoutes) => request<NotificationRoutes>('/notification-routes', { method: 'PUT', body: JSON.stringify({ routes: body.routes }) }),
   async schedules(): Promise<ScheduleListResult> {
     const raw = await request<RawSchedule[] | { schedules?: RawSchedule[]; items?: RawSchedule[]; total?: number; limit?: number }>('/schedules')
     const items = Array.isArray(raw) ? raw : raw.schedules || raw.items || []
@@ -369,21 +443,5 @@ export const api = {
     }
   },
   testDingTalk: () => request<{ sent: boolean }>('/notifications/test', { method: 'POST' }),
-  sendDingTalkStatus: () => request<{ sent: boolean }>('/notifications/status', { method: 'POST' }),
-  redisOverview: () => request<RedisOverview>('/redis/overview'),
-  redisKeys: (query: { pattern?: string; type?: string; cursor?: string; limit?: number }) => {
-    const params = new URLSearchParams()
-    if (query.pattern) params.set('pattern', query.pattern)
-    if (query.type && query.type !== 'all') params.set('type', query.type)
-    if (query.cursor) params.set('cursor', query.cursor)
-    if (query.limit) params.set('limit', String(query.limit))
-    return request<RedisKeyListResult>(`/redis/keys?${params}`)
-  },
-  redisKeyDetail: (key: string, cursor = '0', limit = 50) => request<RedisKeyDetail>(`/redis/keys/detail?key=${encodeURIComponent(key)}&cursor=${encodeURIComponent(cursor)}&limit=${limit}`),
-  mutateRedisKey: (body: RedisMutationInput) => request<RedisMutationResult>('/redis/keys/value', { method: 'PUT', body: JSON.stringify(body) }),
-  updateRedisTTL: (body: { key: string; version: string; confirmKey: string; ttlSeconds?: number }) => request<RedisMutationResult>('/redis/keys/ttl', { method: 'PUT', body: JSON.stringify(body) }),
-  renameRedisKey: (body: { key: string; newKey: string; version: string; confirmKey: string }) => request<RedisMutationResult>('/redis/keys/rename', { method: 'POST', body: JSON.stringify(body) }),
-  deleteRedisKey: (body: { key: string; version: string; confirmKey: string }) => request<{ deleted: boolean; key: string }>('/redis/keys', { method: 'DELETE', body: JSON.stringify(body) }),
-  prewarmRedis: () => request<RedisPrewarmResult>('/redis/prewarm', { method: 'POST' }),
   eventsUrl: (id: string) => `${API_BASE}/jobs/${encodeURIComponent(id)}/events`,
 }

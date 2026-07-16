@@ -22,3 +22,22 @@ func TestResult(t *testing.T) {
 		})
 	}
 }
+
+func TestResultWithScenarioAssertions(t *testing.T) {
+	for _, test := range []struct {
+		name, output, kind, expected string
+		want                         domain.AttemptStatus
+	}{
+		{"exact", " READY\n", "exact", "READY", domain.AttemptSuccess},
+		{"regex", "status=READY", "regex", `status=R[A-Z]+`, domain.AttemptSuccess},
+		{"json", `{"status":"READY"}`, "json", "", domain.AttemptSuccess},
+		{"json-with-banner", "banner\n{\"status\":\"READY\"}\nfooter", "json", "", domain.AttemptSuccess},
+		{"invalid-json", "READY", "json", "", domain.AttemptUnmatched},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ResultWithAssertion(domain.CLICodex, 0, test.output, test.kind, test.expected, false, false); got != test.want {
+				t.Fatalf("got %s, want %s", got, test.want)
+			}
+		})
+	}
+}

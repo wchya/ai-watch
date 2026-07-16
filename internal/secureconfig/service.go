@@ -15,6 +15,7 @@ import (
 	"ai-watch/internal/domain"
 	"ai-watch/internal/notify"
 	"ai-watch/internal/security"
+	storepkg "ai-watch/internal/store"
 )
 
 const ManualProviderPrefix = "manual:"
@@ -35,6 +36,15 @@ type Store interface {
 	LoadDingTalkConfig() (domain.DingTalkConfig, error)
 	SaveDingTalkConfig(domain.DingTalkConfig) (domain.DingTalkConfig, error)
 	ClearDingTalkConfig() (bool, error)
+}
+
+type notificationRoutingStore interface {
+	ListNotificationChannels() ([]domain.NotificationChannel, error)
+	GetNotificationChannel(string) (domain.NotificationChannel, error)
+	UpsertNotificationChannel(domain.NotificationChannel) (domain.NotificationChannel, error)
+	DeleteNotificationChannel(string) (bool, error)
+	LoadNotificationRoutes() (domain.NotificationRoutes, error)
+	SaveNotificationRoutes(domain.NotificationRoutes) (domain.NotificationRoutes, error)
 }
 
 type ccSwitchStore interface {
@@ -417,7 +427,19 @@ func (s *Service) SaveDingTalkConfig(write domain.DingTalkConfigWrite) (domain.D
 
 func (s *Service) Configured() bool {
 	config, err := s.EffectiveDingTalkConfig()
-	return err == nil && config.Configured
+	if err == nil && config.Configured {
+		return true
+	}
+	channels, channelErr := s.ListNotificationChannels()
+	if channelErr != nil {
+		return false
+	}
+	for _, channel := range channels {
+		if channel.Enabled && channel.Configured {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) Send(ctx context.Context, title, content string) error {
@@ -434,6 +456,213 @@ func (s *Service) Notify(ctx context.Context, job domain.Job, attempt domain.Att
 		return err
 	}
 	return notify.New(webhook).Notify(ctx, job, attempt)
+}
+
+var notificationKinds = map[string]bool{"incident_opened": true, "incident_recovered": true, "reliability_alert": true, "reliability_recovered": true, "reliability_digest": true, "job_notification": true}
+
+func (s *Service) ListNotificationChannels() ([]domain.NotificationChannel, error) {
+	store, err := s.notificationRoutingStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.ListNotificationChannels()
+}
+func (s *Service) SaveNotificationChannel(write domain.NotificationChannelWrite, existingID string) (domain.NotificationChannel, error) {
+	id := strings.ToLower(strings.TrimSpace(firstValue(existingID, write.ID)))
+	if id == "" {
+		id = "channel-" + randomHex(8)
+	}
+	if !manualProviderID.MatchString(id) {
+		return domain.NotificationChannel{}, fmt.Errorf("invalid notification channel id")
+	}
+	name, description, typ := strings.TrimSpace(write.Name), strings.TrimSpace(write.Description), strings.ToLower(strings.TrimSpace(write.Type))
+	if name == "" || len(name) > 160 || len(description) > 2048 || typ != "dingtalk" {
+		return domain.NotificationChannel{}, fmt.Errorf("invalid notification channel")
+	}
+	enabled := true
+	if write.Enabled != nil {
+		enabled = *write.Enabled
+	}
+	value := domain.NotificationChannel{ID: id, Name: name, Description: description, Type: typ, Enabled: enabled}
+	store, err := s.notificationRoutingStore()
+	if err != nil {
+		return value, err
+	}
+	if existingID != "" {
+		current, err := store.GetNotificationChannel(existingID)
+		if err != nil {
+			return value, err
+		}
+		value.CreatedAt = current.CreatedAt
+		value.WebhookURL = current.WebhookURL
+	}
+	if strings.TrimSpace(write.WebhookURL) != "" {
+		if err := validateWebhook(write.WebhookURL); err != nil {
+			return value, err
+		}
+		value.WebhookURL = strings.TrimSpace(write.WebhookURL)
+	}
+	if value.WebhookURL == "" {
+		return value, errors.New("notification channel webhookUrl is required")
+	}
+	return store.UpsertNotificationChannel(value)
+}
+func (s *Service) DeleteNotificationChannel(id string) (bool, error) {
+	store, storeErr := s.notificationRoutingStore()
+	if storeErr != nil {
+		return false, storeErr
+	}
+	deleted, err := store.DeleteNotificationChannel(id)
+	if err != nil || !deleted {
+		return deleted, err
+	}
+	routes, err := store.LoadNotificationRoutes()
+	if err != nil {
+		return deleted, err
+	}
+	changed := false
+	for kind, channelID := range routes.Routes {
+		if channelID == id {
+			routes.Routes[kind] = ""
+			changed = true
+		}
+	}
+	if changed {
+		_, err = store.SaveNotificationRoutes(routes)
+	}
+	return deleted, err
+}
+func (s *Service) NotificationRoutes() (domain.NotificationRoutes, error) {
+	store, storeErr := s.notificationRoutingStore()
+	if storeErr != nil {
+		return domain.NotificationRoutes{}, storeErr
+	}
+	value, err := store.LoadNotificationRoutes()
+	if value.Routes == nil {
+		value.Routes = map[string]string{}
+	}
+	for kind := range notificationKinds {
+		if _, ok := value.Routes[kind]; !ok {
+			value.Routes[kind] = ""
+		}
+	}
+	return value, err
+}
+func (s *Service) SaveNotificationRoutes(routes map[string]string) (domain.NotificationRoutes, error) {
+	store, storeErr := s.notificationRoutingStore()
+	if storeErr != nil {
+		return domain.NotificationRoutes{}, storeErr
+	}
+	clean := map[string]string{}
+	for kind := range notificationKinds {
+		channelID := strings.TrimSpace(routes[kind])
+		if channelID != "" {
+			channel, err := store.GetNotificationChannel(channelID)
+			if err != nil {
+				return domain.NotificationRoutes{}, err
+			}
+			if channel.ID == "" {
+				return domain.NotificationRoutes{}, fs.ErrNotExist
+			}
+		}
+		clean[kind] = channelID
+	}
+	return store.SaveNotificationRoutes(domain.NotificationRoutes{Routes: clean})
+}
+func (s *Service) TestNotificationChannel(ctx context.Context, id string) error {
+	store, storeErr := s.notificationRoutingStore()
+	if storeErr != nil {
+		return storeErr
+	}
+	channel, err := store.GetNotificationChannel(id)
+	if err != nil {
+		return err
+	}
+	if !channel.Enabled {
+		return errors.New("notification channel is disabled")
+	}
+	return notify.New(channel.WebhookURL).Send(ctx, "AI Watch 渠道测试", "### AI Watch 通知渠道测试成功\n\n该加密渠道已通过 HTTP 状态和 errcode 校验。")
+}
+
+func (s *Service) SendRouted(ctx context.Context, kind, title, content string) error {
+	return s.deliverRouted(ctx, kind, func(webhook string) error { return notify.New(webhook).Send(ctx, title, content) })
+}
+func (s *Service) NotifyRouted(ctx context.Context, kind string, job domain.Job, attempt domain.AttemptStatus) error {
+	return s.deliverRouted(ctx, kind, func(webhook string) error { return notify.New(webhook).Notify(ctx, job, attempt) })
+}
+func (s *Service) deliverRouted(ctx context.Context, kind string, deliver func(string) error) error {
+	if !notificationKinds[kind] {
+		kind = "job_notification"
+	}
+	routes, _ := s.NotificationRoutes()
+	channelID := routes.Routes[kind]
+	defaultWebhook, defaultErr := s.effectiveWebhook()
+	targetWebhook := ""
+	fallbackReason := ""
+	targetName := "default"
+	if channelID != "" {
+		store, storeErr := s.notificationRoutingStore()
+		if storeErr != nil {
+			fallbackReason = "channel_store_unavailable"
+		} else if channel, err := store.GetNotificationChannel(channelID); err != nil {
+			fallbackReason = "channel_unavailable"
+		} else if !channel.Enabled {
+			fallbackReason = "channel_disabled"
+		} else {
+			targetWebhook = channel.WebhookURL
+			targetName = channel.ID
+		}
+	}
+	if targetWebhook != "" {
+		if err := deliver(targetWebhook); err == nil {
+			s.recordRoutingEvent(kind, targetName, false, "", true)
+			return nil
+		} else {
+			fallbackReason = "channel_delivery_failed"
+			if defaultWebhook == targetWebhook {
+				s.recordRoutingEvent(kind, targetName, false, fallbackReason, false)
+				return err
+			}
+		}
+	}
+	if defaultErr != nil || defaultWebhook == "" {
+		s.recordRoutingEvent(kind, targetName, false, firstValue(fallbackReason, "default_unavailable"), false)
+		if defaultErr != nil {
+			return defaultErr
+		}
+		return errors.New("DingTalk webhook is not configured")
+	}
+	err := deliver(defaultWebhook)
+	s.recordRoutingEvent(kind, "default", channelID != "", fallbackReason, err == nil)
+	return err
+}
+func (s *Service) notificationRoutingStore() (notificationRoutingStore, error) {
+	value, ok := s.store.(notificationRoutingStore)
+	if !ok {
+		return nil, errors.New("notification routing store is unavailable")
+	}
+	return value, nil
+}
+func (s *Service) recordRoutingEvent(kind, target string, fallback bool, reason string, sent bool) {
+	eventStore, ok := s.store.(interface {
+		SaveEvent(storepkg.Event, ...storepkg.EventRetention) error
+	})
+	if !ok {
+		return
+	}
+	level := "info"
+	if !sent {
+		level = "warning"
+	}
+	_ = eventStore.SaveEvent(storepkg.Event{At: time.Now().UTC(), Type: "notification_routed", Level: level, Message: "通知路由已执行", Data: map[string]any{"messageType": kind, "targetChannelId": target, "fallback": fallback, "fallbackReason": reason, "sent": sent}}, storepkg.EventRetention{MaxAge: 30 * 24 * time.Hour, MaxRows: 50000, MaxBytes: 128 << 20})
+}
+func firstValue(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (s *Service) effectiveWebhook() (string, error) {

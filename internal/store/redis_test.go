@@ -61,17 +61,17 @@ func TestRedisCoreStoreAndWarmCache(t *testing.T) {
 		t.Fatalf("settings=%+v err=%v", loaded, err)
 	}
 
-	example := domain.ProviderExample{ID: "redis-example", Name: "Redis Example", CLI: domain.CLICodex, BaseURL: "https://example.test/v1"}
-	if _, err = st.UpsertProviderExample(example); err != nil {
-		t.Fatal(err)
-	}
-	if values, listErr := st.ListProviderExamples(); listErr != nil || len(values) != 3 {
-		t.Fatalf("examples=%+v err=%v", values, listErr)
-	}
-
 	schedule := domain.Schedule{ID: "redis-schedule", Name: "Redis Schedule", Enabled: true, CLI: domain.CLICodex, ProviderID: "provider", Mode: domain.ModeProbe, Timezone: "UTC", WeekdaysMask: 127, StartMinute: 0, EndMinute: 1440, UntilSuccess: true, TimeoutSeconds: 15, RetryIntervalSeconds: 2, KeepaliveIntervalSeconds: 120, FailureThreshold: 3}
-	if _, err = st.UpsertSchedule(schedule); err != nil {
+	savedSchedule, err := st.UpsertSchedule(schedule)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if err = st.MarkScheduleRun(schedule.ID, "occurrence-1", string(domain.JobStopped), "job-1", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	markedSchedule, err := st.GetSchedule(schedule.ID)
+	if err != nil || !markedSchedule.UpdatedAt.Equal(savedSchedule.UpdatedAt) {
+		t.Fatalf("runtime update changed rule version: before=%s after=%s err=%v", savedSchedule.UpdatedAt, markedSchedule.UpdatedAt, err)
 	}
 	if values, listErr := st.ListSchedules(); listErr != nil || len(values) != 1 {
 		t.Fatalf("schedules=%+v err=%v", values, listErr)
@@ -83,6 +83,74 @@ func TestRedisCoreStoreAndWarmCache(t *testing.T) {
 	}
 	if values, loadErr := st.LoadSummaries(); loadErr != nil || len(values) != 1 || values[0].ID != "job-1" {
 		t.Fatalf("summaries=%+v err=%v", values, loadErr)
+	}
+}
+
+func TestRedisIncidentPostmortemRoundTrip(t *testing.T) {
+	st, _ := newTestRedis(t)
+	now := time.Now().UTC()
+	value := domain.IncidentPostmortem{IncidentID: "redis-incident", Status: "draft", Title: "Redis incident", Subject: "Provider A", Severity: "warning", StartedAt: now, ErrorCounts: map[string]int{"timeout": 1}, RootCause: "network", Mitigation: "retry", Actions: []domain.PostmortemAction{{Text: "add alert"}}}
+	saved, err := st.UpsertIncidentPostmortem(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := st.GetIncidentPostmortem(value.IncidentID)
+	if err != nil || loaded.RootCause != "network" || len(loaded.Actions) != 1 || saved.CreatedAt.IsZero() {
+		t.Fatalf("loaded=%+v saved=%+v err=%v", loaded, saved, err)
+	}
+}
+
+func TestRedisLegacySettingsInheritNewDigestDefaults(t *testing.T) {
+	st, server := newTestRedis(t)
+	server.Set("test:settings", `{"timeoutSeconds":41,"uiTheme":"deep-ocean"}`)
+	loaded, err := st.loadSettingsRedis(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.TimeoutSeconds != 41 || loaded.ReliabilityDigestHour != 9 || loaded.ReliabilityDigestMinute != 0 || loaded.ReliabilityDigestTimezone != "Asia/Shanghai" || loaded.ReliabilityDigestRange != "24h" {
+		t.Fatalf("legacy settings did not inherit digest defaults: %+v", loaded)
+	}
+}
+
+func TestRedisEventsFilterByRequestID(t *testing.T) {
+	st, _ := newTestRedis(t)
+	now := time.Now().UTC()
+	for _, event := range []Event{
+		{At: now, Type: "request_start", JobID: "job-a", Data: map[string]any{"requestId": "request-a"}},
+		{At: now.Add(time.Second), Type: "request_end", JobID: "job-a", Data: map[string]any{"requestId": "request-a", "status": "success"}},
+		{At: now.Add(2 * time.Second), Type: "request_end", JobID: "job-b", Data: map[string]any{"requestId": "request-b", "status": "failed"}},
+	} {
+		if err := st.SaveEvent(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	values, err := st.ListEvents(EventFilter{RequestID: "request-a", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 2 {
+		t.Fatalf("request filter returned %+v", values)
+	}
+	count, err := st.CountEvents(EventFilter{RequestID: "request-a"})
+	if err != nil || count != 2 {
+		t.Fatalf("request count=%d err=%v", count, err)
+	}
+}
+
+func TestRedisProviderGroupCRUD(t *testing.T) {
+	st, _ := newTestRedis(t)
+	want := domain.ProviderGroup{ID: "claude-main", Name: "Claude 主备组", CLI: domain.CLIClaude, Enabled: true, PrimaryProviderID: "main", BackupProviderIDs: []string{"standby"}, ScenarioID: "basic-ready", FailureThreshold: 2, CooldownSeconds: 60, Mode: "automatic", RecoveryProbeIntervalSeconds: 45}
+	saved, err := st.UpsertProviderGroup(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := st.GetProviderGroup(saved.ID)
+	if err != nil || loaded.Name != want.Name || loaded.RecoveryProbeIntervalSeconds != 45 {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
+	}
+	values, err := st.ListProviderGroups()
+	if err != nil || len(values) != 1 {
+		t.Fatalf("values=%+v err=%v", values, err)
 	}
 }
 

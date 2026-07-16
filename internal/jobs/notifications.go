@@ -1,14 +1,13 @@
 package jobs
 
 import (
+	"ai-watch/internal/domain"
 	"context"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
-
-	"ai-watch/internal/domain"
 )
 
 const maxNotificationTargets = 200
@@ -18,6 +17,12 @@ var ErrNotificationMessagesUnsupported = errors.New("configured notifier does no
 
 type messageNotifier interface {
 	Send(context.Context, string, string) error
+}
+type routedMessageNotifier interface {
+	SendRouted(context.Context, string, string, string) error
+}
+type routedJobNotifier interface {
+	NotifyRouted(context.Context, string, domain.Job, domain.AttemptStatus) error
 }
 
 type notificationTarget struct {
@@ -50,14 +55,6 @@ func (m *Manager) TestNotification(ctx context.Context) error {
 	return notifier.Send(ctx, "AI Watch 通知测试", "### AI Watch 通知测试成功\n\n钉钉 Webhook 已通过 HTTP 状态和 errcode 校验。")
 }
 
-func (m *Manager) SendStatusSummary(ctx context.Context) error {
-	notifier, err := m.messageNotifier()
-	if err != nil {
-		return err
-	}
-	return notifier.Send(ctx, "AI Watch 状态汇总", m.statusSummaryMarkdown())
-}
-
 func (m *Manager) messageNotifier() (messageNotifier, error) {
 	m.mu.RLock()
 	n := m.notifier
@@ -70,6 +67,23 @@ func (m *Manager) messageNotifier() (messageNotifier, error) {
 		return nil, ErrNotificationMessagesUnsupported
 	}
 	return value, nil
+}
+
+func (m *Manager) sendRoutedMessage(ctx context.Context, kind, title, content string) error {
+	m.mu.RLock()
+	n := m.notifier
+	m.mu.RUnlock()
+	if n == nil || !n.Configured() {
+		return ErrNotificationsNotConfigured
+	}
+	if routed, ok := n.(routedMessageNotifier); ok {
+		return routed.SendRouted(ctx, kind, title, content)
+	}
+	value, ok := n.(messageNotifier)
+	if !ok {
+		return ErrNotificationMessagesUnsupported
+	}
+	return value.Send(ctx, title, content)
 }
 
 func (m *Manager) recordKeepaliveSuccess(job domain.Job) {
@@ -234,56 +248,12 @@ func (m *Manager) sendMessageAsync(title, content string) {
 			<-m.notificationSlots
 			m.notificationWG.Done()
 		}()
-		_ = notifier.Send(context.Background(), title, content)
+		if routed, ok := any(notifier).(routedMessageNotifier); ok {
+			_ = routed.SendRouted(context.Background(), "job_notification", title, content)
+		} else {
+			_ = notifier.Send(context.Background(), title, content)
+		}
 	}()
-}
-
-func (m *Manager) statusSummaryMarkdown() string {
-	jobs := m.List()
-	sort.SliceStable(jobs, func(i, j int) bool {
-		iActive := jobs[i].EndedAt == nil
-		jActive := jobs[j].EndedAt == nil
-		if iActive != jActive {
-			return iActive
-		}
-		return jobs[i].StartedAt.After(jobs[j].StartedAt)
-	})
-	unique := make(map[string]domain.Job)
-	order := make([]string, 0, min(len(jobs), maxNotificationTargets))
-	active := 0
-	for _, job := range jobs {
-		if job.EndedAt == nil {
-			active++
-		}
-		key := notificationTargetKey(job)
-		if _, exists := unique[key]; exists || len(order) >= maxNotificationTargets {
-			continue
-		}
-		unique[key] = notificationSnapshot(job)
-		order = append(order, key)
-	}
-	lines := []string{
-		"### 📊 AI Watch 状态汇总",
-		"",
-		fmt.Sprintf("🕒 %s", notificationTime(time.Now().UTC())),
-		fmt.Sprintf("📌 当前任务：**%d** 个；已知目标：**%d** 个", active, len(order)),
-		"",
-	}
-	if len(order) == 0 {
-		lines = append(lines, "暂无任务状态。")
-	}
-	for _, key := range order {
-		job := unique[key]
-		lines = append(lines,
-			fmt.Sprintf("#### %s %s", statusIcon(job), notificationTargetName(job)),
-			fmt.Sprintf("%s；%s；阶段 %s", cliName(job.CLI), job.Status, job.Phase),
-			fmt.Sprintf("尝试 **%d** 次；最近结果 %s；启动 %s", job.Attempts, fallbackStatus(job.LatestAttempt), notificationTime(job.StartedAt)),
-			"")
-	}
-	if len(jobs) > len(order) {
-		lines = append(lines, fmt.Sprintf("另有 %d 条历史/重复任务未展开。", len(jobs)-len(order)))
-	}
-	return strings.Join(lines, "\n")
 }
 
 func keepaliveSummaryMarkdown(now time.Time, elapsed time.Duration, successes int, targets map[string]notificationTarget, dropped int) string {

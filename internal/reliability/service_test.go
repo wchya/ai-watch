@@ -30,7 +30,7 @@ func (r eventReader) ListEvents(filter store.EventFilter) ([]store.Event, error)
 
 func requestEvent(at time.Time, cli, providerID, name, status string, duration int64) store.Event {
 	return store.Event{At: at, Type: "request_end", ProviderID: providerID, Data: map[string]any{
-		"classification": status, "durationMillis": float64(duration), "prompt": "must-not-leak",
+		"classification": status, "durationMillis": float64(duration), "requestId": status + "-request", "prompt": "must-not-leak",
 		"job": map[string]any{"cli": cli, "providerName": name, "model": "model-a", "maskedKey": "sk-secret"},
 	}}
 }
@@ -58,6 +58,9 @@ func TestBuildAggregatesProvidersBucketsAndP95(t *testing.T) {
 	ray := result.Providers[0]
 	if ray.Key != "codex:ray" || ray.Metrics.Completed != 5 || ray.Metrics.Counts.Success != 3 || ray.Metrics.MaxConsecutiveFailures != 2 {
 		t.Fatalf("ray metrics: %+v", ray)
+	}
+	if ray.LastRequestID != "success-request" {
+		t.Fatalf("last request id: %q", ray.LastRequestID)
 	}
 	if ray.Metrics.SuccessRate == nil || *ray.Metrics.SuccessRate != 0.6 {
 		t.Fatalf("success rate: %+v", ray.Metrics.SuccessRate)

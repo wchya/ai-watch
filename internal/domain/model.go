@@ -54,8 +54,12 @@ type JobOptions struct {
 	Model                    string `json:"model,omitempty"`
 	FallbackModel            string `json:"fallbackModel,omitempty"`
 	SessionName              string `json:"sessionName,omitempty"`
+	ScenarioID               string `json:"scenarioId,omitempty"`
+	ScenarioName             string `json:"-"`
+	AssertionType            string `json:"-"`
 	TriggerSource            string `json:"-"`
 	ClientIP                 string `json:"-"`
+	ProviderGroupID          string `json:"-"`
 }
 
 func (o *JobOptions) Defaults() {
@@ -142,18 +146,157 @@ type ProviderState struct {
 	NextScheduledAt     *time.Time    `json:"nextScheduledAt,omitempty"`
 }
 
-// ProviderExample is a non-sensitive connection template. Credentials are
-// intentionally absent: examples describe only how a CLI provider is shaped,
-// while authentication must be supplied by mounted config or environment.
-type ProviderExample struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	CLI         CLI       `json:"cli"`
-	BaseURL     string    `json:"baseUrl"`
-	Model       string    `json:"model,omitempty"`
-	Provider    string    `json:"provider,omitempty"`
-	Description string    `json:"description,omitempty"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+type TestScenario struct {
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	Description    string    `json:"description,omitempty"`
+	CLI            CLI       `json:"cli,omitempty"`
+	Enabled        bool      `json:"enabled"`
+	Prompt         string    `json:"prompt"`
+	AssertionType  string    `json:"assertionType"`
+	Expected       string    `json:"expected,omitempty"`
+	TimeoutSeconds int       `json:"timeoutSeconds,omitempty"`
+	BuiltIn        bool      `json:"builtIn,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+}
+
+type FailoverAdvice struct {
+	Status              string     `json:"status"`
+	PrimaryRequestID    string     `json:"primaryRequestId,omitempty"`
+	SuggestedProviderID string     `json:"suggestedProviderId,omitempty"`
+	ValidationJobID     string     `json:"validationJobId,omitempty"`
+	ValidationRequestID string     `json:"validationRequestId,omitempty"`
+	Reason              string     `json:"reason,omitempty"`
+	CreatedAt           time.Time  `json:"createdAt"`
+	UpdatedAt           time.Time  `json:"updatedAt"`
+	RecoveredAt         *time.Time `json:"recoveredAt,omitempty"`
+	AppliedAt           *time.Time `json:"appliedAt,omitempty"`
+}
+
+type ProviderGroupSwitchResult struct {
+	GroupID               string `json:"groupId"`
+	PreviousProviderID    string `json:"previousProviderId"`
+	ActiveProviderID      string `json:"activeProviderId"`
+	ValidationRequestID   string `json:"validationRequestId,omitempty"`
+	AffectedScheduleCount int    `json:"affectedScheduleCount"`
+	Switched              bool   `json:"switched"`
+	HostConfigChanged     bool   `json:"hostConfigChanged"`
+}
+
+type ProviderGroup struct {
+	ID                           string          `json:"id"`
+	Name                         string          `json:"name"`
+	CLI                          CLI             `json:"cli"`
+	Enabled                      bool            `json:"enabled"`
+	PrimaryProviderID            string          `json:"primaryProviderId"`
+	BackupProviderIDs            []string        `json:"backupProviderIds"`
+	ScenarioID                   string          `json:"scenarioId"`
+	FailureThreshold             int             `json:"failureThreshold"`
+	CooldownSeconds              int             `json:"cooldownSeconds"`
+	Mode                         string          `json:"mode"`
+	ActiveProviderID             string          `json:"activeProviderId"`
+	RecoveryThreshold            int             `json:"recoveryThreshold"`
+	RecoveryProbeIntervalSeconds int             `json:"recoveryProbeIntervalSeconds"`
+	LastRecoveryProbeAt          *time.Time      `json:"lastRecoveryProbeAt,omitempty"`
+	LastRecoveryProbeStatus      string          `json:"lastRecoveryProbeStatus,omitempty"`
+	MaintenanceStartsAt          *time.Time      `json:"maintenanceStartsAt,omitempty"`
+	MaintenanceUntil             *time.Time      `json:"maintenanceUntil,omitempty"`
+	SLOEnabled                   bool            `json:"sloEnabled,omitempty"`
+	SLOTargetPercent             float64         `json:"sloTargetPercent,omitempty"`
+	SLOWindow                    string          `json:"sloWindow,omitempty"`
+	SLOMinimumSamples            int             `json:"sloMinimumSamples,omitempty"`
+	LastSwitchedAt               *time.Time      `json:"lastSwitchedAt,omitempty"`
+	Advice                       *FailoverAdvice `json:"advice,omitempty"`
+	CreatedAt                    time.Time       `json:"createdAt"`
+	UpdatedAt                    time.Time       `json:"updatedAt"`
+}
+
+type IncidentEntry struct {
+	ID        string         `json:"id"`
+	At        time.Time      `json:"at"`
+	Type      string         `json:"type"`
+	Message   string         `json:"message"`
+	RequestID string         `json:"requestId,omitempty"`
+	JobID     string         `json:"jobId,omitempty"`
+	Data      map[string]any `json:"data,omitempty"`
+}
+
+type IncidentTimelineEntry = IncidentEntry
+
+type Incident struct {
+	ID                       string          `json:"id"`
+	SubjectType              string          `json:"subjectType"`
+	SubjectID                string          `json:"subjectId"`
+	SubjectName              string          `json:"subjectName,omitempty"`
+	CLI                      CLI             `json:"cli,omitempty"`
+	ProviderID               string          `json:"providerId,omitempty"`
+	GroupID                  string          `json:"groupId,omitempty"`
+	ProviderIDs              []string        `json:"providerIds,omitempty"`
+	Title                    string          `json:"title"`
+	Summary                  string          `json:"summary,omitempty"`
+	Status                   string          `json:"status"`
+	Severity                 string          `json:"severity"`
+	FailureCount             int             `json:"failureCount"`
+	ErrorCounts              map[string]int  `json:"errorCounts,omitempty"`
+	JobIDs                   []string        `json:"jobIds,omitempty"`
+	RequestIDs               []string        `json:"requestIds,omitempty"`
+	Timeline                 []IncidentEntry `json:"timeline"`
+	Note                     string          `json:"note,omitempty"`
+	StartedAt                time.Time       `json:"startedAt"`
+	FirstSeenAt              time.Time       `json:"firstSeenAt"`
+	LastSeenAt               time.Time       `json:"lastSeenAt"`
+	CreatedAt                time.Time       `json:"createdAt"`
+	UpdatedAt                time.Time       `json:"updatedAt"`
+	AcknowledgedAt           *time.Time      `json:"acknowledgedAt,omitempty"`
+	MutedUntil               *time.Time      `json:"mutedUntil,omitempty"`
+	SilencedUntil            *time.Time      `json:"silencedUntil,omitempty"`
+	MaintenanceStartsAt      *time.Time      `json:"maintenanceStartsAt,omitempty"`
+	MaintenanceUntil         *time.Time      `json:"maintenanceUntil,omitempty"`
+	ResolvedAt               *time.Time      `json:"resolvedAt,omitempty"`
+	PrimaryNotificationSent  bool            `json:"primaryNotificationSent"`
+	RecoveryNotificationSent bool            `json:"recoveryNotificationSent"`
+}
+
+type PostmortemAction struct {
+	Text      string `json:"text"`
+	Owner     string `json:"owner,omitempty"`
+	Completed bool   `json:"completed"`
+}
+
+type IncidentPostmortem struct {
+	IncidentID      string             `json:"incidentId"`
+	Status          string             `json:"status"`
+	Title           string             `json:"title"`
+	Subject         string             `json:"subject"`
+	Severity        string             `json:"severity"`
+	StartedAt       time.Time          `json:"startedAt"`
+	ResolvedAt      *time.Time         `json:"resolvedAt,omitempty"`
+	DurationSeconds int64              `json:"durationSeconds"`
+	FailureCount    int                `json:"failureCount"`
+	ErrorCounts     map[string]int     `json:"errorCounts"`
+	JobIDs          []string           `json:"jobIds"`
+	RequestIDs      []string           `json:"requestIds"`
+	Timeline        []IncidentEntry    `json:"timeline"`
+	RecoverySummary string             `json:"recoverySummary"`
+	RootCause       string             `json:"rootCause,omitempty"`
+	Mitigation      string             `json:"mitigation,omitempty"`
+	Owner           string             `json:"owner,omitempty"`
+	Actions         []PostmortemAction `json:"actions"`
+	CreatedAt       time.Time          `json:"createdAt"`
+	UpdatedAt       time.Time          `json:"updatedAt"`
+	CompletedAt     *time.Time         `json:"completedAt,omitempty"`
+}
+
+func MaintenanceWindowActive(startsAt, until *time.Time, now time.Time) bool {
+	if until == nil || !until.After(now) {
+		return false
+	}
+	return startsAt == nil || !startsAt.After(now)
+}
+
+func ProviderGroupMaintenanceActive(group ProviderGroup, now time.Time) bool {
+	return MaintenanceWindowActive(group.MaintenanceStartsAt, group.MaintenanceUntil, now)
 }
 
 // ManualProvider is a user-managed provider configuration. APIKey is available
@@ -208,6 +351,33 @@ type DingTalkConfigWrite struct {
 	ClearStored bool   `json:"clearStored,omitempty"`
 }
 
+type NotificationChannel struct {
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	Description   string    `json:"description,omitempty"`
+	Type          string    `json:"type"`
+	Enabled       bool      `json:"enabled"`
+	WebhookURL    string    `json:"-"`
+	Configured    bool      `json:"configured"`
+	MaskedWebhook string    `json:"maskedWebhook,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+}
+
+type NotificationChannelWrite struct {
+	ID          string `json:"id,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Type        string `json:"type"`
+	Enabled     *bool  `json:"enabled,omitempty"`
+	WebhookURL  string `json:"webhookUrl,omitempty"`
+}
+
+type NotificationRoutes struct {
+	Routes    map[string]string `json:"routes"`
+	UpdatedAt time.Time         `json:"updatedAt"`
+}
+
 // Schedule is a non-sensitive rule that points at an already discovered
 // provider. Connection details and runtime input deliberately do not belong in
 // this model: the jobs manager resolves them only when an occurrence starts.
@@ -218,6 +388,7 @@ type Schedule struct {
 	CLI                      CLI        `json:"cli"`
 	ProviderID               string     `json:"providerId"`
 	ProviderName             string     `json:"providerName,omitempty"`
+	ProviderGroupID          string     `json:"providerGroupId,omitempty"`
 	Mode                     Mode       `json:"mode"`
 	Timezone                 string     `json:"timezone"`
 	WeekdaysMask             int        `json:"weekdaysMask"`
@@ -230,6 +401,7 @@ type Schedule struct {
 	FailureThreshold         int        `json:"failureThreshold"`
 	Model                    string     `json:"model,omitempty"`
 	FallbackModel            string     `json:"fallbackModel,omitempty"`
+	ScenarioID               string     `json:"scenarioId,omitempty"`
 	LastOccurrenceKey        string     `json:"lastOccurrenceKey,omitempty"`
 	LastStatus               string     `json:"lastStatus,omitempty"`
 	LastJobID                string     `json:"lastJobId,omitempty"`
@@ -261,6 +433,8 @@ type Job struct {
 	Provider      string        `json:"provider,omitempty"`
 	Target        string        `json:"target"`
 	Model         string        `json:"model,omitempty"`
+	ScenarioID    string        `json:"scenarioId,omitempty"`
+	ScenarioName  string        `json:"scenarioName,omitempty"`
 	MaskedKey     string        `json:"maskedKey,omitempty"`
 	Status        JobStatus     `json:"status"`
 	Phase         JobPhase      `json:"phase"`
@@ -298,6 +472,11 @@ type Settings struct {
 	ReliabilityAlertCooldownSeconds     int    `json:"reliabilityAlertCooldownSeconds"`
 	ReliabilityAlertRecoverySuccesses   int    `json:"reliabilityAlertRecoverySuccesses"`
 	ReliabilityAlertRecoveryEnabled     bool   `json:"reliabilityAlertRecoveryEnabled"`
+	ReliabilityDigestEnabled            bool   `json:"reliabilityDigestEnabled"`
+	ReliabilityDigestHour               int    `json:"reliabilityDigestHour"`
+	ReliabilityDigestMinute             int    `json:"reliabilityDigestMinute"`
+	ReliabilityDigestTimezone           string `json:"reliabilityDigestTimezone"`
+	ReliabilityDigestRange              string `json:"reliabilityDigestRange"`
 	HistoryLimit                        int    `json:"historyLimit"`
 	EventRetentionDays                  int    `json:"eventRetentionDays"`
 	EventRetentionRows                  int    `json:"eventRetentionRows"`
@@ -324,6 +503,8 @@ func DefaultSettings() Settings {
 		ReliabilityAlertEnabled: false, ReliabilityAlertMinSamples: 5, ReliabilityAlertSuccessRate: 90,
 		ReliabilityAlertConsecutiveFailures: 3, ReliabilityAlertP95Millis: 0,
 		ReliabilityAlertCooldownSeconds: 1800, ReliabilityAlertRecoverySuccesses: 2, ReliabilityAlertRecoveryEnabled: true,
+		ReliabilityDigestEnabled: false, ReliabilityDigestHour: 9, ReliabilityDigestMinute: 0,
+		ReliabilityDigestTimezone: "Asia/Shanghai", ReliabilityDigestRange: "24h",
 		HistoryLimit: 100, EventRetentionDays: 30, EventRetentionRows: 5000,
 		EventRetentionBytes: 8 << 20,
 		UITheme:             UIThemeDeepOcean,

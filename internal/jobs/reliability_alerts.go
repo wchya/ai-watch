@@ -83,7 +83,7 @@ func (m *Manager) evaluateReliabilityAlert(event store.Event) {
 			return
 		}
 		message := reliabilityAlertMarkdown(provider.Name, cli, reasons, provider.Metrics, now)
-		deliveryErr := m.sendReliabilityMessage("AI Watch Provider 可靠性告警", message)
+		deliveryErr := m.sendReliabilityMessage("reliability_alert", "AI Watch Provider 可靠性告警", message)
 		typ, text := "reliability_alert_triggered", "Provider 可靠性阈值已触发"
 		if deliveryErr != nil {
 			typ, text = "reliability_alert_delivery_failed", "Provider 可靠性告警发送失败"
@@ -106,7 +106,7 @@ func (m *Manager) evaluateReliabilityAlert(event store.Event) {
 		return
 	}
 	if settings.ReliabilityAlertRecoveryEnabled {
-		_ = m.sendReliabilityMessage("AI Watch Provider 可靠性恢复", reliabilityRecoveryMarkdown(provider.Name, cli, provider.Metrics, now))
+		_ = m.sendReliabilityMessage("reliability_recovered", "AI Watch Provider 可靠性恢复", reliabilityRecoveryMarkdown(provider.Name, cli, provider.Metrics, now))
 	}
 	m.saveReliabilityAlertEvent(event, "reliability_alert_recovered", "Provider 可靠性已恢复", providerKey, provider.Name, nil, provider.Metrics)
 	m.storeReliabilityState(providerKey, reliabilityAlertState{Loaded: true})
@@ -183,12 +183,8 @@ func (m *Manager) saveReliabilityAlertEvent(source store.Event, typ, message, pr
 	}
 }
 
-func (m *Manager) sendReliabilityMessage(title, content string) error {
-	notifier, err := m.messageNotifier()
-	if err != nil {
-		return err
-	}
-	return notifier.Send(context.Background(), title, content)
+func (m *Manager) sendReliabilityMessage(kind, title, content string) error {
+	return m.sendRoutedMessage(context.Background(), kind, title, content)
 }
 func reliabilityAlertMarkdown(name, cli string, reasons []string, metrics reliability.Metrics, at time.Time) string {
 	return fmt.Sprintf("### ⚠️ Provider 可靠性告警\n\n- Provider：%s\n- CLI：%s\n- 原因：%s\n- 样本：%d\n- 时间：%s", name, reliabilityCLILabel(cli), strings.Join(reasons, "；"), metrics.Completed, at.Format(time.RFC3339))

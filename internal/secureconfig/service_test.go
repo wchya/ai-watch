@@ -17,6 +17,59 @@ type memoryStore struct {
 	mu        sync.Mutex
 	providers map[string]domain.ManualProvider
 	dingTalk  domain.DingTalkConfig
+	channels  map[string]domain.NotificationChannel
+	routes    domain.NotificationRoutes
+}
+
+func (s *memoryStore) ListNotificationChannels() ([]domain.NotificationChannel, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	values := []domain.NotificationChannel{}
+	for _, value := range s.channels {
+		values = append(values, value)
+	}
+	return values, nil
+}
+func (s *memoryStore) GetNotificationChannel(id string) (domain.NotificationChannel, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.channels[id]
+	if !ok {
+		return domain.NotificationChannel{}, fs.ErrNotExist
+	}
+	return value, nil
+}
+func (s *memoryStore) UpsertNotificationChannel(value domain.NotificationChannel) (domain.NotificationChannel, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.channels == nil {
+		s.channels = map[string]domain.NotificationChannel{}
+	}
+	s.channels[value.ID] = value
+	return value, nil
+}
+func (s *memoryStore) DeleteNotificationChannel(id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.channels[id]; !ok {
+		return false, nil
+	}
+	delete(s.channels, id)
+	return true, nil
+}
+func (s *memoryStore) LoadNotificationRoutes() (domain.NotificationRoutes, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.routes.Routes == nil {
+		return domain.NotificationRoutes{Routes: map[string]string{}}, nil
+	}
+	return s.routes, nil
+}
+func (s *memoryStore) SaveNotificationRoutes(value domain.NotificationRoutes) (domain.NotificationRoutes, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.routes = value
+	return value, nil
 }
 
 func (s *memoryStore) ListManualProviders() ([]domain.ManualProvider, error) {
@@ -366,5 +419,34 @@ func TestImportEnvironmentDingTalkDoesNotOverwriteStoredConfig(t *testing.T) {
 	}
 	if err = New(store, nil, "").ImportEnvironmentDingTalk(); err != nil {
 		t.Fatalf("empty environment webhook should be a no-op: %v", err)
+	}
+}
+
+func TestNotificationRoutingUsesDedicatedChannelAndFallsBack(t *testing.T) {
+	var dedicatedCalls, defaultCalls int
+	dedicated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		dedicatedCalls++
+		http.Error(w, "failed", http.StatusBadGateway)
+	}))
+	defer dedicated.Close()
+	defaultServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		defaultCalls++
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
+	}))
+	defer defaultServer.Close()
+	store := &memoryStore{providers: map[string]domain.ManualProvider{}, dingTalk: domain.DingTalkConfig{WebhookURL: defaultServer.URL, Configured: true, Source: "redis"}, channels: map[string]domain.NotificationChannel{"incidents": {ID: "incidents", Name: "Incidents", Type: "dingtalk", Enabled: true, Configured: true, WebhookURL: dedicated.URL}}, routes: domain.NotificationRoutes{Routes: map[string]string{"incident_opened": "incidents"}}}
+	service := New(store, nil, "")
+	if err := service.SendRouted(context.Background(), "incident_opened", "title", "content"); err != nil {
+		t.Fatal(err)
+	}
+	if dedicatedCalls != 1 || defaultCalls != 1 {
+		t.Fatalf("dedicated=%d default=%d", dedicatedCalls, defaultCalls)
+	}
+	store.channels["incidents"] = domain.NotificationChannel{ID: "incidents", Name: "Incidents", Type: "dingtalk", Enabled: true, Configured: true, WebhookURL: defaultServer.URL}
+	if err := service.SendRouted(context.Background(), "incident_opened", "title", "content"); err != nil {
+		t.Fatal(err)
+	}
+	if defaultCalls != 2 {
+		t.Fatalf("same webhook was sent more than once: %d", defaultCalls)
 	}
 }

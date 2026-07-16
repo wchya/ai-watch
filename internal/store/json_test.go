@@ -26,11 +26,16 @@ func TestSettingsPersistAcrossReopen(t *testing.T) {
 	}
 
 	want := domain.Settings{
-		TimeoutSeconds:           31,
-		RetryIntervalSeconds:     7,
-		KeepaliveIntervalSeconds: 181,
-		HistoryLimit:             42,
-		DingTalkConfigured:       true,
+		TimeoutSeconds:            31,
+		RetryIntervalSeconds:      7,
+		KeepaliveIntervalSeconds:  181,
+		HistoryLimit:              42,
+		DingTalkConfigured:        true,
+		ReliabilityDigestEnabled:  true,
+		ReliabilityDigestHour:     18,
+		ReliabilityDigestMinute:   35,
+		ReliabilityDigestTimezone: "Asia/Tokyo",
+		ReliabilityDigestRange:    "7d",
 	}
 	if err = store.SaveSettings(want); err != nil {
 		t.Fatal(err)
@@ -56,6 +61,56 @@ func TestSettingsPersistAcrossReopen(t *testing.T) {
 		t.Fatalf("database permissions are too broad: %o", info.Mode().Perm())
 	}
 }
+
+func TestSQLiteEventsFilterByRequestID(t *testing.T) {
+	st := New(t.TempDir())
+	t.Cleanup(func() { _ = st.Close() })
+	now := time.Now().UTC()
+	for _, event := range []Event{
+		{At: now, Type: "request_start", JobID: "job-a", Data: map[string]any{"requestId": "request-a"}},
+		{At: now.Add(time.Second), Type: "request_end", JobID: "job-a", Data: map[string]any{"requestId": "request-a", "status": "success"}},
+		{At: now.Add(2 * time.Second), Type: "request_end", JobID: "job-b", Data: map[string]any{"requestId": "request-b", "status": "failed"}},
+	} {
+		if err := st.SaveEvent(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	values, err := st.ListEvents(EventFilter{RequestID: "request-a", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 2 || mapStringForTest(values[0].Data["requestId"]) != "request-a" || mapStringForTest(values[1].Data["requestId"]) != "request-a" {
+		t.Fatalf("request filter returned %+v", values)
+	}
+}
+
+func TestProviderGroupCRUDPreservesAdviceOnConfigEdit(t *testing.T) {
+	st := New(t.TempDir())
+	t.Cleanup(func() { _ = st.Close() })
+	group, err := st.UpsertProviderGroup(domain.ProviderGroup{ID: "codex-primary", Name: "Codex 主备组", CLI: domain.CLICodex, Enabled: true, PrimaryProviderID: "primary", BackupProviderIDs: []string{"backup-a", "backup-b"}, ScenarioID: "basic-ready", FailureThreshold: 3, CooldownSeconds: 600, Mode: "automatic", RecoveryProbeIntervalSeconds: 45})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	group.Advice = &domain.FailoverAdvice{Status: "open", SuggestedProviderID: "backup-a", CreatedAt: now, UpdatedAt: now}
+	if _, err = st.UpsertProviderGroup(group); err != nil {
+		t.Fatal(err)
+	}
+	group.Advice = nil
+	group.Name = "更新后的主备组"
+	if _, err = st.UpsertProviderGroup(group); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := st.GetProviderGroup(group.ID)
+	if err != nil || loaded.Advice == nil || loaded.Advice.SuggestedProviderID != "backup-a" || loaded.Name != "更新后的主备组" || loaded.RecoveryProbeIntervalSeconds != 45 {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
+	}
+	if deleted, err := st.DeleteProviderGroup(group.ID); err != nil || !deleted {
+		t.Fatalf("deleted=%v err=%v", deleted, err)
+	}
+}
+
+func mapStringForTest(value any) string { text, _ := value.(string); return text }
 
 func TestSummaryRetentionAndSanitizedSchema(t *testing.T) {
 	store := New(t.TempDir())
@@ -172,139 +227,31 @@ func TestLegacyJSONMigrationRunsOnce(t *testing.T) {
 	if err = reopened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 10 {
+	if versions != 18 {
 		t.Fatalf("got %d migration records", versions)
 	}
 }
 
-func TestProviderExamplesSeedCRUDAndSecretBoundary(t *testing.T) {
-	store := New(t.TempDir())
-	t.Cleanup(func() { _ = store.Close() })
-	examples, err := store.ListProviderExamples()
-	if err != nil {
-		t.Fatal(err)
+func TestTestScenarioSeedCRUDAndBuiltInProtection(t *testing.T) {
+	values := New(t.TempDir())
+	t.Cleanup(func() { _ = values.Close() })
+	scenarios, err := values.ListTestScenarios()
+	if err != nil || len(scenarios) < 2 || !scenarios[0].BuiltIn {
+		t.Fatalf("built-in scenarios=%+v err=%v", scenarios, err)
 	}
-	if len(examples) != 2 || examples[0].CLI != domain.CLICodex || examples[1].CLI != domain.CLIClaude {
-		t.Fatalf("unexpected default provider examples: %+v", examples)
+	saved, err := values.UpsertTestScenario(domain.TestScenario{ID: "custom-regex", Name: "自定义正则", Enabled: true, Prompt: "reply status", AssertionType: "regex", Expected: `READY|OK`})
+	if err != nil || saved.ID != "custom-regex" {
+		t.Fatalf("saved=%+v err=%v", saved, err)
 	}
-	for _, example := range examples {
-		if example.ID == "" || example.Name == "" || example.BaseURL == "" || example.UpdatedAt.IsZero() {
-			t.Fatalf("incomplete seed example: %+v", example)
-		}
+	loaded, err := values.GetTestScenario(saved.ID)
+	if err != nil || loaded.Expected != `READY|OK` {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
 	}
-
-	custom := domain.ProviderExample{
-		ID:          "ray-codex",
-		Name:        "Ray Codex",
-		CLI:         domain.CLICodex,
-		BaseURL:     "http://newapi.raycloud.cn/v1/",
-		Model:       "gpt-5.6-sol",
-		Provider:    "custom",
-		Description: "内部 OpenAI-compatible 示例",
+	if deleted, err := values.DeleteTestScenario("basic-ready"); err == nil || deleted {
+		t.Fatalf("built-in scenario deletion was allowed: deleted=%v err=%v", deleted, err)
 	}
-	saved, err := store.UpsertProviderExample(custom)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if saved.BaseURL != "http://newapi.raycloud.cn/v1" || saved.UpdatedAt.IsZero() {
-		t.Fatalf("unexpected saved example: %+v", saved)
-	}
-	custom.Name = "Ray Codex Updated"
-	updated, err := store.UpsertProviderExample(custom)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updated.Name != custom.Name || updated.UpdatedAt.Before(saved.UpdatedAt) {
-		t.Fatalf("example was not updated: %+v", updated)
-	}
-	examples, err = store.ListProviderExamples()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(examples) != 3 {
-		t.Fatalf("upsert created duplicate examples: %+v", examples)
-	}
-	deleted, err := store.DeleteProviderExample(custom.ID)
-	if err != nil || !deleted {
-		t.Fatalf("delete failed: deleted=%v err=%v", deleted, err)
-	}
-	deleted, err = store.DeleteProviderExample(custom.ID)
-	if err != nil || deleted {
-		t.Fatalf("second delete should be a no-op: deleted=%v err=%v", deleted, err)
-	}
-
-	for _, invalid := range []domain.ProviderExample{
-		{ID: "secret-query", Name: "Bad", CLI: domain.CLICodex, BaseURL: "https://example.test/v1?access_token=abcdef"},
-		{ID: "secret-description", Name: "Bad", CLI: domain.CLIClaude, BaseURL: "https://example.test", Description: "sk-abcdefghijklmnop"},
-		{ID: "bad-cli", Name: "Bad", CLI: domain.CLI("other"), BaseURL: "https://example.test"},
-	} {
-		if _, err = store.UpsertProviderExample(invalid); err == nil {
-			t.Fatalf("accepted invalid provider example: %+v", invalid)
-		}
-	}
-
-	rows, err := store.db.Query(`SELECT name FROM pragma_table_info('provider_examples')`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var columns []string
-	for rows.Next() {
-		var column string
-		if err = rows.Scan(&column); err != nil {
-			t.Fatal(err)
-		}
-		columns = append(columns, column)
-	}
-	joined := strings.Join(columns, " ")
-	for _, forbidden := range []string{"key", "secret", "token", "auth", "webhook"} {
-		if strings.Contains(joined, forbidden) {
-			t.Fatalf("provider example schema contains forbidden column %q: %s", forbidden, joined)
-		}
-	}
-}
-
-func TestProviderExamplesV4MigrationAndSeedsAreOneTime(t *testing.T) {
-	dir := t.TempDir()
-	store := New(dir)
-	if _, err := store.UpsertProviderExample(domain.ProviderExample{
-		ID: "custom", Name: "Custom", CLI: domain.CLICodex, BaseURL: "https://example.test/v1",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.db.Exec(`DROP TABLE provider_examples`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE version = 4`); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	reopened := New(dir)
-	examples, err := reopened.ListProviderExamples()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(examples) != 2 {
-		t.Fatalf("v4 migration did not seed defaults: %+v", examples)
-	}
-	if _, err = reopened.DeleteProviderExample("codex-openai-compatible"); err != nil {
-		t.Fatal(err)
-	}
-	if err = reopened.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	again := New(dir)
-	t.Cleanup(func() { _ = again.Close() })
-	examples, err = again.ListProviderExamples()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(examples) != 1 || examples[0].CLI != domain.CLIClaude {
-		t.Fatalf("deleted seed was unexpectedly recreated: %+v", examples)
+	if deleted, err := values.DeleteTestScenario(saved.ID); err != nil || !deleted {
+		t.Fatalf("custom scenario delete=%v err=%v", deleted, err)
 	}
 }
 
@@ -314,7 +261,7 @@ func TestSchedulesV5CRUDIsBoundedAndContainsNoSecretColumns(t *testing.T) {
 	now := time.Date(2026, 7, 13, 6, 0, 0, 0, time.UTC)
 	value, err := st.UpsertSchedule(domain.Schedule{
 		ID: "workday-codex", Name: "工作日 Codex 保活", Enabled: true,
-		CLI: domain.CLICodex, ProviderID: "provider-1", Mode: domain.ModeKeepalive,
+		CLI: domain.CLICodex, ProviderID: "provider-1", ProviderGroupID: "codex-auto", Mode: domain.ModeKeepalive,
 		Timezone: "Asia/Shanghai", WeekdaysMask: 62, StartMinute: 9 * 60, EndMinute: 18 * 60,
 		UntilSuccess: true, TimeoutSeconds: 15, RetryIntervalSeconds: 2,
 		KeepaliveIntervalSeconds: 120, FailureThreshold: 3, Model: "gpt-test",
@@ -362,7 +309,7 @@ func TestSchedulesV5CRUDIsBoundedAndContainsNoSecretColumns(t *testing.T) {
 	reopened := New(dir)
 	t.Cleanup(func() { _ = reopened.Close() })
 	values, err := reopened.ListSchedules()
-	if err != nil || len(values) != 1 || values[0].ID != value.ID {
+	if err != nil || len(values) != 1 || values[0].ID != value.ID || values[0].ProviderGroupID != "codex-auto" {
 		t.Fatalf("schedule did not survive reopen: values=%+v err=%v", values, err)
 	}
 }

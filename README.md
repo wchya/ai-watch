@@ -1,18 +1,21 @@
 # AI Watch
 
-AI Watch 是 `ai-watch.sh` 的 Docker Web 客户端。它在容器内运行 Codex 和 Claude CLI，使用同一 Compose 网络中的 Redis 保存热配置、Provider 快照、事件和运行元数据，并通过私有 Mihomo sidecar 为需要代理的测活请求提供网络出口。它提供测活、保活、当前配置与 CC Switch Provider 快照选择、加密手填 Provider、计划任务请求时间线、可靠性趋势与告警、任务停止、实时状态、通知、Redis 管理和全局设置等操作。
+AI Watch 是 `ai-watch.sh` 的 Docker Web 客户端。它在容器内运行 Codex 和 Claude CLI，使用同一 Compose 网络中的 Redis 保存热配置、Provider 快照、事件和运行元数据，并通过私有 Mihomo sidecar 为需要代理的测活请求提供网络出口。核心流程是配置 Provider、执行手动或场景验证、创建计划、查看异常并处置或切换线路。
 
 Web 界面默认只允许本机访问：<http://127.0.0.1:8787>。
 
-主要页面拥有可直接访问的路径：`/providers`、`/reliability`、`/schedules`、`/events`、`/redis`、`/diagnostics` 和 `/settings`。侧边栏导航会写入浏览器历史，因此前进、后退和刷新都会保持当前页面。
+一级导航收拢为总览、Provider、验证中心、自动化、稳定性、事件和设置。主要路径为 `/providers`、`/validation/*`、`/automation/*`、`/stability/*`、`/events` 和 `/settings/*`；请求详情使用 `/requests/:requestId`。旧页面路径会自动规范化到对应领域中心，浏览器前进、后退和刷新都会保持当前页面。
 
 当前主要能力：
 
 - **Provider 管理**：合并当前 CLI 配置、只读 CC Switch Redis 快照和 AES-GCM 加密的手填 Provider；支持默认代理、直连和自定义代理策略。
 - **任务与计划**：支持单次/持续测活、单次/持续保活、批量启动与停止，以及按时区、星期和时间窗口执行的计划任务。
-- **计划请求时间线**：从计划任务行进入该计划的请求日志，按最新请求在前展示状态、耗时、尝试次数、Job ID 和脱敏供应商返回；支持分页、刷新和状态筛选。
-- **事件与可靠性**：普通生命周期事件与 CLI 请求日志分开浏览；可靠性页面提供 24 小时、7 天和 30 天 Provider 对比，并支持滚动 24 小时钉钉告警与恢复通知。
-- **Redis 管理**：浏览全部 Key、常用数据类型、TTL、内存和版本信息，并执行受控更新、重命名、删除和应用快照预热。
+- **合成测试场景**：保存明确标记为非敏感的测试 Prompt、断言和超时；同一场景可一次运行多个 Provider，并按通过状态、模型和耗时横向比较。
+- **建议式故障切换**：为同一 CLI 配置主线路、按优先级排列的备用线路和验证场景；主线路连续失败后验证备用线路并生成建议，不修改 Codex、Claude、CC Switch、宿主机或计划任务配置。
+- **事故中心**：同一 Provider 或 Provider Group 在恢复前只形成一条开放事故；重复失败、备用验证、确认、静默、备注和恢复进入同一时间线，并关联脱敏 Request ID。
+- **计划请求时间线**：从计划任务行进入该计划的请求日志，按最新请求在前展示状态、耗时、尝试次数、Job ID 和脱敏供应商返回；支持分页、刷新和状态筛选。运行中的规则会高亮并锁定重复运行、编辑、启停和删除入口。
+- **事件与可靠性**：普通生命周期事件与 CLI 请求日志分开浏览；可靠性页面提供 24 小时、7 天和 30 天 Provider 对比、诊断建议、报告导出、滚动告警和定时钉钉摘要。
+- **内部 Redis 存储**：Redis 只承担配置、事件、摘要和加密凭证存储；健康与容量通过系统诊断查看，不提供通用 Key 管理界面。
 - **主题与响应式**：深海终端、石墨信号和极昼控制台三套主题由 Redis 持久化，主要页面支持移动端和桌面端直接访问。
 
 ## 一键启动
@@ -168,10 +171,10 @@ docker compose logs --tail=100 ai-watch
 - 运行期间只在受限大小的内存缓冲中保存实时日志，用于 SSE 推送和短暂断线重连。
 - 每轮分类完成后清空对应输出；整个任务结束后立即销毁剩余内存日志。
 - `/run/ai-watch` 是 64 MiB 的 `tmpfs`。任务临时配置、凭据副本和运行文件只存在内存中，容器停止后必然消失。
-- Redis 使用 AOF `everysec` 保存热更新设置、脱敏任务摘要、供应商示例、CC Switch Provider 运行快照、有界结构化事件，以及经 AES-GCM 加密的 Provider API Key、自定义代理 URL 和钉钉 Webhook；不保存 Prompt 或 CLI 原始输出。
+- Redis 使用 AOF `everysec` 保存热更新设置、脱敏任务摘要、CC Switch Provider 运行快照、合成测试场景、故障切换组、事故时间线、有界结构化事件，以及经 AES-GCM 加密的 Provider API Key、自定义代理 URL 和钉钉 Webhook；普通任务 Prompt 和 CLI 原始输出不会持久化。合成场景 Prompt 是用户明确创建的测试资产，界面会提示不得包含密钥、个人信息或业务机密。
 - 结构化事件默认最多保留 30 天、5000 条和 8 MiB 逻辑内容，三项上限可在“设置与通知”中热更新。
-- “事件记录”页面支持筛选和手动清空；清空事件不会删除设置、供应商示例或任务摘要。
-- 计划任务启动的请求会把 `scheduleId` 写入结构化事件；计划请求时间线按该字段隔离不同计划。关联功能上线前的旧事件无法可靠反推全部历史，页面仅兼容回退到该计划最后一次 Job，并明确提示旧数据边界。
+- “事件记录”页面支持筛选和手动清空；清空事件不会删除设置、Provider 配置或任务摘要。
+- 计划任务启动的请求会把 `scheduleId` 写入结构化事件；计划请求时间线只按该字段隔离不同计划，不使用最近 Job 推断旧数据。
 - SQLite 仅在应用启动阶段作为 CC Switch 同步源和旧版本迁移源读取；正常运行和任务启动阶段只使用 Redis。
 - Codex、Claude 和 CC Switch 的宿主机目录均为只读挂载。
 - 服务端口固定映射到 `127.0.0.1`，不会默认暴露到局域网或公网。
@@ -228,7 +231,7 @@ docker volume rm ai-watch_ai-watch-redis-data
 
 `tini` 负责正确转发停止信号和回收 CLI 子进程。不要向 Compose 额外挂载宿主机敏感目录或 Docker socket。
 
-Codex 任务使用 `codex exec ... -` 的 stdin-only 形式传递 Prompt。这样可以规避 Codex CLI 在非 TTY 环境中同时收到 argv Prompt 与 stdin 时卡在 `Reading additional input from stdin...` 的已知问题。Prompt 仍不会进入结构化事件或 Redis；日志中只记录字节数和短哈希等安全摘要。
+Codex 任务使用 `codex exec ... -` 的 stdin-only 形式传递 Prompt。这样可以规避 Codex CLI 在非 TTY 环境中同时收到 argv Prompt 与 stdin 时卡在 `Reading additional input from stdin...` 的已知问题。请求结束后，服务端会从 Codex 输出中剥离版本、workdir、sandbox、session、用户输入和 token 统计等 CLI 横幅，只把最终助手回答写入 `responseExcerpt`；失败和超时则写入脱敏错误字段。Prompt 仍不会进入结构化事件或 Redis；日志中只记录字节数和短哈希等安全摘要。
 
 `SYS_ADMIN` 与 `seccomp:unconfined` 会降低容器自身的隔离强度，但这是 Docker Desktop 中运行 Codex Linux bubblewrap 沙箱的必要条件。AI Watch 通过只读配置挂载、无 Docker socket、非 privileged 模式、`no-new-privileges`、本机端口绑定和任务级只读沙箱降低风险。不要把该服务暴露到不可信网络。
 
@@ -236,7 +239,7 @@ Compose 还限制容器最多使用 2 GiB 内存和 256 个 PID，并把 Docker 
 
 ## 前端浏览器验收
 
-前端使用 Playwright 和稳定的 API Mock 验证主题切换、Redis 刷新错误恢复、供应商小屏操作区、计划请求日志场景数据与响应式布局，不依赖真实 Redis 或 CLI。真实 Codex/Claude、代理和 Provider 可用性仍需通过运行中的 Compose 环境单独冒烟验证。
+前端使用 Playwright 和稳定的 API Mock 验证七个领域入口、主题切换、合成场景多线路对比、故障切换建议、事故操作与请求跳转、供应商小屏操作区、计划请求日志和响应式布局，不依赖真实 Redis 或 CLI。真实 Codex/Claude、代理和 Provider 可用性仍需通过运行中的 Compose 环境单独冒烟验证。
 
 首次运行先安装 Chromium：
 
@@ -271,6 +274,60 @@ GET /api/reliability?range=30d
 
 可靠性告警可在“设置与通知”中启用。服务端会在每次请求结束后评估滚动 24 小时指标，支持成功率、当前连续失败和 P95 延迟阈值，并提供重复告警冷却与连续成功恢复通知。未配置钉钉时仍会写入结构化告警事件，但不会把消息标记为已送达。
 
+## 合成测试与 Provider 对比
+
+“测试场景”页面把可重复的 Prompt、断言和单次超时保存为测试资产。内置场景包括基础 `READY` 文本验证和 JSON Object 格式验证；自定义场景支持包含文本、完全一致、正则表达式和合法 JSON Object 断言。
+
+场景可以被手动任务、计划任务和故障切换验证复用。同一场景可选择多个兼容 Provider 批量执行一次测活，页面自动轮询到终态，并比较通过状态、实际模型和耗时。长期请求事件只记录场景 ID、名称、断言类型和结果，不复制场景 Prompt。
+
+```text
+GET    /api/test-scenarios
+POST   /api/test-scenarios
+DELETE /api/test-scenarios?id=<scenario-id>
+POST   /api/jobs/bulk
+```
+
+## Provider Group 故障切换
+
+“自动化 / 故障切换”页面为同一 CLI 配置一个主 Provider、按优先级排列的备用 Provider、连续失败阈值、恢复阈值、冷却时间和验证场景。维护窗口统一在“自动化 / 维护窗口”中管理。主线路达到阈值后，AI Watch 使用同一场景依次验证备用线路。
+
+Provider Group 支持两种模式：
+
+- `advisory`：首个验证成功的备用线路形成可审计的切换建议，不改变任务线路。
+- `automatic`：验证成功后更新组内活跃 Provider，并只重启、切换显式绑定该组的 AI Watch 计划。未绑定该组的计划不受影响。
+
+建议模式的开放建议可在页面中人工采用。服务端会再次校验验证 Request、建议更新时间、目标成员和维护窗口，并在确认弹窗中展示受影响计划数量。重复提交保持幂等；人工采用同样不会修改宿主机配置，并会写入操作事件与事故时间线。
+
+自动模式不会修改 Codex、Claude、CC Switch 或宿主机配置。维护窗口内不评估或切换；没有备用线路通过验证时保持当前线路并记录失败事实。切到备用后，AI Watch 会使用同一合成场景周期探测主线路，达到连续成功恢复阈值才会回切。
+
+恢复探测间隔默认 300 秒，可配置为 30 秒到 24 小时。最近探测时间和结果随 Provider Group 持久化，应用重启后会继续监测；探测频率不会随着绑定计划数量增长。
+
+计划任务通过 `providerGroupId` 显式绑定 Provider Group。调度器在每次运行前读取当前活跃成员，而不是把切换结果写死到计划规则中。
+
+```text
+GET    /api/provider-groups
+POST   /api/provider-groups
+DELETE /api/provider-groups?id=<group-id>
+POST   /api/provider-groups/<group-id>/evaluate
+POST   /api/provider-groups/<group-id>/apply-advice
+```
+
+## 事故中心
+
+“事故中心”将同一 Provider 或 Provider Group 的非成功请求聚合为一条事故。相同 Request ID 不重复计数；失败类型、Job ID、Request ID、故障切换验证和人工操作进入同一时间线。达到连续成功恢复阈值后事故自动关闭并保留恢复摘要。
+
+事故支持确认、备注、最长 7 天静默、手动关闭和重新打开。新事故只发送一次主要通知；严重程度升级和恢复可按策略发送补充通知，静默期间继续聚合但不发送消息。事故内容只保存脱敏标识和结构化摘要。
+
+```text
+GET  /api/incidents
+GET  /api/incidents/<incident-id>
+POST /api/incidents/<incident-id>/acknowledge
+POST /api/incidents/<incident-id>/note
+POST /api/incidents/<incident-id>/mute
+POST /api/incidents/<incident-id>/close
+POST /api/incidents/<incident-id>/reopen
+```
+
 ## 计划任务请求日志
 
 计划任务列表每一行都有请求日志入口。打开后按请求完成时间倒序展示当前计划 ID 产生的全部现存 `request_end` 事件，最新请求在前。
@@ -281,6 +338,8 @@ GET /api/reliability?range=30d
 - Job ID、Request ID、CLI、Provider 和模型；
 - 分类结果、退出码、错误类型；
 - 经过脱敏和长度限制的供应商返回摘要。
+
+规则处于 `queued`、`starting` 或 `running` 时，列表行显示明显的“运行中 · 已锁定”状态并自动轮询刷新。此时不能再次选择或批量启动，也不能编辑、启停或删除；日志入口仍保持可用。日志、启停、编辑和删除按钮分别使用信息色、成功/警告色、紫色和危险色，避免操作语义混淆。
 
 时间线每页 50 条，支持上一页、下一页、刷新和状态筛选。数据遵循全局事件保留天数、条数与容量限制；保留策略删除的数据不会被空结果伪装成“从未运行”。
 
