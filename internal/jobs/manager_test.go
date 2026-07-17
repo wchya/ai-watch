@@ -6,6 +6,7 @@ import (
 	"ai-watch/internal/store"
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -762,6 +763,30 @@ func TestRetryIntervalHasSafeMinimum(t *testing.T) {
 	settings.RetryIntervalSeconds = 0
 	if err := m.SetSettings(settings); err == nil {
 		t.Fatal("zero retry interval should be rejected")
+	}
+}
+
+func TestReliabilitySuccessRateAcceptsHundredthPercent(t *testing.T) {
+	st := store.New(t.TempDir())
+	m := New(fakeResolver{}, execFunc(func(context.Context, string, domain.JobOptions, domain.ResolvedConfig, func(string)) (runner.Result, error) {
+		return runner.Result{}, nil
+	}), st)
+	defer m.Shutdown()
+
+	settings := domain.DefaultSettings()
+	settings.ReliabilityAlertSuccessRate = 0.01
+	if err := m.SetSettings(settings); err != nil {
+		t.Fatalf("0.01 should be accepted: %v", err)
+	}
+	settings.ReliabilityAlertSuccessRate = 0.009
+	if err := m.SetSettings(settings); err == nil {
+		t.Fatal("value below 0.01 should be rejected")
+	}
+	for _, invalid := range []float64{1.234, math.NaN(), math.Inf(1)} {
+		settings.ReliabilityAlertSuccessRate = invalid
+		if err := m.SetSettings(settings); err == nil {
+			t.Fatalf("invalid success rate %v should be rejected", invalid)
+		}
 	}
 }
 

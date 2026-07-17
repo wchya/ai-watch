@@ -9,31 +9,31 @@ import (
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 	type input struct {
-		TimeoutSeconds                      *int    `json:"timeoutSeconds"`
-		RetryIntervalSeconds                *int    `json:"retryIntervalSeconds"`
-		KeepaliveIntervalSeconds            *int    `json:"keepaliveIntervalSeconds"`
-		KeepaliveSummarySeconds             *int    `json:"keepaliveSummarySeconds"`
-		KeepaliveSummarySuccesses           *int    `json:"keepaliveSummarySuccesses"`
-		ProbeProgressSeconds                *int    `json:"probeProgressSeconds"`
-		RecoveryMergeSeconds                *int    `json:"recoveryMergeSeconds"`
-		ReliabilityAlertEnabled             *bool   `json:"reliabilityAlertEnabled"`
-		ReliabilityAlertMinSamples          *int    `json:"reliabilityAlertMinSamples"`
-		ReliabilityAlertSuccessRate         *int    `json:"reliabilityAlertSuccessRate"`
-		ReliabilityAlertConsecutiveFailures *int    `json:"reliabilityAlertConsecutiveFailures"`
-		ReliabilityAlertP95Millis           *int    `json:"reliabilityAlertP95Millis"`
-		ReliabilityAlertCooldownSeconds     *int    `json:"reliabilityAlertCooldownSeconds"`
-		ReliabilityAlertRecoverySuccesses   *int    `json:"reliabilityAlertRecoverySuccesses"`
-		ReliabilityAlertRecoveryEnabled     *bool   `json:"reliabilityAlertRecoveryEnabled"`
-		ReliabilityDigestEnabled            *bool   `json:"reliabilityDigestEnabled"`
-		ReliabilityDigestHour               *int    `json:"reliabilityDigestHour"`
-		ReliabilityDigestMinute             *int    `json:"reliabilityDigestMinute"`
-		ReliabilityDigestTimezone           *string `json:"reliabilityDigestTimezone"`
-		ReliabilityDigestRange              *string `json:"reliabilityDigestRange"`
-		HistoryLimit                        *int    `json:"historyLimit"`
-		EventRetentionDays                  *int    `json:"eventRetentionDays"`
-		EventRetentionRows                  *int    `json:"eventRetentionRows"`
-		EventRetentionBytes                 *int64  `json:"eventRetentionBytes"`
-		UITheme                             *string `json:"uiTheme"`
+		TimeoutSeconds                      *int     `json:"timeoutSeconds"`
+		RetryIntervalSeconds                *int     `json:"retryIntervalSeconds"`
+		KeepaliveIntervalSeconds            *int     `json:"keepaliveIntervalSeconds"`
+		KeepaliveSummarySeconds             *int     `json:"keepaliveSummarySeconds"`
+		KeepaliveSummarySuccesses           *int     `json:"keepaliveSummarySuccesses"`
+		ProbeProgressSeconds                *int     `json:"probeProgressSeconds"`
+		RecoveryMergeSeconds                *int     `json:"recoveryMergeSeconds"`
+		ReliabilityAlertEnabled             *bool    `json:"reliabilityAlertEnabled"`
+		ReliabilityAlertMinSamples          *int     `json:"reliabilityAlertMinSamples"`
+		ReliabilityAlertSuccessRate         *float64 `json:"reliabilityAlertSuccessRate"`
+		ReliabilityAlertConsecutiveFailures *int     `json:"reliabilityAlertConsecutiveFailures"`
+		ReliabilityAlertP95Millis           *int     `json:"reliabilityAlertP95Millis"`
+		ReliabilityAlertCooldownSeconds     *int     `json:"reliabilityAlertCooldownSeconds"`
+		ReliabilityAlertRecoverySuccesses   *int     `json:"reliabilityAlertRecoverySuccesses"`
+		ReliabilityAlertRecoveryEnabled     *bool    `json:"reliabilityAlertRecoveryEnabled"`
+		ReliabilityDigestEnabled            *bool    `json:"reliabilityDigestEnabled"`
+		ReliabilityDigestHour               *int     `json:"reliabilityDigestHour"`
+		ReliabilityDigestMinute             *int     `json:"reliabilityDigestMinute"`
+		ReliabilityDigestTimezone           *string  `json:"reliabilityDigestTimezone"`
+		ReliabilityDigestRange              *string  `json:"reliabilityDigestRange"`
+		HistoryLimit                        *int     `json:"historyLimit"`
+		EventRetentionDays                  *int     `json:"eventRetentionDays"`
+		EventRetentionRows                  *int     `json:"eventRetentionRows"`
+		EventRetentionBytes                 *int64   `json:"eventRetentionBytes"`
+		UITheme                             *string  `json:"uiTheme"`
 	}
 	var request input
 	if !decode(w, r, &request) {

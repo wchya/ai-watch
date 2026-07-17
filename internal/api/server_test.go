@@ -85,7 +85,7 @@ func TestSettingsAcceptReliabilityFields(t *testing.T) {
 	manager := jobs.New(apiResolver{}, apiExecutor{}, st, nil)
 	defer manager.Shutdown()
 	handler := New(configscan.New(), manager, "", st).Handler()
-	body := `{"reliabilityAlertEnabled":true,"reliabilityAlertMinSamples":9,"reliabilityAlertSuccessRate":85,"reliabilityAlertConsecutiveFailures":4,"reliabilityAlertP95Millis":1200,"reliabilityAlertCooldownSeconds":600,"reliabilityAlertRecoverySuccesses":3,"reliabilityAlertRecoveryEnabled":false,"reliabilityDigestEnabled":true,"reliabilityDigestHour":18,"reliabilityDigestMinute":35,"reliabilityDigestTimezone":"Asia/Tokyo","reliabilityDigestRange":"7d","uiTheme":"graphite-signal"}`
+	body := `{"reliabilityAlertEnabled":true,"reliabilityAlertMinSamples":9,"reliabilityAlertSuccessRate":1.25,"reliabilityAlertConsecutiveFailures":4,"reliabilityAlertP95Millis":1200,"reliabilityAlertCooldownSeconds":600,"reliabilityAlertRecoverySuccesses":3,"reliabilityAlertRecoveryEnabled":false,"reliabilityDigestEnabled":true,"reliabilityDigestHour":18,"reliabilityDigestMinute":35,"reliabilityDigestTimezone":"Asia/Tokyo","reliabilityDigestRange":"7d","uiTheme":"graphite-signal"}`
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body)))
 	if recorder.Code != http.StatusOK {
@@ -95,7 +95,7 @@ func TestSettingsAcceptReliabilityFields(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &saved); err != nil {
 		t.Fatal(err)
 	}
-	if !saved.ReliabilityAlertEnabled || saved.ReliabilityAlertMinSamples != 9 || saved.ReliabilityAlertSuccessRate != 85 || saved.ReliabilityAlertConsecutiveFailures != 4 || saved.ReliabilityAlertP95Millis != 1200 || saved.ReliabilityAlertCooldownSeconds != 600 || saved.ReliabilityAlertRecoverySuccesses != 3 || saved.ReliabilityAlertRecoveryEnabled || !saved.ReliabilityDigestEnabled || saved.ReliabilityDigestHour != 18 || saved.ReliabilityDigestMinute != 35 || saved.ReliabilityDigestTimezone != "Asia/Tokyo" || saved.ReliabilityDigestRange != "7d" || saved.UITheme != domain.UIThemeGraphiteSignal {
+	if !saved.ReliabilityAlertEnabled || saved.ReliabilityAlertMinSamples != 9 || saved.ReliabilityAlertSuccessRate != 1.25 || saved.ReliabilityAlertConsecutiveFailures != 4 || saved.ReliabilityAlertP95Millis != 1200 || saved.ReliabilityAlertCooldownSeconds != 600 || saved.ReliabilityAlertRecoverySuccesses != 3 || saved.ReliabilityAlertRecoveryEnabled || !saved.ReliabilityDigestEnabled || saved.ReliabilityDigestHour != 18 || saved.ReliabilityDigestMinute != 35 || saved.ReliabilityDigestTimezone != "Asia/Tokyo" || saved.ReliabilityDigestRange != "7d" || saved.UITheme != domain.UIThemeGraphiteSignal {
 		t.Fatalf("reliability settings were not saved: %+v", saved)
 	}
 }
@@ -150,7 +150,7 @@ func TestDiagnosticsIsReadOnlyAndDoesNotExposeSensitivePathsOrOutput(t *testing.
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	body := w.Body.String()
-	if w.Code != http.StatusOK || !strings.Contains(body, `"schemaVersion":18`) || !strings.Contains(body, `"pathLabel":"codex-safe"`) || !strings.Contains(body, `"directoryEntries":1`) {
+	if w.Code != http.StatusOK || !strings.Contains(body, `"schemaVersion":19`) || !strings.Contains(body, `"pathLabel":"codex-safe"`) || !strings.Contains(body, `"directoryEntries":1`) {
 		t.Fatalf("diagnostics status=%d body=%s", w.Code, body)
 	}
 	for _, forbidden := range []string{root, "temporary-secret-name", "webhook", "apiKey", "DINGTALK_WEBHOOK_URL"} {

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -335,7 +336,30 @@ func (s *JSON) migrate() error {
 			return err
 		}
 	}
+	if !applied[19] {
+		if err := s.applyReliabilitySuccessRateDecimalV19(); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (s *JSON) applyReliabilitySuccessRateDecimalV19() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin reliability success rate decimal migration: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`ALTER TABLE settings ADD COLUMN reliability_alert_success_rate_decimal REAL`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return fmt.Errorf("add reliability success rate decimal setting: %w", err)
+	}
+	if _, err = tx.Exec(`UPDATE settings SET reliability_alert_success_rate_decimal = CAST(reliability_alert_success_rate AS REAL) WHERE reliability_alert_success_rate_decimal IS NULL`); err != nil {
+		return fmt.Errorf("backfill reliability success rate decimal setting: %w", err)
+	}
+	if _, err = tx.Exec(`INSERT INTO schema_migrations(version, applied_at_ns) VALUES(19, ?)`, time.Now().UTC().UnixNano()); err != nil {
+		return fmt.Errorf("record reliability success rate decimal migration: %w", err)
+	}
+	return tx.Commit()
 }
 
 func (s *JSON) applyProviderExamplesCleanupV18() error {
@@ -596,6 +620,7 @@ func (s *JSON) applySchemaV1() error {
 			reliability_alert_enabled INTEGER NOT NULL DEFAULT 0,
 			reliability_alert_min_samples INTEGER NOT NULL DEFAULT 5,
 			reliability_alert_success_rate INTEGER NOT NULL DEFAULT 90,
+			reliability_alert_success_rate_decimal REAL,
 			reliability_alert_consecutive_failures INTEGER NOT NULL DEFAULT 3,
 			reliability_alert_p95_millis INTEGER NOT NULL DEFAULT 0,
 			reliability_alert_cooldown_seconds INTEGER NOT NULL DEFAULT 1800,
@@ -754,7 +779,7 @@ func (s *JSON) LoadSettings() (domain.Settings, error) {
 	var configured, alertEnabled, recoveryEnabled, digestEnabled int
 	err := s.db.QueryRow(`SELECT timeout_seconds, retry_interval_seconds, keepalive_interval_seconds,
 		keepalive_summary_seconds, keepalive_summary_successes, probe_progress_seconds, recovery_merge_seconds,
-		reliability_alert_enabled, reliability_alert_min_samples, reliability_alert_success_rate,
+		reliability_alert_enabled, reliability_alert_min_samples, COALESCE(reliability_alert_success_rate_decimal, CAST(reliability_alert_success_rate AS REAL)),
 		reliability_alert_consecutive_failures, reliability_alert_p95_millis, reliability_alert_cooldown_seconds,
 		reliability_alert_recovery_successes, reliability_alert_recovery_enabled,
 		reliability_digest_enabled, reliability_digest_hour, reliability_digest_minute, reliability_digest_timezone, reliability_digest_range,
@@ -804,13 +829,13 @@ func saveSettingsDB(exec sqlExecer, value domain.Settings, now time.Time) error 
 	_, err := exec.Exec(`INSERT INTO settings(
 		id, timeout_seconds, retry_interval_seconds, keepalive_interval_seconds,
 		keepalive_summary_seconds, keepalive_summary_successes, probe_progress_seconds, recovery_merge_seconds,
-		reliability_alert_enabled, reliability_alert_min_samples, reliability_alert_success_rate,
+		reliability_alert_enabled, reliability_alert_min_samples, reliability_alert_success_rate, reliability_alert_success_rate_decimal,
 		reliability_alert_consecutive_failures, reliability_alert_p95_millis, reliability_alert_cooldown_seconds,
 		reliability_alert_recovery_successes, reliability_alert_recovery_enabled,
 		reliability_digest_enabled, reliability_digest_hour, reliability_digest_minute, reliability_digest_timezone, reliability_digest_range,
 		history_limit, event_retention_days, event_retention_rows, event_retention_bytes,
 		ui_theme, dingtalk_configured, updated_at_ns
-	) VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		timeout_seconds = excluded.timeout_seconds,
 		retry_interval_seconds = excluded.retry_interval_seconds,
@@ -822,6 +847,7 @@ func saveSettingsDB(exec sqlExecer, value domain.Settings, now time.Time) error 
 		reliability_alert_enabled = excluded.reliability_alert_enabled,
 		reliability_alert_min_samples = excluded.reliability_alert_min_samples,
 		reliability_alert_success_rate = excluded.reliability_alert_success_rate,
+		reliability_alert_success_rate_decimal = excluded.reliability_alert_success_rate_decimal,
 		reliability_alert_consecutive_failures = excluded.reliability_alert_consecutive_failures,
 		reliability_alert_p95_millis = excluded.reliability_alert_p95_millis,
 		reliability_alert_cooldown_seconds = excluded.reliability_alert_cooldown_seconds,
@@ -842,7 +868,7 @@ func saveSettingsDB(exec sqlExecer, value domain.Settings, now time.Time) error 
 		value.TimeoutSeconds, value.RetryIntervalSeconds, value.KeepaliveIntervalSeconds,
 		value.KeepaliveSummarySeconds, value.KeepaliveSummarySuccesses,
 		value.ProbeProgressSeconds, value.RecoveryMergeSeconds,
-		boolInt(value.ReliabilityAlertEnabled), value.ReliabilityAlertMinSamples, value.ReliabilityAlertSuccessRate,
+		boolInt(value.ReliabilityAlertEnabled), value.ReliabilityAlertMinSamples, int(math.Round(value.ReliabilityAlertSuccessRate)), value.ReliabilityAlertSuccessRate,
 		value.ReliabilityAlertConsecutiveFailures, value.ReliabilityAlertP95Millis, value.ReliabilityAlertCooldownSeconds,
 		value.ReliabilityAlertRecoverySuccesses, boolInt(value.ReliabilityAlertRecoveryEnabled),
 		boolInt(value.ReliabilityDigestEnabled), value.ReliabilityDigestHour, value.ReliabilityDigestMinute, value.ReliabilityDigestTimezone, value.ReliabilityDigestRange,

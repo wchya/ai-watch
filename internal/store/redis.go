@@ -1079,6 +1079,31 @@ func (r *Redis) GetCCSwitchProvider(id string) (domain.CCSwitchProvider, error) 
 	return domain.CCSwitchProvider{}, fs.ErrNotExist
 }
 
+func (r *Redis) GetCCSwitchProxyOverride(cli domain.CLI, id string) (domain.ProxyMode, error) {
+	if err := r.ready(); err != nil {
+		return "", err
+	}
+	value, err := r.client.HGet(context.Background(), r.key("cc-switch-proxy-overrides"), string(cli)+":"+strings.TrimSpace(id)).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", fs.ErrNotExist
+	}
+	if err != nil {
+		return "", err
+	}
+	mode := domain.ProxyMode(value)
+	if mode != domain.ProxyDefault && mode != domain.ProxyDirect {
+		return "", errors.New("invalid stored CC Switch provider proxy override")
+	}
+	return mode, nil
+}
+
+func (r *Redis) SaveCCSwitchProxyOverride(cli domain.CLI, id string, mode domain.ProxyMode) error {
+	if err := r.ready(); err != nil {
+		return err
+	}
+	return r.client.HSet(context.Background(), r.key("cc-switch-proxy-overrides"), string(cli)+":"+strings.TrimSpace(id), string(mode)).Err()
+}
+
 func (r *Redis) ReplaceCCSwitchProviders(values []domain.CCSwitchProvider) error {
 	if err := r.ready(); err != nil {
 		return err
@@ -1442,6 +1467,65 @@ type dingTalkRecord struct {
 	Source    string         `json:"source"`
 	UpdatedAt *time.Time     `json:"updatedAt,omitempty"`
 	Secret    encryptedValue `json:"secret"`
+}
+
+type mihomoSubscriptionRecord struct {
+	UpdatedAt time.Time      `json:"updatedAt"`
+	Secret    encryptedValue `json:"secret"`
+}
+
+func (r *Redis) LoadMihomoSubscription() (domain.MihomoSubscription, error) {
+	if err := r.ready(); err != nil {
+		return domain.MihomoSubscription{}, err
+	}
+	raw, err := r.client.Get(context.Background(), r.key("mihomo", "subscription", "v1")).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return domain.MihomoSubscription{}, nil
+	}
+	if err != nil {
+		return domain.MihomoSubscription{}, err
+	}
+	var record mihomoSubscriptionRecord
+	if json.Unmarshal(raw, &record) != nil {
+		return domain.MihomoSubscription{}, errors.New("decode encrypted Mihomo subscription record")
+	}
+	value, err := r.decrypt(record.Secret)
+	if err != nil {
+		return domain.MihomoSubscription{}, err
+	}
+	return domain.MihomoSubscription{URL: value, UpdatedAt: record.UpdatedAt}, nil
+}
+
+func (r *Redis) SaveMihomoSubscription(value domain.MihomoSubscription) (domain.MihomoSubscription, error) {
+	if err := r.ready(); err != nil {
+		return domain.MihomoSubscription{}, err
+	}
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	secret, err := r.encrypt(value.URL)
+	if err != nil {
+		return domain.MihomoSubscription{}, err
+	}
+	value.UpdatedAt = time.Now().UTC()
+	record := mihomoSubscriptionRecord{UpdatedAt: value.UpdatedAt, Secret: secret}
+	payload, err := json.Marshal(record)
+	if err != nil {
+		return domain.MihomoSubscription{}, fmt.Errorf("encode Mihomo subscription record: %w", err)
+	}
+	if err := r.client.Set(context.Background(), r.key("mihomo", "subscription", "v1"), payload, 0).Err(); err != nil {
+		return domain.MihomoSubscription{}, err
+	}
+	return value, nil
+}
+
+func (r *Redis) ClearMihomoSubscription() (bool, error) {
+	if err := r.ready(); err != nil {
+		return false, err
+	}
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	deleted, err := r.client.Del(context.Background(), r.key("mihomo", "subscription", "v1")).Result()
+	return deleted > 0, err
 }
 
 func (r *Redis) LoadDingTalkConfig() (domain.DingTalkConfig, error) {

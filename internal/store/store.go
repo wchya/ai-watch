@@ -63,6 +63,12 @@ type NotificationRoutingStore interface {
 	SaveNotificationRoutes(domain.NotificationRoutes) (domain.NotificationRoutes, error)
 }
 
+type MihomoSubscriptionStore interface {
+	LoadMihomoSubscription() (domain.MihomoSubscription, error)
+	SaveMihomoSubscription(domain.MihomoSubscription) (domain.MihomoSubscription, error)
+	ClearMihomoSubscription() (bool, error)
+}
+
 // JobEventStore is the optional cache boundary for replayable per-job runtime
 // events. Redis implements it in production; other stores may omit it.
 type JobEventStore interface {

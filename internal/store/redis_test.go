@@ -53,11 +53,12 @@ func TestRedisCoreStoreAndWarmCache(t *testing.T) {
 	}
 	settings := domain.DefaultSettings()
 	settings.TimeoutSeconds = 41
+	settings.ReliabilityAlertSuccessRate = 1.25
 	if err := st.SaveSettings(settings); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := st.LoadSettings()
-	if err != nil || loaded.TimeoutSeconds != 41 {
+	if err != nil || loaded.TimeoutSeconds != 41 || loaded.ReliabilityAlertSuccessRate != 1.25 {
 		t.Fatalf("settings=%+v err=%v", loaded, err)
 	}
 
@@ -312,6 +313,34 @@ func TestRedisEncryptsManualProviderAndDingTalkSecrets(t *testing.T) {
 	}
 	if _, err = st.client.Ping(context.Background()).Result(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRedisMihomoSubscriptionIsEncryptedAndCanBeCleared(t *testing.T) {
+	st, server := newTestRedis(t)
+	secret := "https://subscription.example/path?token=super-secret"
+	saved, err := st.SaveMihomoSubscription(domain.MihomoSubscription{URL: secret})
+	if err != nil || saved.URL != secret || saved.UpdatedAt.IsZero() {
+		t.Fatalf("saved=%+v err=%v", saved, err)
+	}
+	raw, err := server.Get("test:mihomo:subscription:v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(raw, secret) || strings.Contains(raw, "super-secret") {
+		t.Fatalf("Redis contains plaintext subscription: %s", raw)
+	}
+	loaded, err := st.LoadMihomoSubscription()
+	if err != nil || loaded.URL != secret || loaded.UpdatedAt.IsZero() {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
+	}
+	deleted, err := st.ClearMihomoSubscription()
+	if err != nil || !deleted {
+		t.Fatalf("deleted=%v err=%v", deleted, err)
+	}
+	loaded, err = st.LoadMihomoSubscription()
+	if err != nil || loaded.URL != "" {
+		t.Fatalf("cleared=%+v err=%v", loaded, err)
 	}
 }
 

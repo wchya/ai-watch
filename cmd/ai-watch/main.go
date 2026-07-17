@@ -13,6 +13,7 @@ import (
 	"ai-watch/internal/api"
 	"ai-watch/internal/configscan"
 	"ai-watch/internal/jobs"
+	"ai-watch/internal/proxyconfig"
 	"ai-watch/internal/runner"
 	"ai-watch/internal/secureconfig"
 	"ai-watch/internal/store"
@@ -42,6 +43,24 @@ func main() {
 		log.Fatalf("import DingTalk environment configuration: %v", err)
 	}
 	manager := jobs.New(secureService, executor, st, secureService)
+	proxyTestURL := getenv("AI_WATCH_MIHOMO_TEST_URL", "https://www.gstatic.com/generate_204")
+	proxyService := proxyconfig.New(
+		st,
+		proxyconfig.NewHTTPController(getenv("AI_WATCH_MIHOMO_CONTROLLER_URL", "http://mihomo:9090"), 10*time.Second),
+		proxyconfig.NewHTTPProxyTester(getenv("AI_WATCH_DEFAULT_PROXY_URL", "http://mihomo:7890"), proxyTestURL, 12*time.Second),
+		proxyconfig.Options{
+			RuntimePath:           getenv("AI_WATCH_MIHOMO_RUNTIME_PATH", "/mihomo-config/runtime.yaml"),
+			RuntimeControllerPath: getenv("AI_WATCH_MIHOMO_RUNTIME_CONTROLLER_PATH", "/root/.config/mihomo/runtime.yaml"),
+			BaseControllerPath:    getenv("AI_WATCH_MIHOMO_BASE_CONTROLLER_PATH", "/root/.config/mihomo/config.yaml"),
+			ProviderHealthURL:     proxyTestURL,
+			GroupTestURL:          proxyTestURL,
+		},
+	)
+	restoreContext, cancelRestore := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := proxyService.Restore(restoreContext); err != nil {
+		log.Printf("restore Mihomo subscription configuration: %v", err)
+	}
+	cancelRestore()
 	if deleted, err := st.DeleteEventsByType("request_log"); err != nil {
 		log.Fatalf("remove legacy request log events: %v", err)
 	} else if deleted > 0 {
@@ -52,7 +71,7 @@ func main() {
 		log.Fatalf("apply startup event retention: %v", err)
 	}
 	defer manager.Shutdown()
-	srv := &http.Server{Addr: addr, Handler: api.New(scanner, manager, webDir, st).WithSecureConfig(secureService).Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 70 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: api.New(scanner, manager, webDir, st).WithSecureConfig(secureService).WithProxyConfig(proxyService).Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 70 * time.Second}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	go func() {

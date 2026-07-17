@@ -31,7 +31,7 @@ const requestFromPath = (pathname: string) => {
 
 const DEFAULT_OPTIONS: JobOptions = {
   runOnce: true,
-  timeoutSeconds: 15,
+  timeoutSeconds: 45,
   retryIntervalSeconds: 3,
   keepaliveIntervalSeconds: 120,
   failureThreshold: 3,

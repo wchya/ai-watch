@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,7 +17,6 @@ type reliabilityAlertState struct {
 	LastAlert             time.Time
 	LastFailureAlertCount int
 	RecoverySuccesses     int
-	Suppressed            bool
 	Loaded                bool
 }
 
@@ -85,15 +85,6 @@ func (m *Manager) evaluateReliabilityAlert(event store.Event) {
 			m.storeReliabilityState(providerKey, state)
 			return
 		}
-		cooldown := time.Duration(settings.ReliabilityAlertCooldownSeconds) * time.Second
-		if !failureIntervalReached && state.Alerted && cooldown > 0 && now.Sub(state.LastAlert) < cooldown {
-			if !state.Suppressed {
-				m.saveReliabilityAlertEvent(event, "reliability_alert_suppressed", "可靠性告警处于冷却期", providerKey, provider.Name, triggerReasons, provider.Metrics)
-				state.Suppressed = true
-			}
-			m.storeReliabilityState(providerKey, state)
-			return
-		}
 		message := reliabilityAlertMarkdown(provider.Name, cli, triggerReasons, provider.Metrics, now)
 		deliveryErr := m.sendReliabilityMessage("reliability_alert", "AI Watch Provider 可靠性告警", message)
 		typ, text := "reliability_alert_triggered", "Provider 可靠性阈值已触发"
@@ -104,7 +95,7 @@ func (m *Manager) evaluateReliabilityAlert(event store.Event) {
 		if failureIntervalReached {
 			state.LastFailureAlertCount = provider.Metrics.ConsecutiveFailures
 		}
-		state.Alerted, state.LastAlert, state.Suppressed = true, now, false
+		state.Alerted, state.LastAlert = true, now
 		m.storeReliabilityState(providerKey, state)
 		return
 	}
@@ -128,12 +119,18 @@ func (m *Manager) evaluateReliabilityAlert(event store.Event) {
 }
 
 func reliabilityAlertReasons(metrics reliability.Metrics, settings domain.Settings) []string {
-	var reasons []string
-	if metrics.Completed >= settings.ReliabilityAlertMinSamples && metrics.SuccessRate != nil && *metrics.SuccessRate*100 < float64(settings.ReliabilityAlertSuccessRate) {
-		reasons = append(reasons, fmt.Sprintf("24 小时成功率 %.1f%% < %d%%", *metrics.SuccessRate*100, settings.ReliabilityAlertSuccessRate))
+	auxiliaryReasons := reliabilityAuxiliaryAlertReasons(metrics, settings)
+	if metrics.ConsecutiveFailures < settings.ReliabilityAlertConsecutiveFailures || len(auxiliaryReasons) == 0 {
+		return nil
 	}
-	if metrics.ConsecutiveFailures >= settings.ReliabilityAlertConsecutiveFailures {
-		reasons = append(reasons, fmt.Sprintf("连续失败 %d 次", metrics.ConsecutiveFailures))
+	reasons := []string{fmt.Sprintf("连续失败 %d 次", metrics.ConsecutiveFailures)}
+	return append(reasons, auxiliaryReasons...)
+}
+
+func reliabilityAuxiliaryAlertReasons(metrics reliability.Metrics, settings domain.Settings) []string {
+	var reasons []string
+	if metrics.Completed >= settings.ReliabilityAlertMinSamples && metrics.SuccessRate != nil && *metrics.SuccessRate*100 < settings.ReliabilityAlertSuccessRate {
+		reasons = append(reasons, fmt.Sprintf("24 小时成功率 %.2f%% < %s%%", *metrics.SuccessRate*100, formatReliabilityPercent(settings.ReliabilityAlertSuccessRate)))
 	}
 	if settings.ReliabilityAlertP95Millis > 0 && metrics.Completed >= settings.ReliabilityAlertMinSamples && metrics.P95DurationMillis != nil && *metrics.P95DurationMillis > int64(settings.ReliabilityAlertP95Millis) {
 		reasons = append(reasons, fmt.Sprintf("P95 %dms > %dms", *metrics.P95DurationMillis, settings.ReliabilityAlertP95Millis))
@@ -142,21 +139,20 @@ func reliabilityAlertReasons(metrics reliability.Metrics, settings domain.Settin
 }
 
 func reliabilityAlertTriggerReasons(metrics reliability.Metrics, settings domain.Settings, lastFailureAlertCount int) ([]string, bool) {
-	var reasons []string
-	if metrics.Completed >= settings.ReliabilityAlertMinSamples && metrics.SuccessRate != nil && *metrics.SuccessRate*100 < float64(settings.ReliabilityAlertSuccessRate) {
-		reasons = append(reasons, fmt.Sprintf("24 小时成功率 %.1f%% < %d%%", *metrics.SuccessRate*100, settings.ReliabilityAlertSuccessRate))
-	}
 	failureIntervalReached := settings.ReliabilityAlertConsecutiveFailures > 0 &&
 		metrics.ConsecutiveFailures >= settings.ReliabilityAlertConsecutiveFailures &&
 		metrics.ConsecutiveFailures%settings.ReliabilityAlertConsecutiveFailures == 0 &&
 		metrics.ConsecutiveFailures > lastFailureAlertCount
-	if failureIntervalReached {
-		reasons = append(reasons, fmt.Sprintf("连续失败 %d 次（每 %d 次告警）", metrics.ConsecutiveFailures, settings.ReliabilityAlertConsecutiveFailures))
+	auxiliaryReasons := reliabilityAuxiliaryAlertReasons(metrics, settings)
+	if !failureIntervalReached || len(auxiliaryReasons) == 0 {
+		return nil, false
 	}
-	if settings.ReliabilityAlertP95Millis > 0 && metrics.Completed >= settings.ReliabilityAlertMinSamples && metrics.P95DurationMillis != nil && *metrics.P95DurationMillis > int64(settings.ReliabilityAlertP95Millis) {
-		reasons = append(reasons, fmt.Sprintf("P95 %dms > %dms", *metrics.P95DurationMillis, settings.ReliabilityAlertP95Millis))
-	}
-	return reasons, failureIntervalReached
+	reasons := []string{fmt.Sprintf("连续失败 %d 次（每 %d 次告警）", metrics.ConsecutiveFailures, settings.ReliabilityAlertConsecutiveFailures)}
+	return append(reasons, auxiliaryReasons...), true
+}
+
+func formatReliabilityPercent(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64)
 }
 
 func (m *Manager) reliabilityState(key, providerID string) reliabilityAlertState {

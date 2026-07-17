@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"strings"
@@ -834,7 +835,7 @@ func (m *Manager) SetSettings(v domain.Settings) error {
 	if v.KeepaliveSummarySeconds < 0 || v.KeepaliveSummarySeconds > 604800 || v.KeepaliveSummarySuccesses < 0 || v.KeepaliveSummarySuccesses > 1_000_000 {
 		return errors.New("invalid keepalive summary settings")
 	}
-	if v.ReliabilityAlertMinSamples < 1 || v.ReliabilityAlertMinSamples > 10000 || v.ReliabilityAlertSuccessRate < 1 || v.ReliabilityAlertSuccessRate > 100 || v.ReliabilityAlertConsecutiveFailures < 1 || v.ReliabilityAlertConsecutiveFailures > 10000 || v.ReliabilityAlertP95Millis < 0 || v.ReliabilityAlertP95Millis > 86_400_000 || v.ReliabilityAlertCooldownSeconds < 0 || v.ReliabilityAlertCooldownSeconds > 604800 || v.ReliabilityAlertRecoverySuccesses < 1 || v.ReliabilityAlertRecoverySuccesses > 10000 {
+	if v.ReliabilityAlertMinSamples < 1 || v.ReliabilityAlertMinSamples > 10000 || !validReliabilitySuccessRate(v.ReliabilityAlertSuccessRate) || v.ReliabilityAlertConsecutiveFailures < 1 || v.ReliabilityAlertConsecutiveFailures > 10000 || v.ReliabilityAlertP95Millis < 0 || v.ReliabilityAlertP95Millis > 86_400_000 || v.ReliabilityAlertCooldownSeconds < 0 || v.ReliabilityAlertCooldownSeconds > 604800 || v.ReliabilityAlertRecoverySuccesses < 1 || v.ReliabilityAlertRecoverySuccesses > 10000 {
 		return errors.New("invalid reliability alert settings")
 	}
 	if v.ReliabilityDigestHour < 0 || v.ReliabilityDigestHour > 23 || v.ReliabilityDigestMinute < 0 || v.ReliabilityDigestMinute > 59 || (v.ReliabilityDigestRange != "24h" && v.ReliabilityDigestRange != "7d" && v.ReliabilityDigestRange != "30d") {
@@ -1063,7 +1064,7 @@ func normalizedSettings(v domain.Settings) domain.Settings {
 	if v.ReliabilityAlertMinSamples < 1 {
 		v.ReliabilityAlertMinSamples = defaults.ReliabilityAlertMinSamples
 	}
-	if v.ReliabilityAlertSuccessRate < 1 {
+	if !validReliabilitySuccessRate(v.ReliabilityAlertSuccessRate) {
 		v.ReliabilityAlertSuccessRate = defaults.ReliabilityAlertSuccessRate
 	}
 	if v.ReliabilityAlertConsecutiveFailures < 1 {
@@ -1106,6 +1107,14 @@ func normalizedSettings(v domain.Settings) domain.Settings {
 		v.UITheme = defaults.UITheme
 	}
 	return v
+}
+
+func validReliabilitySuccessRate(value float64) bool {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0.01 || value > 100 {
+		return false
+	}
+	scaled := value * 100
+	return math.Abs(scaled-math.Round(scaled)) < 1e-9
 }
 
 func targetKey(cli domain.CLI, base, key string) string {

@@ -26,16 +26,17 @@ func TestSettingsPersistAcrossReopen(t *testing.T) {
 	}
 
 	want := domain.Settings{
-		TimeoutSeconds:            31,
-		RetryIntervalSeconds:      7,
-		KeepaliveIntervalSeconds:  181,
-		HistoryLimit:              42,
-		DingTalkConfigured:        true,
-		ReliabilityDigestEnabled:  true,
-		ReliabilityDigestHour:     18,
-		ReliabilityDigestMinute:   35,
-		ReliabilityDigestTimezone: "Asia/Tokyo",
-		ReliabilityDigestRange:    "7d",
+		TimeoutSeconds:              31,
+		RetryIntervalSeconds:        7,
+		KeepaliveIntervalSeconds:    181,
+		HistoryLimit:                42,
+		DingTalkConfigured:          true,
+		ReliabilityDigestEnabled:    true,
+		ReliabilityDigestHour:       18,
+		ReliabilityDigestMinute:     35,
+		ReliabilityDigestTimezone:   "Asia/Tokyo",
+		ReliabilityDigestRange:      "7d",
+		ReliabilityAlertSuccessRate: 1.25,
 	}
 	if err = store.SaveSettings(want); err != nil {
 		t.Fatal(err)
@@ -59,6 +60,35 @@ func TestSettingsPersistAcrossReopen(t *testing.T) {
 	}
 	if info.Mode().Perm()&0077 != 0 {
 		t.Fatalf("database permissions are too broad: %o", info.Mode().Perm())
+	}
+}
+
+func TestReliabilitySuccessRateDecimalMigrationBackfillsInteger(t *testing.T) {
+	dir := t.TempDir()
+	st := New(dir)
+	settings := domain.DefaultSettings()
+	settings.ReliabilityAlertSuccessRate = 17
+	if err := st.SaveSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`UPDATE settings SET reliability_alert_success_rate = 17, reliability_alert_success_rate_decimal = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`DELETE FROM schema_migrations WHERE version = 19`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := New(dir)
+	t.Cleanup(func() { _ = reopened.Close() })
+	got, err := reopened.LoadSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ReliabilityAlertSuccessRate != 17 {
+		t.Fatalf("success rate=%v", got.ReliabilityAlertSuccessRate)
 	}
 }
 
@@ -227,7 +257,7 @@ func TestLegacyJSONMigrationRunsOnce(t *testing.T) {
 	if err = reopened.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 18 {
+	if versions != 19 {
 		t.Fatalf("got %d migration records", versions)
 	}
 }

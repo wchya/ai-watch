@@ -117,6 +117,11 @@ services:
       AI_WATCH_REDIS_REQUIRED: "true"
       AI_WATCH_MASTER_KEY: ${AI_WATCH_MASTER_KEY:-}
       AI_WATCH_DEFAULT_PROXY_URL: ${AI_WATCH_DEFAULT_PROXY_URL:-http://mihomo:7890}
+      AI_WATCH_MIHOMO_CONTROLLER_URL: ${AI_WATCH_MIHOMO_CONTROLLER_URL:-http://mihomo:9090}
+      AI_WATCH_MIHOMO_RUNTIME_PATH: /mihomo-config/runtime.yaml
+      AI_WATCH_MIHOMO_RUNTIME_CONTROLLER_PATH: /root/.config/mihomo/runtime.yaml
+      AI_WATCH_MIHOMO_BASE_CONTROLLER_PATH: /root/.config/mihomo/config.yaml
+      AI_WATCH_MIHOMO_TEST_URL: ${AI_WATCH_MIHOMO_TEST_URL:-https://www.gstatic.com/generate_204}
       HTTP_PROXY: ${AI_WATCH_HTTP_PROXY:-http://mihomo:7890}
       HTTPS_PROXY: ${AI_WATCH_HTTPS_PROXY:-http://mihomo:7890}
       ALL_PROXY: ${AI_WATCH_ALL_PROXY:-socks5://mihomo:7891}
@@ -144,6 +149,7 @@ services:
       ANTHROPIC_VERTEX_PROJECT_ID: ${ANTHROPIC_VERTEX_PROJECT_ID:-}
     volumes:
       - ai-watch-data:/data
+      - ai-watch-mihomo-data:/mihomo-config
       - type: bind
         source: ${CODEX_CONFIG_DIR:-${HOME}/.codex}
         target: /home/aiwatch/.codex

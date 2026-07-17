@@ -16,8 +16,9 @@ URL.
 - Mihomo exposes HTTP/mixed proxy port `7890`, SOCKS port `7891`, and controller
   port `9090` only to the Compose network. No proxy or controller port is
   published to the host by default.
-- Mihomo configuration is stored in a dedicated named volume and mounted
-  read-only into AI Watch when status/config visibility is needed.
+- Mihomo configuration is stored in a dedicated named volume. The external
+  base configuration remains read-only, while AI Watch can write only its
+  generated `runtime.yaml` into the private shared volume.
 - AI Watch uses `http://mihomo:7890` as the default proxy and excludes
   `localhost`, AI Watch, Redis, and Mihomo service names through `NO_PROXY`.
 - AI Watch startup is gated by a Mihomo health check when the bundled proxy is
@@ -61,9 +62,12 @@ path. The placeholder configuration defaults to `DIRECT` until the user adds a
 subscription or nodes. Subscription URLs are secrets and must not be copied to
 logs, API responses, or source control.
 
-The first implementation exposes read-only Mihomo status and connectivity in
-diagnostics. Browser editing, node switching, and controller-driven reload are
-deferred because they broaden the secret-management and authorization surface.
+The initial implementation exposed read-only Mihomo status and connectivity in
+diagnostics. The 2026-07-16 extension adds a constrained subscription editor in
+System Settings: the URL is encrypted in Redis, AI Watch generates a fixed
+runtime configuration, and the private Controller reloads it with rollback on
+failure. Arbitrary YAML editing, custom Controller addresses, custom test URLs,
+and manual node switching remain deferred.
 
 ## Validation
 

@@ -24,7 +24,7 @@ func TestReliabilityAlertTriggersAndRecovers(t *testing.T) {
 	notifier := &messageTestNotifier{messages: make(chan string, 4)}
 	settings := domain.DefaultSettings()
 	settings.ReliabilityAlertEnabled = true
-	settings.ReliabilityAlertMinSamples = 100
+	settings.ReliabilityAlertMinSamples = 3
 	settings.ReliabilityAlertConsecutiveFailures = 3
 	settings.ReliabilityAlertCooldownSeconds = 3600
 	settings.ReliabilityAlertRecoverySuccesses = 2
@@ -80,8 +80,58 @@ func TestReliabilityAlertReasonsRequireSamplesForRateAndP95(t *testing.T) {
 	rate := .5
 	p95 := int64(2000)
 	reasons := reliabilityAlertReasons(reliability.Metrics{Completed: 2, SuccessRate: &rate, P95DurationMillis: &p95, MaxConsecutiveFailures: 3, ConsecutiveFailures: 3}, settings)
-	if len(reasons) != 1 || !strings.Contains(reasons[0], "连续失败") {
+	if len(reasons) != 0 {
 		t.Fatalf("reasons=%v", reasons)
+	}
+}
+
+func TestReliabilityAlertSuccessRateSupportsHundredthPercent(t *testing.T) {
+	settings := domain.DefaultSettings()
+	settings.ReliabilityAlertMinSamples = 5
+	settings.ReliabilityAlertSuccessRate = 0.01
+	rate := 0.00005
+	reasons := reliabilityAlertReasons(reliability.Metrics{Completed: 5, SuccessRate: &rate, ConsecutiveFailures: settings.ReliabilityAlertConsecutiveFailures}, settings)
+	if len(reasons) != 2 || !strings.Contains(reasons[1], "0.01%") {
+		t.Fatalf("reasons=%v", reasons)
+	}
+}
+
+func TestReliabilityAlertTriggerRequiresFailureBoundaryAndAuxiliaryCondition(t *testing.T) {
+	settings := domain.DefaultSettings()
+	settings.ReliabilityAlertMinSamples = 5
+	settings.ReliabilityAlertSuccessRate = 90
+	settings.ReliabilityAlertConsecutiveFailures = 3
+	settings.ReliabilityAlertP95Millis = 1000
+	lowRate := .5
+	healthyRate := .95
+	highP95 := int64(2000)
+	healthyP95 := int64(500)
+
+	tests := []struct {
+		name        string
+		metrics     reliability.Metrics
+		lastCount   int
+		wantTrigger bool
+		wantReason  string
+	}{
+		{name: "low rate before boundary", metrics: reliability.Metrics{Completed: 5, SuccessRate: &lowRate, ConsecutiveFailures: 2}},
+		{name: "high p95 before boundary", metrics: reliability.Metrics{Completed: 5, SuccessRate: &healthyRate, P95DurationMillis: &highP95, ConsecutiveFailures: 2}},
+		{name: "boundary without auxiliary condition", metrics: reliability.Metrics{Completed: 5, SuccessRate: &healthyRate, P95DurationMillis: &healthyP95, ConsecutiveFailures: 3}},
+		{name: "boundary with low rate", metrics: reliability.Metrics{Completed: 5, SuccessRate: &lowRate, P95DurationMillis: &healthyP95, ConsecutiveFailures: 3}, wantTrigger: true, wantReason: "成功率"},
+		{name: "second boundary with high p95", metrics: reliability.Metrics{Completed: 5, SuccessRate: &healthyRate, P95DurationMillis: &highP95, ConsecutiveFailures: 6}, lastCount: 3, wantTrigger: true, wantReason: "P95"},
+		{name: "duplicate boundary", metrics: reliability.Metrics{Completed: 5, SuccessRate: &lowRate, ConsecutiveFailures: 6}, lastCount: 6},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reasons, triggered := reliabilityAlertTriggerReasons(test.metrics, settings, test.lastCount)
+			if triggered != test.wantTrigger {
+				t.Fatalf("triggered=%v reasons=%v", triggered, reasons)
+			}
+			if test.wantReason != "" && !strings.Contains(strings.Join(reasons, " "), test.wantReason) {
+				t.Fatalf("reasons=%v", reasons)
+			}
+		})
 	}
 }
 
@@ -91,7 +141,7 @@ func TestReliabilityAlertRepeatsAtConsecutiveFailureInterval(t *testing.T) {
 	notifier := &messageTestNotifier{messages: make(chan string, 8)}
 	settings := domain.DefaultSettings()
 	settings.ReliabilityAlertEnabled = true
-	settings.ReliabilityAlertMinSamples = 100
+	settings.ReliabilityAlertMinSamples = 3
 	settings.ReliabilityAlertConsecutiveFailures = 3
 	settings.ReliabilityAlertCooldownSeconds = 3600
 	m := &Manager{store: st, notifier: notifier, settings: settings, notificationSlots: make(chan struct{}, 4)}
@@ -151,7 +201,7 @@ func TestReliabilityAlertFailureIntervalIsIdempotent(t *testing.T) {
 	notifier := &messageTestNotifier{messages: make(chan string, 4)}
 	settings := domain.DefaultSettings()
 	settings.ReliabilityAlertEnabled = true
-	settings.ReliabilityAlertMinSamples = 100
+	settings.ReliabilityAlertMinSamples = 3
 	settings.ReliabilityAlertConsecutiveFailures = 3
 	settings.ReliabilityAlertCooldownSeconds = 3600
 	m := &Manager{store: st, notifier: notifier, settings: settings, notificationSlots: make(chan struct{}, 4)}

@@ -112,6 +112,7 @@ type Provider struct {
 	Enabled   *bool          `json:"enabled,omitempty"`
 	Available *bool          `json:"available,omitempty"`
 	State     *ProviderState `json:"state,omitempty"`
+	ProxyMode ProxyMode      `json:"proxyMode,omitempty"`
 }
 
 // CCSwitchProvider is a normalized startup import record. Sensitive source
@@ -351,6 +352,27 @@ type DingTalkConfigWrite struct {
 	ClearStored bool   `json:"clearStored,omitempty"`
 }
 
+type MihomoSubscription struct {
+	URL       string    `json:"-"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type MihomoSubscriptionWrite struct {
+	SubscriptionURL string `json:"subscriptionUrl"`
+}
+
+type MihomoSubscriptionStatus struct {
+	Configured    bool       `json:"configured"`
+	MaskedURL     string     `json:"maskedUrl,omitempty"`
+	Applied       bool       `json:"applied"`
+	NodeCount     int        `json:"nodeCount"`
+	CurrentNode   string     `json:"currentNode,omitempty"`
+	UpdatedAt     *time.Time `json:"updatedAt,omitempty"`
+	LastCheckedAt *time.Time `json:"lastCheckedAt,omitempty"`
+	ErrorStage    string     `json:"errorStage,omitempty"`
+	ErrorMessage  string     `json:"errorMessage,omitempty"`
+}
+
 type NotificationChannel struct {
 	ID            string    `json:"id"`
 	Name          string    `json:"name"`
@@ -457,32 +479,32 @@ type Event struct {
 }
 
 type Settings struct {
-	TimeoutSeconds                      int    `json:"timeoutSeconds"`
-	RetryIntervalSeconds                int    `json:"retryIntervalSeconds"`
-	KeepaliveIntervalSeconds            int    `json:"keepaliveIntervalSeconds"`
-	KeepaliveSummarySeconds             int    `json:"keepaliveSummarySeconds"`
-	KeepaliveSummarySuccesses           int    `json:"keepaliveSummarySuccesses"`
-	ProbeProgressSeconds                int    `json:"probeProgressSeconds"`
-	RecoveryMergeSeconds                int    `json:"recoveryMergeSeconds"`
-	ReliabilityAlertEnabled             bool   `json:"reliabilityAlertEnabled"`
-	ReliabilityAlertMinSamples          int    `json:"reliabilityAlertMinSamples"`
-	ReliabilityAlertSuccessRate         int    `json:"reliabilityAlertSuccessRate"`
-	ReliabilityAlertConsecutiveFailures int    `json:"reliabilityAlertConsecutiveFailures"`
-	ReliabilityAlertP95Millis           int    `json:"reliabilityAlertP95Millis"`
-	ReliabilityAlertCooldownSeconds     int    `json:"reliabilityAlertCooldownSeconds"`
-	ReliabilityAlertRecoverySuccesses   int    `json:"reliabilityAlertRecoverySuccesses"`
-	ReliabilityAlertRecoveryEnabled     bool   `json:"reliabilityAlertRecoveryEnabled"`
-	ReliabilityDigestEnabled            bool   `json:"reliabilityDigestEnabled"`
-	ReliabilityDigestHour               int    `json:"reliabilityDigestHour"`
-	ReliabilityDigestMinute             int    `json:"reliabilityDigestMinute"`
-	ReliabilityDigestTimezone           string `json:"reliabilityDigestTimezone"`
-	ReliabilityDigestRange              string `json:"reliabilityDigestRange"`
-	HistoryLimit                        int    `json:"historyLimit"`
-	EventRetentionDays                  int    `json:"eventRetentionDays"`
-	EventRetentionRows                  int    `json:"eventRetentionRows"`
-	EventRetentionBytes                 int64  `json:"eventRetentionBytes"`
-	DingTalkConfigured                  bool   `json:"dingTalkConfigured"`
-	UITheme                             string `json:"uiTheme"`
+	TimeoutSeconds                      int     `json:"timeoutSeconds"`
+	RetryIntervalSeconds                int     `json:"retryIntervalSeconds"`
+	KeepaliveIntervalSeconds            int     `json:"keepaliveIntervalSeconds"`
+	KeepaliveSummarySeconds             int     `json:"keepaliveSummarySeconds"`
+	KeepaliveSummarySuccesses           int     `json:"keepaliveSummarySuccesses"`
+	ProbeProgressSeconds                int     `json:"probeProgressSeconds"`
+	RecoveryMergeSeconds                int     `json:"recoveryMergeSeconds"`
+	ReliabilityAlertEnabled             bool    `json:"reliabilityAlertEnabled"`
+	ReliabilityAlertMinSamples          int     `json:"reliabilityAlertMinSamples"`
+	ReliabilityAlertSuccessRate         float64 `json:"reliabilityAlertSuccessRate"`
+	ReliabilityAlertConsecutiveFailures int     `json:"reliabilityAlertConsecutiveFailures"`
+	ReliabilityAlertP95Millis           int     `json:"reliabilityAlertP95Millis"`
+	ReliabilityAlertCooldownSeconds     int     `json:"reliabilityAlertCooldownSeconds"`
+	ReliabilityAlertRecoverySuccesses   int     `json:"reliabilityAlertRecoverySuccesses"`
+	ReliabilityAlertRecoveryEnabled     bool    `json:"reliabilityAlertRecoveryEnabled"`
+	ReliabilityDigestEnabled            bool    `json:"reliabilityDigestEnabled"`
+	ReliabilityDigestHour               int     `json:"reliabilityDigestHour"`
+	ReliabilityDigestMinute             int     `json:"reliabilityDigestMinute"`
+	ReliabilityDigestTimezone           string  `json:"reliabilityDigestTimezone"`
+	ReliabilityDigestRange              string  `json:"reliabilityDigestRange"`
+	HistoryLimit                        int     `json:"historyLimit"`
+	EventRetentionDays                  int     `json:"eventRetentionDays"`
+	EventRetentionRows                  int     `json:"eventRetentionRows"`
+	EventRetentionBytes                 int64   `json:"eventRetentionBytes"`
+	DingTalkConfigured                  bool    `json:"dingTalkConfigured"`
+	UITheme                             string  `json:"uiTheme"`
 }
 
 const (

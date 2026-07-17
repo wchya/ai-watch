@@ -26,6 +26,7 @@ export function ProviderConfigView({ discoveredProviders, onProbe, onChanged, re
   const [deleting, setDeleting] = useState<ManualProvider | null>(null)
   const [deletingBusy, setDeletingBusy] = useState(false)
   const [changingId, setChangingId] = useState('')
+  const [changingCCSwitchId, setChangingCCSwitchId] = useState('')
 
   const load = useCallback(async () => {
     setLoading(true); setError('')
@@ -59,6 +60,17 @@ export function ProviderConfigView({ discoveredProviders, onProbe, onChanged, re
     } catch (e) { setError(e instanceof Error ? e.message : '更新供应商状态失败') }
     finally { setChangingId('') }
   }
+  const updateCCSwitchProxy = async (value: Provider, next: 'default' | 'direct') => {
+    if (!value.id || changingCCSwitchId) return
+    if ((value.proxyMode || 'default') === next) return
+    setChangingCCSwitchId(value.id); setError(''); setMessage('')
+    try {
+      await api.updateCCSwitchProviderProxy(value.id, value.cli, next)
+      setMessage(`${value.name} 已切换为${next === 'direct' ? '直连' : '默认代理'}`)
+      onChanged()
+    } catch (e) { setError(e instanceof Error ? e.message : '更新 CC Switch 代理策略失败') }
+    finally { setChangingCCSwitchId('') }
+  }
 
   return <div className="page provider-config-page">
     <section className="page-heading provider-config-heading"><div><span className="eyebrow"><KeyRound/>安全连接目录</span><h1>供应商配置</h1><p>自动发现配置保持只读；手填连接的 API Key 与自定义代理 URL 使用 AES-GCM 加密后写入 Redis。</p></div><button className="primary hero-action" onClick={() => setEditor('codex')}><Plus/>新增供应商</button></section>
@@ -66,7 +78,7 @@ export function ProviderConfigView({ discoveredProviders, onProbe, onChanged, re
     {message && <div className="event-message" role="status"><CheckCircle2/>{message}<button className="icon-button" aria-label="关闭提示" onClick={() => setMessage('')}><X/></button></div>}
     <section className="provider-vault-summary"><div><span>手填配置</span><strong>{loading ? '—' : providers.length}</strong><small>Redis 加密存储</small></div><div><span>Codex</span><strong>{loading ? '—' : providers.filter(item => item.cli === 'codex').length}</strong><small>OpenAI-compatible</small></div><div><span>Claude Code</span><strong>{loading ? '—' : providers.filter(item => item.cli === 'claude').length}</strong><small>Anthropic-compatible</small></div><div><span>凭证状态</span><strong>{loading ? '—' : `${providers.filter(item => item.hasApiKey).length}/${providers.length}`}</strong><small>已配置 API Key</small></div></section>
     <div className="provider-vault-actions"><div><ShieldCheck/><span><strong>密钥保持写入态</strong><small>编辑时留空会保留原密钥；只有显式清除才会删除密文。</small></span></div><button className="secondary" disabled={loading} onClick={() => void load()}><RefreshCw className={loading ? 'spinning' : ''}/>刷新</button></div>
-    <section className="panel provider-discovered-readonly"><header><div><ShieldCheck/><span><strong>自动发现配置</strong><small>当前 CLI 配置保持只读；CC Switch 仅在应用启动时同步，运行期任务只读取 Redis 快照。</small></span></div><em>{discoveredProviders.length}</em></header><div>{discoveredProviders.length ? discoveredProviders.map(value => <article key={`${value.cli}-${value.id}`}><span className={`cli-icon ${value.cli}`}>{value.cli === 'codex' ? <Command/> : <Bot/>}</span><span><strong>{value.name}</strong><small>{value.source === 'current' ? '当前 CLI 配置 · 只读' : 'CC Switch · Redis快照/启动同步，只读'} · {value.baseUrl || value.model || '默认连接'}</small></span><button className="secondary compact" disabled={value.available === false} onClick={() => onProbe(value)}><Activity/>测活</button></article>) : <p>暂未发现当前 CLI 配置或已同步的 CC Switch Redis 快照。</p>}</div></section>
+    <section className="panel provider-discovered-readonly"><header><div><ShieldCheck/><span><strong>自动发现配置</strong><small>当前 CLI 配置保持只读；CC Switch 的代理策略由 AI Watch 独立保存，不会改写同步快照。</small></span></div><em>{discoveredProviders.length}</em></header><div>{discoveredProviders.length ? discoveredProviders.map(value => <article key={`${value.cli}-${value.id}`}><span className={`cli-icon ${value.cli}`}>{value.cli === 'codex' ? <Command/> : <Bot/>}</span><span><strong>{value.name}</strong><small>{value.source === 'current' ? '当前 CLI 配置 · 只读' : `CC Switch · ${value.proxyMode === 'direct' ? '直连' : '默认代理'}`} · {value.baseUrl || value.model || '默认连接'}</small></span>{value.source === 'cc-switch' && <label className="cc-switch-proxy-select"><Network/><span>代理策略</span><select aria-label={`${value.name} 代理策略`} value={value.proxyMode || 'default'} disabled={changingCCSwitchId === value.id} onChange={event => void updateCCSwitchProxy(value, event.target.value as 'default' | 'direct')}><option value="default">默认代理</option><option value="direct">直连</option></select>{changingCCSwitchId === value.id && <LoaderCircle className="spinning"/>}</label>}<button className="secondary compact" disabled={value.available === false} onClick={() => onProbe(value)}><Activity/>测活</button></article>) : <p>暂未发现当前 CLI 配置或已同步的 CC Switch Redis 快照。</p>}</div></section>
     <div className="provider-vault-grid">
       {(['codex', 'claude'] as Cli[]).map(cli => <ProviderVaultCategory key={cli} cli={cli} providers={providers.filter(item => item.cli === cli)} loading={loading} changingId={changingId} create={() => setEditor(cli)} edit={setEditor} probe={value => onProbe(providerForProbe(value))} toggleEnabled={value => void toggleEnabled(value)} remove={setDeleting}/>) }
     </div>

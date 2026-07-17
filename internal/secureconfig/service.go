@@ -25,6 +25,7 @@ var providerName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 var (
 	ErrInvalidManualProvider = errors.New("invalid manual provider")
+	ErrInvalidCCSwitchProxy  = errors.New("invalid CC Switch provider proxy override")
 	ErrEncryptionUnavailable = errors.New("secure configuration encryption is unavailable")
 )
 
@@ -50,6 +51,11 @@ type notificationRoutingStore interface {
 type ccSwitchStore interface {
 	ListCCSwitchProviders() ([]domain.CCSwitchProvider, error)
 	GetCCSwitchProvider(string) (domain.CCSwitchProvider, error)
+}
+
+type ccSwitchProxyOverrideStore interface {
+	GetCCSwitchProxyOverride(domain.CLI, string) (domain.ProxyMode, error)
+	SaveCCSwitchProxyOverride(domain.CLI, string, domain.ProxyMode) error
 }
 
 type Resolver interface {
@@ -177,6 +183,13 @@ func resolveCCSwitchProvider(store ccSwitchStore, cli domain.CLI, id string) (do
 		APIKeySource: "encrypted CC Switch Redis snapshot",
 		ProxyMode:    domain.ProxyDefault,
 	}
+	if overrides, ok := store.(ccSwitchProxyOverrideStore); ok {
+		if mode, overrideErr := overrides.GetCCSwitchProxyOverride(cli, value.ID); overrideErr == nil {
+			resolved.ProxyMode = mode
+		} else if !errors.Is(overrideErr, fs.ErrNotExist) {
+			return domain.ResolvedConfig{}, fmt.Errorf("read CC Switch provider proxy override: %w", overrideErr)
+		}
+	}
 	if cli == domain.CLICodex {
 		if value.CodexConfig == "" {
 			return domain.ResolvedConfig{}, errors.New("CC Switch Redis Codex provider config is not available")
@@ -213,14 +226,49 @@ func (s *Service) ListCCSwitchProviders() ([]domain.Provider, error) {
 	}
 	result := make([]domain.Provider, 0, len(values))
 	for _, value := range values {
+		proxyMode := domain.ProxyDefault
+		if overrides, ok := store.(ccSwitchProxyOverrideStore); ok {
+			if mode, overrideErr := overrides.GetCCSwitchProxyOverride(value.CLI, value.ID); overrideErr == nil {
+				proxyMode = mode
+			} else if !errors.Is(overrideErr, fs.ErrNotExist) {
+				return nil, fmt.Errorf("read CC Switch provider proxy override: %w", overrideErr)
+			}
+		}
 		available := value.APIKey != "" && ((value.CLI == domain.CLICodex && value.CodexConfig != "") || (value.CLI == domain.CLIClaude && value.BaseURL != ""))
 		result = append(result, domain.Provider{
 			ID: value.ID, Name: value.Name, CLI: value.CLI, Current: value.Current,
 			Model: value.Model, BaseURL: value.BaseURL, MaskedKey: security.Mask(value.APIKey),
-			Available: &available,
+			Available: &available, ProxyMode: proxyMode,
 		})
 	}
 	return result, nil
+}
+
+func (s *Service) SaveCCSwitchProxyOverride(cli domain.CLI, id string, mode domain.ProxyMode) (domain.Provider, error) {
+	store, ok := s.store.(ccSwitchStore)
+	overrides, overrideOK := s.store.(ccSwitchProxyOverrideStore)
+	if !ok || !overrideOK {
+		return domain.Provider{}, ErrEncryptionUnavailable
+	}
+	id = strings.TrimSpace(id)
+	if cli != domain.CLICodex && cli != domain.CLIClaude {
+		return domain.Provider{}, fmt.Errorf("%w: cli must be codex or claude", ErrInvalidCCSwitchProxy)
+	}
+	if mode != domain.ProxyDefault && mode != domain.ProxyDirect {
+		return domain.Provider{}, fmt.Errorf("%w: proxyMode must be default or direct", ErrInvalidCCSwitchProxy)
+	}
+	value, err := store.GetCCSwitchProvider(id)
+	if err != nil {
+		return domain.Provider{}, err
+	}
+	if value.CLI != cli {
+		return domain.Provider{}, fmt.Errorf("%w: provider belongs to another CLI", ErrInvalidCCSwitchProxy)
+	}
+	if err = overrides.SaveCCSwitchProxyOverride(cli, id, mode); err != nil {
+		return domain.Provider{}, fmt.Errorf("save CC Switch provider proxy override: %w", err)
+	}
+	available := value.APIKey != "" && ((value.CLI == domain.CLICodex && value.CodexConfig != "") || (value.CLI == domain.CLIClaude && value.BaseURL != ""))
+	return domain.Provider{ID: value.ID, Name: value.Name, CLI: value.CLI, Current: value.Current, Model: value.Model, BaseURL: value.BaseURL, MaskedKey: security.Mask(value.APIKey), Available: &available, ProxyMode: mode}, nil
 }
 
 func (s *Service) ListManualProviders() ([]domain.ManualProvider, error) {

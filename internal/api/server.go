@@ -12,6 +12,7 @@ import (
 	"ai-watch/internal/configscan"
 	"ai-watch/internal/diagnostics"
 	"ai-watch/internal/jobs"
+	"ai-watch/internal/proxyconfig"
 	"ai-watch/internal/secureconfig"
 	"ai-watch/internal/store"
 )
@@ -23,6 +24,7 @@ type Server struct {
 	store         store.Store
 	redis         *store.Redis
 	secure        *secureconfig.Service
+	proxy         *proxyconfig.Service
 	idempotencyMu sync.Mutex
 	idempotency   map[string]store.IdempotencyRecord
 }
@@ -37,6 +39,10 @@ func New(scanner *configscan.Scanner, manager *jobs.Manager, webDir string, stor
 }
 func (s *Server) WithSecureConfig(service *secureconfig.Service) *Server {
 	s.secure = service
+	return s
+}
+func (s *Server) WithProxyConfig(service *proxyconfig.Service) *Server {
+	s.proxy = service
 	return s
 }
 func (s *Server) Handler() http.Handler {
@@ -96,6 +102,8 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		s.createManualProvider(w, r)
 	case strings.HasPrefix(p, "/api/manual-providers/"):
 		s.manualProviderRoute(w, r)
+	case strings.HasPrefix(p, "/api/cc-switch-providers/") && strings.HasSuffix(p, "/proxy") && r.Method == http.MethodPut:
+		s.ccSwitchProviderProxy(w, r)
 	case p == "/api/jobs" && r.Method == http.MethodGet:
 		writeJSON(w, 200, s.jobs.List())
 	case p == "/api/jobs" && r.Method == http.MethodPost:
@@ -116,6 +124,14 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, s.jobs.Settings())
 	case p == "/api/settings" && r.Method == http.MethodPut:
 		s.settings(w, r)
+	case p == "/api/proxy/subscription" && r.Method == http.MethodGet:
+		s.mihomoSubscription(w, r)
+	case p == "/api/proxy/subscription" && r.Method == http.MethodPut:
+		s.saveMihomoSubscription(w, r)
+	case p == "/api/proxy/subscription" && r.Method == http.MethodDelete:
+		s.clearMihomoSubscription(w, r)
+	case p == "/api/proxy/test" && r.Method == http.MethodPost:
+		s.testMihomoProxy(w, r)
 	case p == "/api/reliability" && r.Method == http.MethodGet:
 		s.reliability(w, r)
 	case p == "/api/reliability/actions" && r.Method == http.MethodGet:

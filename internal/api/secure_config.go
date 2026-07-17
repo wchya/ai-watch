@@ -47,6 +47,39 @@ func (s *Server) manualProviders(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, values)
 }
 
+func (s *Server) ccSwitchProviderProxy(w http.ResponseWriter, r *http.Request) {
+	if s.secure == nil {
+		writeError(w, http.StatusServiceUnavailable, "secure_config_unavailable", "secure provider configuration is unavailable")
+		return
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/cc-switch-providers/"), "/proxy")
+	id = strings.Trim(id, "/")
+	if id == "" || strings.Contains(id, "/") {
+		writeError(w, http.StatusNotFound, "cc_switch_provider_not_found", "CC Switch provider not found")
+		return
+	}
+	var input struct {
+		CLI       domain.CLI       `json:"cli"`
+		ProxyMode domain.ProxyMode `json:"proxyMode"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	value, err := s.secure.SaveCCSwitchProxyOverride(input.CLI, id, input.ProxyMode)
+	if err != nil {
+		switch {
+		case errors.Is(err, secureconfig.ErrInvalidCCSwitchProxy):
+			writeError(w, http.StatusBadRequest, "invalid_cc_switch_proxy", err.Error())
+		case errors.Is(err, fs.ErrNotExist):
+			writeError(w, http.StatusNotFound, "cc_switch_provider_not_found", "CC Switch provider not found")
+		default:
+			secureConfigError(w, err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, value)
+}
+
 func (s *Server) createManualProvider(w http.ResponseWriter, r *http.Request) {
 	if s.secure == nil {
 		writeError(w, http.StatusServiceUnavailable, "secure_config_unavailable", "secure provider configuration is unavailable")

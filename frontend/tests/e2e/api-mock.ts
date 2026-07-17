@@ -58,6 +58,7 @@ export type ApiMock = {
   consoleErrors: string[]
   failNextActionCenter: () => void
   failNextJobRead: () => void
+  failNextProxyApply: () => void
 }
 
 export async function installApiMock(page: Page): Promise<ApiMock> {
@@ -72,12 +73,14 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
   const consoleErrors: string[] = []
   let failActionCenter = 0
   let failJobReads = 0
+  let failProxyApply = 0
   let schedules = [{ id: 'schedule-1', name: '未知状态计划', enabled: true, cli: 'codex', providerId: '', providerName: '当前 Codex 配置', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 62, startMinute: 540, endMinute: 1080, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'future_status', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:00:00Z' }, { id: 'schedule-running', name: '运行中计划', enabled: true, cli: 'codex', providerId: '', providerName: '当前 Codex 配置', mode: 'keepalive', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: false, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'running', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:00:00Z' }, { id: 'schedule-claude-risk', name: 'Claude 异常巡检', enabled: true, cli: 'claude', providerId: 'cc-switch:claude-main', providerGroupId: 'claude-main', providerName: 'Claude 主线路', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'failed', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:30:00Z' }, { id: 'schedule-advisory', name: 'Claude 建议组巡检', enabled: true, cli: 'claude', providerId: 'cc-switch:claude-main', providerGroupId: 'claude-advisory', providerName: 'Claude 建议切换组', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'idle', nextRunAt: '2026-07-16T01:45:00Z' }]
   let providerGroups: Array<Record<string, any>> = [{ id: 'claude-main', name: 'Claude 主备组', cli: 'claude', enabled: true, primaryProviderId: 'cc-switch:claude-main', backupProviderIds: ['cc-switch:claude-backup'], scenarioId: 'basic-ready', failureThreshold: 3, cooldownSeconds: 600, mode: 'automatic', activeProviderId: 'cc-switch:claude-backup', recoveryThreshold: 2, recoveryProbeIntervalSeconds: 300, lastRecoveryProbeAt: '2026-07-15T11:55:00Z', lastRecoveryProbeStatus: 'success', maintenanceUntil: '2026-07-16T12:00:00Z' }, { id: 'claude-advisory', name: 'Claude 建议切换组', cli: 'claude', enabled: true, primaryProviderId: 'cc-switch:claude-main', backupProviderIds: ['cc-switch:claude-backup'], scenarioId: 'basic-ready', failureThreshold: 3, cooldownSeconds: 600, mode: 'advisory', activeProviderId: 'cc-switch:claude-main', recoveryThreshold: 2, recoveryProbeIntervalSeconds: 300, advice: { status: 'open', suggestedProviderId: 'cc-switch:claude-backup', validationJobId: 'validation-job', validationRequestId: 'validation-request', reason: '备用线路已通过基础可用性场景', createdAt: '2026-07-16T01:00:00Z', updatedAt: '2026-07-16T01:01:00Z' } }]
   let incidents: Array<Record<string, any>> = [{ id: 'incident-1', subjectType: 'group', subjectId: 'claude-main', subjectName: 'Claude 主备组', providerId: 'cc-switch:claude-main', groupId: 'claude-main', title: 'Claude 主备组 请求连续失败', status: 'open', severity: 'critical', failureCount: 3, errorCounts: { timeout: 2, overloaded: 1 }, jobIds: ['job-1'], requestIds: ['req-schedule-1'], timeline: [{ id: 'entry-1', at: '2026-07-15T03:51:28Z', type: 'failure', message: '供应商请求超时', requestId: 'req-schedule-1', jobId: 'job-1' }], startedAt: '2026-07-15T03:50:00Z', updatedAt: '2026-07-15T03:51:28Z' }]
   let postmortem: Record<string, any> | null = null
   let notificationChannels: Array<Record<string, any>> = []
   let notificationRoutes: Record<string,string> = { incident_opened:'', incident_recovered:'', reliability_alert:'', reliability_recovered:'', reliability_digest:'', job_notification:'' }
+  let proxySubscription: Record<string, any> = { configured: false, applied: false, nodeCount: 0 }
   let scenarioComparison: Record<string, any> | null = { id: 'comparison-1', scenarioId: 'basic-ready', scenarioName: '基础可用性', cli: 'claude', status: 'completed', createdAt: '2026-07-15T12:00:00Z', items: [{ providerId: 'cc-switch:claude-main', providerName: 'Claude 主线路', jobId: 'comparison-job-1', requestId: 'req-comparison-1', status: 'success', durationMillis: 700, responseExcerpt: 'READY', startedAt: '2026-07-15T12:00:00Z', endedAt: '2026-07-15T12:00:01Z' }, { providerId: 'cc-switch:claude-backup', providerName: 'Claude 备用线路', jobId: 'comparison-job-2', requestId: 'req-comparison-2', status: 'success', durationMillis: 900, responseExcerpt: 'READY', startedAt: '2026-07-15T12:00:00Z', endedAt: '2026-07-15T12:00:01Z' }] }
   let rerunComparison: Record<string, any> | null = null
 
@@ -188,6 +191,28 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
     if (method === 'POST' && path === '/test-scenarios') return json(route, JSON.parse(request.postData() || '{}'))
     if (method === 'DELETE' && path === '/test-scenarios') return json(route, { deleted: true, id: url.searchParams.get('id') })
     if (method === 'GET' && path === '/notifications/dingtalk/config') return json(route, { configured: false, source: 'none' })
+    if (method === 'GET' && path === '/proxy/subscription') return json(route, proxySubscription)
+    if (method === 'PUT' && path === '/proxy/subscription') {
+      const body = request.postDataJSON() as { subscriptionUrl: string }
+      if (failProxyApply > 0) {
+        failProxyApply--
+        proxySubscription = { ...proxySubscription, applied: false, errorStage: 'subscription', errorMessage: '订阅未返回可用代理节点', lastCheckedAt: '2026-07-16T09:29:00Z' }
+        return json(route, { error: { code: 'subscription_unavailable', message: '订阅未返回可用代理节点' } }, 502)
+      }
+      proxySubscription = { configured: true, maskedUrl: new URL(body.subscriptionUrl).origin + '/...', applied: true, nodeCount: 3, currentNode: 'Hong Kong Auto', updatedAt: '2026-07-16T09:30:00Z', lastCheckedAt: '2026-07-16T09:30:01Z' }
+      bulkActions.push('proxy:save')
+      return json(route, proxySubscription)
+    }
+    if (method === 'POST' && path === '/proxy/test') {
+      proxySubscription = { ...proxySubscription, applied: proxySubscription.configured, lastCheckedAt: '2026-07-16T09:31:00Z' }
+      bulkActions.push('proxy:test')
+      return json(route, proxySubscription)
+    }
+    if (method === 'DELETE' && path === '/proxy/subscription') {
+      proxySubscription = { configured: false, applied: false, nodeCount: 0, lastCheckedAt: '2026-07-16T09:32:00Z' }
+      bulkActions.push('proxy:clear')
+      return json(route, proxySubscription)
+    }
     if (method === 'GET' && path === '/notification-channels') return json(route, notificationChannels)
     if (method === 'POST' && path === '/notification-channels') { const body=request.postDataJSON() as Record<string,any>; const channel={id:body.id||'channel-created',name:body.name,description:body.description,type:'dingtalk',enabled:body.enabled!==false,configured:true,maskedWebhook:'https://oapi.dingtalk.com/***',createdAt:'2026-07-16T01:00:00Z',updatedAt:'2026-07-16T01:00:00Z'};notificationChannels=[...notificationChannels,channel];bulkActions.push('notification-channel:create');return json(route,channel,201) }
     if (method === 'PUT' && path.startsWith('/notification-channels/')) { const id=path.split('/')[2],body=request.postDataJSON() as Record<string,any>;notificationChannels=notificationChannels.map(channel=>channel.id===id?{...channel,...body,webhookUrl:undefined,configured:true}:channel);bulkActions.push('notification-channel:update');return json(route,notificationChannels.find(channel=>channel.id===id)) }
@@ -275,5 +300,6 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
     // instead of making the assertion depend on an exact request count.
     failNextActionCenter: () => { failActionCenter = 10 },
     failNextJobRead: () => { failJobReads = 1 },
+    failNextProxyApply: () => { failProxyApply = 1 },
   }
 }

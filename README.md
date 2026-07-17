@@ -129,6 +129,8 @@ Common options:
 | `AI_WATCH_RUNTIME_TMPFS_SIZE` | `256m` | In-memory runtime workspace for concurrent jobs and temporary CC Switch snapshots |
 | `MIHOMO_CONFIG_FILE` | `./config/mihomo/config.yaml.example` | Read-only Mihomo configuration file |
 | `AI_WATCH_DEFAULT_PROXY_URL` | `http://mihomo:7890` | Default provider proxy inside Compose |
+| `AI_WATCH_MIHOMO_CONTROLLER_URL` | `http://mihomo:9090` | Private controller used for subscription hot reload |
+| `AI_WATCH_MIHOMO_TEST_URL` | `https://www.gstatic.com/generate_204` | Fixed outbound target for proxy validation |
 | `DINGTALK_WEBHOOK_URL` | empty | Optional DingTalk webhook imported into application configuration |
 | `CODEX_CLI_VERSION` | `latest` | Codex npm package version installed during image build |
 | `CLAUDE_CLI_VERSION` | `latest` | Claude Code npm package version installed during image build |
@@ -153,6 +155,8 @@ On macOS, make sure Docker Desktop is allowed to share custom paths. On Linux, r
 
 The default Mihomo configuration in `config/mihomo/config.yaml.example` is a safe direct-routing baseline. Mihomo ports are not published to the host; AI Watch reaches the sidecar through the internal Compose network.
 
+The System Settings page can store a subscription URL with the same AES-GCM key used for other secure configuration. Saving generates a constrained runtime configuration in the private Mihomo volume, reloads the private controller, waits for subscription nodes, and validates outbound connectivity. Failed updates roll back to the previous working configuration. Clearing the page-managed subscription reloads `MIHOMO_CONFIG_FILE`, which is DIRECT by default.
+
 To use a private Mihomo configuration, keep it outside the repository and set:
 
 ```dotenv
@@ -167,7 +171,7 @@ docker compose ps mihomo
 docker compose logs --tail=100 mihomo
 ```
 
-Providers can select the default proxy, direct access, or a custom proxy. Never commit subscription URLs or proxy credentials.
+Providers can select the default proxy, direct access, or a custom proxy. Subscription URLs saved through the page are never returned in plaintext. Never commit subscription URLs or proxy credentials.
 
 ## Security and Data Boundaries
 

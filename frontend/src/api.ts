@@ -1,6 +1,6 @@
 import type {
   AppSettings, BulkJobRequest, BulkJobResult, Cli, DashboardData, EventListResult, EventQuery,
-  DingTalkConfig, DingTalkConfigWrite, Incident, IncidentPostmortem, IncidentStatus, JobEvent, JobPhase, JobStatus, JobSummary, MaintenanceWindow, ManualProvider, ManualProviderWrite, NotificationChannel, NotificationChannelWrite, NotificationRoutes, OperationalEvent, PostmortemAction, Provider, ProviderFailoverGroup, ProviderFailoverGroupWrite, ProviderGroupEvaluation, ProviderGroupSwitchResult, ServiceLevelObjective,
+  DingTalkConfig, DingTalkConfigWrite, Incident, IncidentPostmortem, IncidentStatus, JobEvent, JobPhase, JobStatus, JobSummary, MaintenanceWindow, ManualProvider, ManualProviderWrite, MihomoSubscriptionStatus, NotificationChannel, NotificationChannelWrite, NotificationRoutes, OperationalEvent, PostmortemAction, Provider, ProviderFailoverGroup, ProviderFailoverGroupWrite, ProviderGroupEvaluation, ProviderGroupSwitchResult, ServiceLevelObjective,
   ScenarioComparison, ScenarioComparisonListResult, Schedule, ScheduleListResult, ScheduleWriteRequest, StartJobRequest, TestScenario, TestScenarioWriteRequest,
   SystemDiagnostics,
   ReliabilityData, ReliabilityRange, ReliabilityDigestPreview, RequestDetail,
@@ -393,8 +393,13 @@ export const api = {
     return request<ManualProvider>(`/manual-providers/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) })
   },
   deleteManualProvider: (id: string) => request<{ deleted: boolean; id: string }>(`/manual-providers/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  updateCCSwitchProviderProxy: (id: string, cli: Cli, proxyMode: 'default' | 'direct') => request<RawProvider>(`/cc-switch-providers/${encodeURIComponent(id)}/proxy`, { method: 'PUT', body: JSON.stringify({ cli, proxyMode }) }).then(normalizeProvider),
   dingTalkConfig: () => request<DingTalkConfig>('/notifications/dingtalk/config'),
   saveDingTalkConfig: (body: DingTalkConfigWrite) => request<DingTalkConfig>('/notifications/dingtalk/config', { method: 'PUT', body: JSON.stringify(body) }),
+  mihomoSubscription: () => request<MihomoSubscriptionStatus>('/proxy/subscription'),
+  saveMihomoSubscription: (subscriptionUrl: string) => request<MihomoSubscriptionStatus>('/proxy/subscription', { method: 'PUT', body: JSON.stringify({ subscriptionUrl }) }),
+  clearMihomoSubscription: () => request<MihomoSubscriptionStatus>('/proxy/subscription', { method: 'DELETE' }),
+  testMihomoProxy: () => request<MihomoSubscriptionStatus>('/proxy/test', { method: 'POST' }),
   notificationChannels: () => request<NotificationChannel[]>('/notification-channels'),
   createNotificationChannel: (body: NotificationChannelWrite) => request<NotificationChannel>('/notification-channels', { method: 'POST', body: JSON.stringify(body) }),
   updateNotificationChannel: (id: string, body: NotificationChannelWrite) => request<NotificationChannel>(`/notification-channels/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),

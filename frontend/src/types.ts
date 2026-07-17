@@ -100,6 +100,18 @@ export interface DingTalkConfigWrite {
   clearStored?: boolean
 }
 
+export interface MihomoSubscriptionStatus {
+  configured: boolean
+  maskedUrl?: string
+  applied: boolean
+  nodeCount: number
+  currentNode?: string
+  updatedAt?: string
+  lastCheckedAt?: string
+  errorStage?: string
+  errorMessage?: string
+}
+
 export type NotificationMessageType = 'incident_opened' | 'incident_recovered' | 'reliability_alert' | 'reliability_recovered' | 'reliability_digest' | 'job_notification'
 export interface NotificationChannel { id:string; name:string; description?:string; type:'dingtalk'; enabled:boolean; configured:boolean; maskedWebhook?:string; createdAt:string; updatedAt:string }
 export interface NotificationChannelWrite { id?:string; name:string; description?:string; type:'dingtalk'; enabled?:boolean; webhookUrl?:string }

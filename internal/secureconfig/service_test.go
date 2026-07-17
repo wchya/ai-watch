@@ -3,6 +3,7 @@ package secureconfig
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -139,7 +140,24 @@ func (r *fallbackResolver) Resolve(cli domain.CLI, id string) (domain.ResolvedCo
 
 type ccMemoryStore struct {
 	*memoryStore
-	values map[string]domain.CCSwitchProvider
+	values    map[string]domain.CCSwitchProvider
+	overrides map[string]domain.ProxyMode
+}
+
+func (s *ccMemoryStore) GetCCSwitchProxyOverride(cli domain.CLI, id string) (domain.ProxyMode, error) {
+	mode, ok := s.overrides[string(cli)+":"+id]
+	if !ok {
+		return "", fs.ErrNotExist
+	}
+	return mode, nil
+}
+
+func (s *ccMemoryStore) SaveCCSwitchProxyOverride(cli domain.CLI, id string, mode domain.ProxyMode) error {
+	if s.overrides == nil {
+		s.overrides = map[string]domain.ProxyMode{}
+	}
+	s.overrides[string(cli)+":"+id] = mode
+	return nil
 }
 
 func (s *ccMemoryStore) ListCCSwitchProviders() ([]domain.CCSwitchProvider, error) {
@@ -196,6 +214,27 @@ func TestCCSwitchProviderListsAndResolvesFromRedisStore(t *testing.T) {
 	}
 	if fallback.called {
 		t.Fatal("synced CC Switch provider unexpectedly used the runtime SQLite fallback")
+	}
+	updated, err := service.SaveCCSwitchProxyOverride(domain.CLICodex, "cc-codex", domain.ProxyDirect)
+	if err != nil || updated.ProxyMode != domain.ProxyDirect {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+	codex, err = service.Resolve(domain.CLICodex, "cc-codex")
+	if err != nil || codex.ProxyMode != domain.ProxyDirect {
+		t.Fatalf("override was not resolved: %+v err=%v", codex, err)
+	}
+	providers, err = service.ListCCSwitchProviders()
+	var listedMode domain.ProxyMode
+	for _, provider := range providers {
+		if provider.ID == "cc-codex" {
+			listedMode = provider.ProxyMode
+		}
+	}
+	if err != nil || listedMode != domain.ProxyDirect {
+		t.Fatalf("override was not listed: %+v err=%v", providers, err)
+	}
+	if _, err = service.SaveCCSwitchProxyOverride(domain.CLICodex, "cc-codex", domain.ProxyCustom); !errors.Is(err, ErrInvalidCCSwitchProxy) {
+		t.Fatalf("custom override err=%v", err)
 	}
 }
 
