@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AlertCircle, BellOff, CalendarClock, CheckCircle2, Clock3, LoaderCircle, Plus, RefreshCw, ShieldCheck, ShieldOff, TimerReset, X } from 'lucide-react'
 import { api } from './api'
+import { confirmAction } from './ConfirmDialog'
 import { useDelayedRefresh } from './useDelayedRefresh'
 import type { MaintenanceWindow } from './types'
 
@@ -20,9 +21,9 @@ export function MaintenanceView() {
   useEffect(() => { void load() }, [load])
   const refreshAfter = useDelayedRefresh(() => load(true))
   const run = async (key: string, operation: () => Promise<MaintenanceWindow>, success: string) => { if (busy) return false; setBusy(key); setError(''); setMessage(''); try { await operation(); setMessage(success); await refreshAfter(); return true } catch (cause) { setError(cause instanceof Error ? cause.message : '维护窗口操作失败'); return false } finally { setBusy('') } }
-  const start = (item: MaintenanceWindow, seconds: number) => { if (!window.confirm(`立即为“${item.groupName}”开启 ${seconds / 60} 分钟维护窗口？`)) return; const until = new Date(Date.now() + seconds * 1000).toISOString(); void run(`${item.groupId}:start`, () => api.startMaintenance(item.groupId, { until }), `${item.groupName} 维护窗口已开始`) }
-  const extend = (item: MaintenanceWindow, seconds: number) => { if (!window.confirm(`将“${item.groupName}”维护窗口延长 ${seconds / 60} 分钟？`)) return; void run(`${item.groupId}:extend`, () => api.extendMaintenance(item.groupId, seconds), `${item.groupName} 维护窗口已延长`) }
-  const end = (item: MaintenanceWindow) => { if (!window.confirm(`提前结束“${item.groupName}”维护窗口？`)) return; void run(`${item.groupId}:end`, () => api.endMaintenance(item.groupId), `${item.groupName} 维护窗口已结束`) }
+  const start = (item: MaintenanceWindow, seconds: number) => { const minutes = seconds / 60; void confirmAction({ title: '开启维护窗口', message: `立即为“${item.groupName}”开启 ${minutes} 分钟维护窗口？`, detail: '窗口期间继续记录请求和事故，但暂停新通知、备用验证与自动切换。', confirmLabel: `开启 ${minutes} 分钟`, action: async () => { const until = new Date(Date.now() + seconds * 1000).toISOString(); await api.startMaintenance(item.groupId, { until }); setMessage(`${item.groupName} 维护窗口已开始`); await refreshAfter() } }) }
+  const extend = (item: MaintenanceWindow, seconds: number) => { const minutes = seconds / 60; void confirmAction({ title: '延长维护窗口', message: `将“${item.groupName}”的维护窗口延长 ${minutes} 分钟？`, detail: `当前窗口结束时间将顺延 ${minutes} 分钟。`, confirmLabel: `延长 ${minutes} 分钟`, tone: 'warning', action: async () => { await api.extendMaintenance(item.groupId, seconds); setMessage(`${item.groupName} 维护窗口已延长`); await refreshAfter() } }) }
+  const end = (item: MaintenanceWindow) => { void confirmAction({ title: '提前结束维护', message: `立即结束“${item.groupName}”的维护窗口？`, detail: '结束后通知、备用验证和自动切换将恢复正常。', confirmLabel: '结束维护', tone: 'danger', action: async () => { await api.endMaintenance(item.groupId); setMessage(`${item.groupName} 维护窗口已结束`); await refreshAfter() } }) }
   const visible = useMemo(() => items.filter(item => filter === 'all' || item.status === filter), [filter, items])
   const active = items.filter(item => item.status === 'active').length
   const scheduled = items.filter(item => item.status === 'scheduled').length

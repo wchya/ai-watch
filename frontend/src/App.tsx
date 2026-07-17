@@ -21,6 +21,7 @@ import { TestScenariosView } from './TestScenariosView'
 import type {
   AppSettings, DashboardData, JobOptions, JobSummary, Provider,
 } from './types'
+import { ConfirmHost } from './ConfirmDialog'
 
 const navIcons: Record<NavIcon, React.ReactNode> = { dashboard: <Gauge/>, providers: <KeyRound/>, validation: <FlaskConical/>, automation: <CalendarClock/>, stability: <TrendingUp/>, events: <History/>, settings: <Settings/> }
 const requestFromPath = (pathname: string) => {
@@ -157,6 +158,7 @@ export function App() {
   useEffect(() => { document.title = `AI Watch · ${viewLabel}` }, [viewLabel])
 
   return <div className={`app-shell theme-${uiTheme}`}>
+    <ConfirmHost/>
     <div className="ambient ambient-a"/><div className="ambient ambient-b"/>
     <aside className={`sidebar ${mobileNav ? 'mobile-open' : ''}`}>
       <div className="sidebar-top"><Logo/><button className="icon-button mobile-close" onClick={() => setMobileNav(false)} aria-label="关闭菜单"><X/></button></div>

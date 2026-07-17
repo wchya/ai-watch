@@ -565,7 +565,6 @@ test('统一请求详情支持深链接、事件入口和浏览器返回', async
 
 test('维护窗口支持开始、延长、提前结束和未来调度', async ({ page }) => {
   const mock = await installApiMock(page)
-  page.on('dialog', dialog => void dialog.accept())
   await page.goto('/maintenance')
   await expect(page).toHaveURL(/\/maintenance$/)
   await expect(page.getByRole('heading', { name: '维护期间继续记录，但暂时保持安静。' })).toBeVisible()
@@ -573,16 +572,20 @@ test('维护窗口支持开始、延长、提前结束和未来调度', async ({
   const card = page.locator('.maintenance-card').filter({ hasText: 'Claude 主备组' })
   await expect(card).toContainText('进行中')
   await card.getByRole('button', { name: '提前结束' }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: '结束维护' }).click()
   await expect(card).toContainText('未设置')
   await expect.poll(() => mock.bulkActions.at(-1)).toBe('maintenance:end')
 
   await card.getByRole('button', { name: '30 分钟' }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: '开启 30 分钟' }).click()
   await expect(card).toContainText('进行中')
   await expect(page.getByRole('status')).toContainText('维护窗口已开始')
   await expect.poll(() => mock.bulkActions.at(-1)).toBe('maintenance:start')
   await card.getByRole('button', { name: '延长 30 分钟' }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: '延长 30 分钟' }).click()
   await expect.poll(() => mock.bulkActions.at(-1)).toBe('maintenance:extend')
   await card.getByRole('button', { name: '提前结束' }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: '结束维护' }).click()
   await expect(card).toContainText('未设置')
 
   await card.getByRole('button', { name: '自定义' }).click()

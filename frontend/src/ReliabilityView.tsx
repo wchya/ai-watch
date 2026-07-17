@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Activity, AlertCircle, AlertTriangle, CalendarClock, CheckCircle2, Clock3, Download, ExternalLink, Gauge, GitBranch, History, Lightbulb, LoaderCircle, Pause, RefreshCw, ShieldCheck, TrendingUp } from 'lucide-react'
 import { api } from './api'
+import { confirmAction } from './ConfirmDialog'
+import { Select } from './Select'
 import { useDelayedRefresh } from './useDelayedRefresh'
 import type { ReliabilityBucket, ReliabilityData, ReliabilityMetrics, ReliabilityProvider, ReliabilityRange } from './types'
 
@@ -41,19 +43,13 @@ export function ReliabilityView() {
   const remediate = async (provider: ReliabilityProvider, action: 'retest' | 'validate_backup' | 'pause_schedules') => {
     const key = `${provider.key}:${action}`
     const enabledSchedules = provider.remediation?.schedules.filter(schedule => schedule.enabled) || []
-    if (action === 'pause_schedules' && !window.confirm(`暂停与“${provider.name}”关联的 ${enabledSchedules.length} 个计划？`)) return
-    setActionBusy(key); setActionErrors(current => ({ ...current, [provider.key]: '' })); setActionMessage('')
-    try {
-      await api.reliabilityAction({ cli: provider.cli, providerId: provider.providerId, action })
-      setActionMessage(action === 'retest' ? `${provider.name} 复测已启动` : action === 'validate_backup' ? `${provider.name} 的备用线路验证已启动` : `已暂停 ${enabledSchedules.length} 个相关计划`)
-      await refreshAfterOperation()
-    } catch (cause) {
-      setActionErrors(current => ({ ...current, [provider.key]: cause instanceof Error ? cause.message : '可靠性处置失败' }))
-    } finally { setActionBusy('') }
+    const execute = async () => { setActionBusy(key); setActionErrors(current => ({ ...current, [provider.key]: '' })); setActionMessage(''); try { await api.reliabilityAction({ cli: provider.cli, providerId: provider.providerId, action }); setActionMessage(action === 'retest' ? `${provider.name} 复测已启动` : action === 'validate_backup' ? `${provider.name} 的备用线路验证已启动` : `已暂停 ${enabledSchedules.length} 个相关计划`); await refreshAfterOperation() } catch (cause) { setActionErrors(current => ({ ...current, [provider.key]: cause instanceof Error ? cause.message : '可靠性处置失败' })); throw cause } finally { setActionBusy('') } }
+    if (action === 'pause_schedules') await confirmAction({ title: '暂停相关计划', message: `暂停与“${provider.name}”关联的 ${enabledSchedules.length} 个计划？`, detail: '计划配置会保留，可在自动化页面随时恢复。', confirmLabel: `暂停 ${enabledSchedules.length} 个计划`, tone: 'warning', action: execute })
+    else await execute()
   }
 
   return <div className="page reliability-page">
-    <section className="page-heading reliability-heading"><div><span className="eyebrow"><TrendingUp/>Reliability Intelligence</span><h1>比较每条线路的真实稳定性。</h1><p>基于脱敏请求事件计算成功率、延迟与异常密度；统计范围受当前事件保留策略约束。</p></div><div className="reliability-heading-actions"><div><select aria-label="报告格式" value={exportFormat} onChange={event => setExportFormat(event.target.value as 'csv' | 'json')}><option value="csv">CSV</option><option value="json">JSON</option></select><button className="secondary" disabled={exporting || !data} onClick={() => void exportReport()}>{exporting ? <LoaderCircle className="spinning"/> : <Download/>}导出报告</button></div><button className="secondary" disabled={loading} onClick={() => void load()}>{loading ? <LoaderCircle className="spinning"/> : <RefreshCw/>}刷新数据</button></div></section>
+    <section className="page-heading reliability-heading"><div><span className="eyebrow"><TrendingUp/>Reliability Intelligence</span><h1>比较每条线路的真实稳定性。</h1><p>基于脱敏请求事件计算成功率、延迟与异常密度；统计范围受当前事件保留策略约束。</p></div><div className="reliability-heading-actions"><div><Select aria-label="报告格式" value={exportFormat} onChange={event => setExportFormat(event.target.value as 'csv' | 'json')}><option value="csv">CSV</option><option value="json">JSON</option></Select><button className="secondary" disabled={exporting || !data} onClick={() => void exportReport()}>{exporting ? <LoaderCircle className="spinning"/> : <Download/>}导出报告</button></div><button className="secondary" disabled={loading} onClick={() => void load()}>{loading ? <LoaderCircle className="spinning"/> : <RefreshCw/>}刷新数据</button></div></section>
     <div className="reliability-toolbar" role="group" aria-label="可靠性时间范围">{ranges.map(([value, label]) => <button key={value} className={range === value ? 'active' : ''} aria-pressed={range === value} onClick={() => setRange(value)}>{label}</button>)}</div>
     {error && <div className="error-banner" role="alert"><AlertCircle/><div><strong>可靠性数据刷新失败</strong><span>{error}{data ? '，已保留上一次成功结果。' : ''}</span></div><button onClick={() => void load()}>重试</button></div>}
     {actionMessage && <div className="toast-inline success" role="status"><CheckCircle2/>{actionMessage}</div>}

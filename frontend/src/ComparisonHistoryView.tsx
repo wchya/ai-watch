@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AlertCircle, BarChart3, CheckCircle2, Clock3, ExternalLink, History, LoaderCircle, RefreshCw, RotateCcw, ShieldCheck, XCircle } from 'lucide-react'
 import { api } from './api'
+import { confirmAction } from './ConfirmDialog'
 import type { ScenarioComparison } from './types'
 
 type Filter = '' | ScenarioComparison['status']
@@ -52,11 +53,8 @@ export function ComparisonHistoryView() {
 
   const choose = (id: string) => { window.history.pushState({}, '', `/validation/comparisons/${encodeURIComponent(id)}`); setSelectedId(id) }
   const rerun = async () => {
-    if (!selected || rerunning || !window.confirm(`按原场景和 ${selected.items.length} 个 Provider 重新运行？`)) return
-    setRerunning(true); setDetailError('')
-    try { const next = await api.rerunScenarioComparison(selected.id); setItems(current => [next, ...current]); window.history.pushState({}, '', `/comparisons/${encodeURIComponent(next.id)}`); setSelectedId(next.id); setSelected(next) }
-    catch (cause) { setDetailError(cause instanceof Error ? cause.message : '重新运行失败') }
-    finally { setRerunning(false) }
+    if (!selected || rerunning) return
+    await confirmAction({ title: '重新运行场景对比', message: `按原场景重新测试 ${selected.items.length} 个 Provider？`, detail: '系统会创建新的对比批次，原历史记录保持不变。', confirmLabel: '开始重跑', action: async () => { setRerunning(true); setDetailError(''); try { const next = await api.rerunScenarioComparison(selected.id); setItems(current => [next, ...current]); window.history.pushState({}, '', `/comparisons/${encodeURIComponent(next.id)}`); setSelectedId(next.id); setSelected(next) } finally { setRerunning(false) } } })
   }
   const ranked = useMemo(() => [...(selected?.items || [])].sort((a, b) => (a.status === 'success' ? 0 : 1) - (b.status === 'success' ? 0 : 1) || (a.durationMillis || Number.MAX_SAFE_INTEGER) - (b.durationMillis || Number.MAX_SAFE_INTEGER)), [selected])
 

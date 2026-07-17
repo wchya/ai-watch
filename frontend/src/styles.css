@@ -1167,6 +1167,67 @@ html:has(.theme-deep-ocean), body:has(.theme-deep-ocean), #root:has(.theme-deep-
 /* Semantic light-theme surfaces for settings and schedule actions. */
 .app-shell .dingtalk-secure-config { color: var(--text-primary); background: var(--surface-1); border-color: var(--line-default); }
 .app-shell .dingtalk-config-status>div:nth-child(2)>span { color: var(--text-muted); }
+
+/* Signal Select — branded desktop listbox with a native mobile/automation fallback. */
+.select-shell { min-width:0;position:relative;display:inline-flex;vertical-align:middle }
+.select-native { position:absolute!important;width:1px!important;height:1px!important;margin:-1px!important;padding:0!important;overflow:hidden!important;clip:rect(0 0 0 0)!important;clip-path:inset(50%)!important;white-space:nowrap!important;border:0!important;opacity:0!important }
+.select-trigger { min-width:0;width:100%;min-height:42px;padding:0 12px;display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--line-default);border-radius:9px;color:var(--text-primary);background:linear-gradient(180deg,var(--surface-1),var(--surface-2));box-shadow:inset 0 1px rgba(255,255,255,.04),0 1px 2px rgba(0,0,0,.04);font:inherit;text-align:left;cursor:pointer;transition:border-color var(--motion-fast),box-shadow var(--motion-fast),background var(--motion-fast),transform var(--motion-fast) }
+.select-trigger>span { min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap }
+.select-trigger>svg { width:15px;height:15px;flex:none;color:var(--status-info);transition:transform var(--motion-fast) }
+.select-trigger:hover { border-color:color-mix(in srgb,var(--status-info) 42%,var(--line-default));background:var(--surface-hover) }
+.select-trigger:active { transform:translateY(1px) }
+.select-trigger.open { border-color:var(--status-info);box-shadow:0 0 0 3px color-mix(in srgb,var(--status-info) 15%,transparent),var(--shadow-button) }
+.select-trigger.open>svg { transform:rotate(180deg) }
+.select-trigger:focus-visible { outline:0;border-color:var(--status-info);box-shadow:0 0 0 3px color-mix(in srgb,var(--status-info) 20%,transparent) }
+.select-shell.disabled .select-trigger,.select-trigger:disabled { color:var(--text-muted);background:var(--surface-3);box-shadow:none;cursor:not-allowed;opacity:.64 }
+.field>.select-shell { width:100% }
+.select-popover { position:fixed;z-index:1000;padding:6px;overflow:auto;border:1px solid rgba(136,165,180,.28);border-radius:12px;color:#e8f1fa;background:#0f1d2e;box-shadow:0 18px 54px rgba(0,0,0,.34),0 2px 8px rgba(0,0,0,.18);animation:select-pop-in 150ms cubic-bezier(.2,.8,.2,1);overscroll-behavior:contain }
+.select-popover button { width:100%;min-height:40px;padding:8px 10px;display:flex;align-items:center;justify-content:space-between;gap:12px;border:0;border-radius:8px;color:#b8cad9;background:transparent;font:500 11px/1.35 "Fira Sans","Noto Sans SC",system-ui,sans-serif;text-align:left;cursor:pointer;transition:color 120ms ease,background 120ms ease,transform 120ms ease }
+.select-popover button>span { min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap }
+.select-popover button>svg { width:15px;height:15px;flex:none;color:#44d5d2 }
+.select-popover button:hover,.select-popover button.active { color:#f2fbff;background:rgba(68,213,210,.10) }
+.select-popover button.active { box-shadow:inset 3px 0 #44d5d2 }
+.select-popover button.selected { color:#8ff4ee;background:rgba(68,213,210,.14);font-weight:750 }
+.select-popover button:disabled { color:#596d7d;background:transparent;cursor:not-allowed;opacity:.58 }
+body:has(.theme-arctic-daylight) .select-popover { color:#172b36;border-color:rgba(43,88,105,.18);background:#fff;box-shadow:0 20px 55px rgba(33,65,78,.16),0 4px 14px rgba(33,65,78,.10) }
+body:has(.theme-arctic-daylight) .select-popover button { color:#385361 }
+body:has(.theme-arctic-daylight) .select-popover button:hover,body:has(.theme-arctic-daylight) .select-popover button.active { color:#123944;background:#e8f7f6 }
+body:has(.theme-arctic-daylight) .select-popover button.active { box-shadow:inset 3px 0 #087f83 }
+body:has(.theme-arctic-daylight) .select-popover button.selected { color:#075f63;background:#dff3f2 }
+body:has(.theme-arctic-daylight) .select-popover button>svg { color:#087f83 }
+body:has(.theme-arctic-daylight) .select-popover button:disabled { color:#8a9aa2;background:#f7fafb }
+body:has(.theme-graphite-signal) .select-popover { border-color:rgba(205,215,220,.18);background:#202428;box-shadow:0 20px 55px rgba(0,0,0,.38) }
+@keyframes select-pop-in { from { opacity:0;transform:translateY(-5px) scale(.985) } to { opacity:1;transform:none } }
+@media (prefers-reduced-motion:reduce) { .select-popover { animation:none }.select-trigger,.select-trigger>svg { transition:none } }
+@media (max-width:700px),(pointer:coarse) {
+  .select-shell { display:block;width:100% }
+  .select-native { position:static!important;width:100%!important;height:44px!important;margin:0!important;padding:0 34px 0 11px!important;overflow:visible!important;clip:auto!important;clip-path:none!important;white-space:normal!important;border:1px solid var(--line-default)!important;border-radius:9px!important;color:var(--text-primary)!important;background:var(--surface-1)!important;opacity:1!important;appearance:auto }
+  .select-trigger { display:none }
+}
+.confirm-host { position:fixed;inset:0;z-index:1200;display:grid;place-items:center;padding:20px }
+.confirm-host-scrim { position:absolute;inset:0;border:0;background:rgba(3,12,18,.56);backdrop-filter:blur(8px);animation:confirm-fade 160ms ease-out }
+.confirm-dialog { position:relative;width:min(440px,100%);overflow:hidden;border:1px solid var(--line-default);border-radius:16px;color:var(--text-primary);background:var(--surface-1);box-shadow:0 28px 90px rgba(2,15,22,.30),0 6px 24px rgba(2,15,22,.14);animation:confirm-rise 190ms cubic-bezier(.2,.8,.2,1) }
+.confirm-dialog>header { min-height:64px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line-subtle);background:linear-gradient(135deg,var(--status-info-soft),transparent) }
+.confirm-dialog>header>span { width:38px;height:38px;display:grid;place-items:center;border-radius:11px;color:var(--status-info);background:var(--surface-1);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--status-info) 25%,var(--line-default)) }
+.confirm-dialog>header svg { width:18px }
+.confirm-dialog>div { padding:24px 24px 20px }
+.confirm-dialog h2 { margin:0;color:var(--text-primary);font-size:18px;letter-spacing:-.2px }
+.confirm-dialog p { margin:10px 0 0;color:var(--text-secondary);font-size:12px;line-height:1.7 }
+.confirm-dialog small { display:block;margin-top:10px;padding:10px 12px;border-radius:9px;color:var(--text-muted);background:var(--surface-2);font-size:10px;line-height:1.6 }
+.confirm-dialog>footer { padding:14px 16px;display:flex;justify-content:flex-end;gap:9px;border-top:1px solid var(--line-subtle);background:var(--surface-2) }
+.confirm-dialog-submit { min-width:112px;min-height:40px;padding:0 16px;display:flex;align-items:center;justify-content:center;gap:7px;border:0;border-radius:9px;color:var(--text-inverse);background:var(--status-info);box-shadow:var(--shadow-button);font-size:11px;font-weight:750;cursor:pointer }
+.confirm-dialog-submit svg { width:15px }
+.confirm-dialog-submit:disabled { opacity:.62;cursor:wait }
+.confirm-dialog.tone-danger>header,.confirm-dialog.tone-warning>header { background:linear-gradient(135deg,var(--status-danger-soft),transparent) }
+.confirm-dialog.tone-danger>header>span { color:var(--status-danger);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--status-danger) 28%,var(--line-default)) }
+.confirm-dialog.tone-danger .confirm-dialog-submit { background:var(--status-danger) }
+.confirm-dialog.tone-warning>header>span { color:var(--status-warning);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--status-warning) 30%,var(--line-default)) }
+.confirm-dialog.tone-warning .confirm-dialog-submit { background:var(--status-warning) }
+.confirm-dialog-error { margin-top:14px;padding:10px 12px;display:flex;align-items:flex-start;gap:8px;border-radius:9px;color:var(--status-danger);background:var(--status-danger-soft);font-size:10px;line-height:1.5 }
+.confirm-dialog-error svg { width:15px;flex:none }
+@keyframes confirm-rise { from { opacity:0;transform:translateY(10px) scale(.98) } to { opacity:1;transform:none } }
+@keyframes confirm-fade { from { opacity:0 } }
+@media (prefers-reduced-motion:reduce) { .confirm-dialog,.confirm-host-scrim { animation:none } }
 .app-shell .notification-icon.dingtalk { color: var(--status-info); background: var(--status-info-soft); border-color: color-mix(in srgb, var(--status-info) 26%, var(--line-default)); }
 .app-shell .notification-icon.proxy { color: var(--status-info); background: var(--status-info-soft); border-color: color-mix(in srgb, var(--status-info) 26%, var(--line-default)); }
 .app-shell .config-badge { color: var(--text-muted); background: var(--surface-3); border-color: var(--line-default); }

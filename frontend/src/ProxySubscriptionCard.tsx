@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { AlertCircle, Check, Gauge, KeyRound, LoaderCircle, Network, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { api } from './api'
+import { confirmAction } from './ConfirmDialog'
 import type { MihomoSubscriptionStatus } from './types'
 
 const checkedAt = (value?: string) => value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '尚未检查'
@@ -32,11 +33,7 @@ export function ProxySubscriptionCard() {
     finally { setBusy(null) }
   }
   const clear = async () => {
-    if (!window.confirm('清除页面保存的订阅并恢复基础代理配置？')) return
-    setBusy('clear'); setError(''); setMessage('')
-    try { setConfig(await api.clearMihomoSubscription()); setSubscriptionUrl(''); setMessage('订阅已清除，基础代理配置已恢复') }
-    catch (e) { setError(e instanceof Error ? e.message : '清除订阅失败'); api.mihomoSubscription().then(setConfig).catch(() => undefined) }
-    finally { setBusy(null) }
+    await confirmAction({ title: '清除代理订阅', message: '清除页面保存的订阅并恢复基础代理配置？', detail: 'Mihomo 将重新加载基础配置，默认情况下恢复为 DIRECT。', confirmLabel: '清除订阅', tone: 'danger', action: async () => { setBusy('clear'); setError(''); setMessage(''); try { setConfig(await api.clearMihomoSubscription()); setSubscriptionUrl(''); setMessage('订阅已清除，基础代理配置已恢复') } finally { setBusy(null) } } })
   }
 
   const applied = Boolean(config?.configured && config.applied && !config.errorStage)
