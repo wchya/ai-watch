@@ -150,6 +150,12 @@ const normalizeJob = (job: RawJob): JobSummary => ({
   attemptCount: job.attempts, startedAt: job.startedAt, endedAt: job.endedAt,
   nextAttemptAt: job.nextAttemptAt, elapsedMs: job.elapsedMillis,
 })
+const requestJob = async (id: string) => normalizeJob(await request<RawJob>(`/jobs/${encodeURIComponent(id)}`))
+const requestJobSnapshot = async (): Promise<Pick<DashboardData, 'runningJobs' | 'recentJobs'>> => {
+  const jobs = (await request<RawJob[]>('/jobs')).map(normalizeJob)
+  const runningJobs = jobs.filter(job => job.status === 'running' || job.status === 'starting')
+  return { runningJobs, recentJobs: jobs.filter(job => !runningJobs.includes(job)).slice(0, 12) }
+}
 const normalizeProvider = (provider: RawProvider): Provider => ({
   ...provider, source: provider.id === '' ? 'current' : provider.id.startsWith('manual:') ? 'manual' : 'cc-switch', maskedApiKey: provider.maskedKey,
 })
@@ -243,19 +249,17 @@ export const api = {
   completeIncidentPostmortem: (id: string) => request<IncidentPostmortem>(`/incidents/${encodeURIComponent(id)}/postmortem/complete`, { method: 'POST' }),
   reopenIncidentPostmortem: (id: string) => request<IncidentPostmortem>(`/incidents/${encodeURIComponent(id)}/postmortem/reopen`, { method: 'POST' }),
   incidentPostmortemMarkdown: (id: string) => requestText(`/incidents/${encodeURIComponent(id)}/postmortem/markdown`),
+  jobSnapshot: requestJobSnapshot,
   async dashboard(): Promise<DashboardData> {
-    const [health, config, rawProviders, rawJobs] = await Promise.all([
+    const [health, config, rawProviders, jobs] = await Promise.all([
       request<{ status: string; version?: string }>('/health'),
       request<RawConfigStatus>('/config/status'),
       request<RawProvider[]>('/providers'),
-      request<RawJob[]>('/jobs'),
+      requestJobSnapshot(),
     ])
     const providers = rawProviders.map(normalizeProvider)
     if (config.codexConfig && !providers.some(p => p.cli === 'codex' && p.id === '')) providers.unshift({ id: '', cli: 'codex', name: '当前 Codex 配置', current: true, source: 'current', available: true })
     if (config.claudeConfig && !providers.some(p => p.cli === 'claude' && p.id === '')) providers.unshift({ id: '', cli: 'claude', name: '当前 Claude 配置', current: true, source: 'current', available: true })
-    const jobs = rawJobs.map(normalizeJob)
-    const runningJobs = jobs.filter(job => job.status === 'running' || job.status === 'starting')
-    const recentJobs = jobs.filter(job => !runningJobs.includes(job)).slice(0, 12)
     return {
       health: {
         status: health.status === 'ok' ? 'ok' : 'degraded', version: health.version,
@@ -267,10 +271,10 @@ export const api = {
           { id: 'cc-switch', name: 'CC Switch 启动同步源', available: config.ccSwitchDb, description: config.ccSwitchDb ? '启动时导入 Redis；运行期使用最后成功快照' : '未挂载启动同步源；运行期继续使用 Redis 快照' },
           { id: 'sqlite', name: 'SQLite 启动同步工具', available: config.sqliteCli, description: '仅应用启动时读取 CC Switch，不参与任务运行' },
         ],
-      }, providers, runningJobs, recentJobs,
+      }, providers, ...jobs,
     }
   },
-  async getJob(id: string) { return normalizeJob(await request<RawJob>(`/jobs/${encodeURIComponent(id)}`)) },
+  getJob: requestJob,
   async startJob(body: StartJobRequest) {
     const o = body.options
     const payload = {
@@ -285,8 +289,13 @@ export const api = {
   },
   async stopJob(id: string) {
     await request<{ accepted: boolean }>(`/jobs/${encodeURIComponent(id)}/stop`, { method: 'POST' })
-    await new Promise(resolve => setTimeout(resolve, 120))
-    return api.getJob(id)
+    let latest: JobSummary | undefined
+    for (const delay of [120, 240, 480, 720]) {
+      await new Promise(resolve => setTimeout(resolve, delay))
+      latest = await requestJob(id)
+      if (latest.status !== 'running' && latest.status !== 'starting') return latest
+    }
+    return latest!
   },
   async settings(): Promise<AppSettings> {
     const raw = await request<RawSettings>('/settings')

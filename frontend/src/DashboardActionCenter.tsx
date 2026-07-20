@@ -28,7 +28,7 @@ const ago = (value?: string) => {
   return new Date(value).toLocaleDateString('zh-CN')
 }
 
-export function DashboardActionCenter({ data, probeProvider, openJob }: { data: DashboardData; probeProvider: (provider: Provider) => void; openJob: (job: JobSummary) => void }) {
+export function DashboardActionCenter({ data, probeProvider, openJob, onJobsChanged }: { data: DashboardData; probeProvider: (provider: Provider) => void; openJob: (job: JobSummary) => void; onJobsChanged: () => void }) {
   const [incidents, setIncidents] = useState<Incident[]>([])
   const [schedules, setSchedules] = useState<Schedule[]>([])
   const [reliability, setReliability] = useState<ReliabilityData | null>(null)
@@ -84,7 +84,7 @@ export function DashboardActionCenter({ data, probeProvider, openJob }: { data: 
   const stop = async (job: JobSummary) => {
     if (stopping) return
     setStopping(job.id); setOperationError('')
-    try { await api.stopJob(job.id); setStopped(current => new Set(current).add(job.id)) }
+    try { await api.stopJob(job.id); setStopped(current => new Set(current).add(job.id)); onJobsChanged() }
     catch (cause) { setOperationError(cause instanceof Error ? cause.message : '停止任务失败') }
     finally { setStopping('') }
   }

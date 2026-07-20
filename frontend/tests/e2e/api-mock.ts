@@ -54,11 +54,13 @@ export type ApiMock = {
   reliabilityActions: string[]
   providerGroupActions: string[]
   bulkActions: string[]
+  stopJobCalls: string[]
   unmatched: string[]
   consoleErrors: string[]
   failNextActionCenter: () => void
   failNextJobRead: () => void
   failNextProxyApply: () => void
+  setJobStatus: (status: 'running' | 'success' | 'stopped') => void
   seedSchedules: (count: number) => void
   seedComparisons: (count: number) => void
 }
@@ -69,6 +71,7 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
   const reliabilityExports: string[] = []
   let reliabilityDigestSends = 0
   const bulkActions: string[] = []
+  const stopJobCalls: string[] = []
   const reliabilityActions: string[] = []
   const providerGroupActions: string[] = []
   const unmatched: string[] = []
@@ -76,6 +79,7 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
   let failActionCenter = 0
   let failJobReads = 0
   let failProxyApply = 0
+  let currentJob = { ...completedJob }
   let schedules = [{ id: 'schedule-1', name: '未知状态计划', enabled: true, cli: 'codex', providerId: '', providerName: '当前 Codex 配置', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 62, startMinute: 540, endMinute: 1080, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'future_status', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:00:00Z' }, { id: 'schedule-running', name: '运行中计划', enabled: true, cli: 'codex', providerId: '', providerName: '当前 Codex 配置', mode: 'keepalive', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: false, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'running', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:00:00Z' }, { id: 'schedule-claude-risk', name: 'Claude 异常巡检', enabled: true, cli: 'claude', providerId: 'cc-switch:claude-main', providerGroupId: 'claude-main', providerName: 'Claude 主线路', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'failed', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:30:00Z' }, { id: 'schedule-advisory', name: 'Claude 建议组巡检', enabled: true, cli: 'claude', providerId: 'cc-switch:claude-main', providerGroupId: 'claude-advisory', providerName: 'Claude 建议切换组', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'idle', nextRunAt: '2026-07-16T01:45:00Z' }]
   const initialMaintenanceUntil = new Date(Date.now() + 60 * 60_000).toISOString()
   let providerGroups: Array<Record<string, any>> = [{ id: 'claude-main', name: 'Claude 主备组', cli: 'claude', enabled: true, primaryProviderId: 'cc-switch:claude-main', backupProviderIds: ['cc-switch:claude-backup'], scenarioId: 'basic-ready', failureThreshold: 3, cooldownSeconds: 600, mode: 'automatic', activeProviderId: 'cc-switch:claude-backup', recoveryThreshold: 2, recoveryProbeIntervalSeconds: 300, lastRecoveryProbeAt: '2026-07-15T11:55:00Z', lastRecoveryProbeStatus: 'success', maintenanceUntil: initialMaintenanceUntil }, { id: 'claude-advisory', name: 'Claude 建议切换组', cli: 'claude', enabled: true, primaryProviderId: 'cc-switch:claude-main', backupProviderIds: ['cc-switch:claude-backup'], scenarioId: 'basic-ready', failureThreshold: 3, cooldownSeconds: 600, mode: 'advisory', activeProviderId: 'cc-switch:claude-main', recoveryThreshold: 2, recoveryProbeIntervalSeconds: 300, advice: { status: 'open', suggestedProviderId: 'cc-switch:claude-backup', validationJobId: 'validation-job', validationRequestId: 'validation-request', reason: '备用线路已通过基础可用性场景', createdAt: '2026-07-16T01:00:00Z', updatedAt: '2026-07-16T01:01:00Z' } }]
@@ -102,13 +106,19 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
     if (method === 'GET' && path === '/health') return json(route, { status: 'ok', version: 'test' })
     if (method === 'GET' && path === '/config/status') return json(route, { codexCli: true, claudeCli: true, sqliteCli: true, codexConfig: true, claudeConfig: true, ccSwitchDb: true })
     if (method === 'GET' && path === '/providers') return json(route, providers)
-    if (method === 'GET' && path === '/jobs') return json(route, [completedJob])
+    if (method === 'GET' && path === '/jobs') return json(route, [currentJob])
     if (method === 'GET' && path === '/jobs/job-1') {
       if (failJobReads > 0) {
         failJobReads--
         return json(route, { error: { code: 'job_not_found', message: '最近任务已不可用，可等待下一次运行' } }, 404)
       }
-      return json(route, completedJob)
+      return json(route, currentJob)
+    }
+    if (method === 'POST' && path === '/jobs/job-1/stop') {
+      stopJobCalls.push('job-1')
+      currentJob = { ...currentJob, status: 'stopped', latestAttempt: 'stopped', endedAt: '2026-07-15T03:51:29Z', elapsedMillis: 11000 }
+      schedules = schedules.map(schedule => schedule.lastJobId === 'job-1' && schedule.lastStatus === 'running' ? { ...schedule, lastStatus: 'stopped' } : schedule)
+      return json(route, { accepted: true }, 202)
     }
     if (method === 'GET' && path === '/provider-groups') return json(route, providerGroups)
     if (method === 'GET' && path === '/maintenance-windows') return json(route, providerGroups.map(group => { const starts = group.maintenanceStartsAt ? new Date(group.maintenanceStartsAt).getTime() : undefined; const until = group.maintenanceUntil ? new Date(group.maintenanceUntil).getTime() : undefined; const now = Date.now(); const status = !until ? 'none' : until <= now ? 'ended' : starts && starts > now ? 'scheduled' : 'active'; return { groupId: group.id, groupName: group.name, cli: group.cli, mode: group.mode || 'advisory', activeProviderId: group.activeProviderId || group.primaryProviderId, maintenanceStartsAt: group.maintenanceStartsAt, maintenanceUntil: group.maintenanceUntil, status, notificationsMuted: status === 'active', failoverSuppressed: status === 'active' } }))
@@ -170,11 +180,15 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
       if (body.action === 'stop') schedules = schedules.map(schedule => schedule.id === 'schedule-running' ? { ...schedule, lastStatus: 'stopped' } : schedule)
       return json(route, { accepted: body.items.length, failed: 0, results: body.items.map((item, index) => ({ targetId: item.targetId, ok: true, job: body.action === 'stop' ? undefined : { ...completedJob, id: `bulk-job-${index + 1}`, cli: item.cli || 'codex', providerId: item.providerId || '', providerName: providers.find(provider => provider.id === item.providerId && provider.cli === item.cli)?.name || '测试线路', scenarioId: item.scenarioId, scenarioName: item.scenarioId === 'basic-ready' ? '基础可用性' : undefined, elapsedMillis: 700 + index * 100 } })) })
     }
-    if (method === 'GET' && path === '/jobs/job-1/events') return route.fulfill({ status: 200, contentType: 'text/event-stream', body: [
-      `event: request_start\ndata: ${JSON.stringify({ id: 1, type: 'request_start', at: '2026-07-15T03:51:18Z', message: '请求开始', data: { requestId: 'req-1', cli: 'codex', model: 'gpt-5', target: 'https://gateway.example.com/v1', proxyMode: 'default', job: runningJob } })}\n\n`,
-      `event: request_log\ndata: ${JSON.stringify({ id: 2, type: 'request_log', at: '2026-07-15T03:51:27Z', message: 'READY\\n', data: { requestId: 'req-1', job: runningJob } })}\n\n`,
-      `event: request_end\ndata: ${JSON.stringify({ id: 3, type: 'request_end', at: '2026-07-15T03:51:28Z', message: '请求结束', data: { requestId: 'req-1', status: 'success', durationMillis: 10000, exitCode: 0, responseExcerpt: 'READY', job: completedJob } })}\n\n`,
-    ].join('') })
+    if (method === 'GET' && path === '/jobs/job-1/events') {
+      const active = currentJob.status === 'running'
+      const stream = [
+        `event: request_start\ndata: ${JSON.stringify({ id: 1, type: 'request_start', at: '2026-07-15T03:51:18Z', message: '请求开始', data: { requestId: 'req-1', cli: 'codex', model: 'gpt-5', target: 'https://gateway.example.com/v1', proxyMode: 'default', job: runningJob } })}\n\n`,
+        `event: request_log\ndata: ${JSON.stringify({ id: 2, type: 'request_log', at: '2026-07-15T03:51:27Z', message: 'READY\\n', data: { requestId: 'req-1', job: runningJob } })}\n\n`,
+      ]
+      if (!active) stream.push(`event: request_end\ndata: ${JSON.stringify({ id: 3, type: 'request_end', at: '2026-07-15T03:51:28Z', message: '请求结束', data: { requestId: 'req-1', status: currentJob.status, durationMillis: 10000, exitCode: 0, responseExcerpt: 'READY', job: currentJob } })}\n\n`)
+      return route.fulfill({ status: 200, contentType: 'text/event-stream', body: stream.join('') })
+    }
     if (method === 'GET' && path === '/settings') return json(route, settings)
     if (method === 'PUT' && path === '/settings') {
       const body = request.postDataJSON() as Record<string, unknown>
@@ -297,6 +311,7 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
     reliabilityActions,
     providerGroupActions,
     bulkActions,
+    stopJobCalls,
     unmatched,
     consoleErrors,
     // React development mode can remount the dashboard action center more
@@ -305,6 +320,14 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
     failNextActionCenter: () => { failActionCenter = 10 },
     failNextJobRead: () => { failJobReads = 1 },
     failNextProxyApply: () => { failProxyApply = 1 },
+    setJobStatus: (status) => {
+      currentJob = status === 'running'
+        ? { ...runningJob }
+        : status === 'stopped'
+          ? { ...completedJob, status: 'stopped', latestAttempt: 'stopped', endedAt: '2026-07-15T03:51:29Z', elapsedMillis: 11000 }
+          : { ...completedJob }
+      schedules = schedules.map(schedule => schedule.id === 'schedule-running' ? { ...schedule, lastStatus: status === 'running' ? 'running' : status } : schedule)
+    },
     seedSchedules: (count) => {
       const template = schedules[0]
       schedules = Array.from({ length: count }, (_, index) => ({

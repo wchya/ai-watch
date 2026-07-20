@@ -71,8 +71,8 @@ function SkeletonCards() {
   return <div className="metric-grid">{[0,1,2,3].map(i => <div className="metric-card skeleton-card" key={i}><i/><i/><i/></div>)}</div>
 }
 
-export function Dashboard({ data, loading, error, retry, openNew, probeProvider, showProviderRequests, openJob }: {
-  data: DashboardData | null; loading: boolean; error: string; retry: () => void; openNew: () => void; probeProvider: (provider: Provider) => void; showProviderRequests: (provider: Provider) => void; openJob: (job: JobSummary) => void
+export function Dashboard({ data, loading, error, retry, refreshJobs, openNew, probeProvider, showProviderRequests, openJob }: {
+  data: DashboardData | null; loading: boolean; error: string; retry: () => void; refreshJobs: () => void; openNew: () => void; probeProvider: (provider: Provider) => void; showProviderRequests: (provider: Provider) => void; openJob: (job: JobSummary) => void
 }) {
   const healthy = data?.health.items.filter(i => i.available).length ?? 0
   const total = data?.health.items.length ?? 0
@@ -90,7 +90,7 @@ export function Dashboard({ data, loading, error, retry, openNew, probeProvider,
         <Metric icon={<Server/>} label="运行环境" value={`${healthy}/${total}`} detail={healthy === total && total > 0 ? 'CLI 与配置已就绪' : '部分环境需要检查'} tone="violet"/>
         <Metric icon={<Database/>} label="Provider" value={String(data?.providers.length ?? 0)} detail="当前可用配置源" tone="amber"/>
       </section>
-      {data && <DashboardActionCenter data={data} probeProvider={probeProvider} openJob={openJob}/>}
+      {data && <DashboardActionCenter data={data} probeProvider={probeProvider} openJob={openJob} onJobsChanged={refreshJobs}/>}
       <section className="content-grid">
         <div className="panel span-2"><PanelTitle title="运行中的任务" detail="实时状态与下一轮计划" action={<button className="text-button" onClick={openNew}><Plus/>添加任务</button>}/>
           <div className="job-list">{data?.runningJobs.length ? data.runningJobs.map(job => <JobRow key={job.id} job={job} open={() => openJob(job)}/>) : <EmptyState icon={<Activity/>} title="一切安静" detail="当前没有运行中的测活或保活任务。"/>}</div>
@@ -387,20 +387,29 @@ export function JobDetail({ initial, notifyOnComplete, close, onChanged }: { ini
   const [stopping, setStopping] = useState(false)
   const outputRef = useRef<HTMLDivElement>(null)
   const previousStatus = useRef(initial.status)
+  const changeNotified = useRef(false)
   const running = job.status === 'running' || job.status === 'starting'
+  const runningRef = useRef(running)
+  runningRef.current = running
+  const notifyChanged = useCallback(() => {
+    if (changeNotified.current) return
+    changeNotified.current = true
+    onChanged()
+  }, [onChanged])
+  const closeDetail = useCallback(() => { notifyChanged(); close() }, [close, notifyChanged])
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); close() }
+      if (event.key === 'Escape') { event.preventDefault(); closeDetail() }
     }
     window.addEventListener('keydown', handleKey)
     return () => window.removeEventListener('keydown', handleKey)
-  }, [close])
+  }, [closeDetail])
   useEffect(() => {
     const source = new EventSource(api.eventsUrl(job.id))
     source.onopen = () => setConnected(true)
     source.onerror = () => {
       setConnected(false)
-      if (!running) source.close()
+      if (!runningRef.current) source.close()
     }
     const handleEvent = (e: MessageEvent) => {
       try {
@@ -422,14 +431,15 @@ export function JobDetail({ initial, notifyOnComplete, close, onChanged }: { ini
   useEffect(() => {
     const wasRunning = previousStatus.current === 'running' || previousStatus.current === 'starting'
     const isFinished = job.status !== 'running' && job.status !== 'starting'
+    if (wasRunning && isFinished) notifyChanged()
     if (wasRunning && isFinished && notifyOnComplete && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
       new Notification(`AI Watch · ${statusMeta[job.status].label}`, { body: `${cliLabel(job.cli)} ${modeLabel(job.mode)}任务：${job.providerName || job.providerId || '当前配置'}` })
     }
     previousStatus.current = job.status
-  }, [job.status, job.cli, job.mode, job.providerId, job.providerName, notifyOnComplete])
-  const stop = async () => { setStopping(true); try { const next = await api.stopJob(job.id); setJob(next); onChanged() } finally { setStopping(false) } }
+  }, [job.status, job.cli, job.mode, job.providerId, job.providerName, notifyOnComplete, notifyChanged])
+  const stop = async () => { setStopping(true); try { const next = await api.stopJob(job.id); setJob(next); notifyChanged() } finally { setStopping(false) } }
   const copy = () => void navigator.clipboard.writeText(events.map(e => `[${new Date(e.timestamp).toLocaleTimeString()}] ${e.message ?? e.type}`).join('\n'))
-  return <div className="detail-overlay" role="dialog" aria-modal="true" aria-label="测活终端输出"><div className="detail-header"><button className="icon-button" onClick={close} aria-label="返回并关闭终端"><ChevronLeft/></button><CliIcon cli={job.cli}/><div><span>{cliLabel(job.cli)} · {executionLabel(job.mode, job.runOnce)}</span><h2>{job.providerName || job.providerId || '当前配置'}</h2></div><StatusPill status={job.status}/><div className="detail-actions">{running && <button className="danger-button" disabled={stopping} onClick={() => void stop()}>{stopping ? <LoaderCircle className="spinning"/> : <Square/>}停止任务</button>}<button className="icon-button terminal-close-button" onClick={close} aria-label="关闭测活终端"><X/></button></div></div><div className="detail-body"><section className="detail-stats"><div><span>任务 ID</span><strong className="mono">{job.id.slice(0, 12)}</strong></div><div><span>请求次数</span><strong>{events.filter(e => e.data?.requestId && e.type !== 'log').length}</strong></div><div><span>已运行</span><strong>{formatDuration(job.elapsedMs ?? Date.now() - new Date(job.startedAt).getTime())}</strong></div><div><span>模式 / 最近结果</span><strong>{executionLabel(job.mode, job.runOnce)} · {job.lastAttemptStatus || '等待中'}</strong></div></section><section className="terminal-card"><div className="terminal-bar"><div className="window-dots"><i/><i/><i/></div><button className={`stream-state terminal-replay-close ${connected ? 'online' : ''}`} onClick={close} aria-label="关闭终端并返回任务列表">{connected ? <Wifi/> : <WifiOff/>}{connected ? '实时连接' : running ? '正在重连' : '缓存回放'}</button><div className="terminal-actions"><button onClick={() => setPaused(!paused)}>{paused ? <Play/> : <Pause/>}{paused ? '继续滚动' : '暂停滚动'}</button><button onClick={copy} disabled={!events.length}><Copy/>复制</button></div></div><div className="terminal-output" ref={outputRef}>{events.length ? events.map((event, index) => <div className={`log-line ${event.level || ''}`} key={event.id || `${event.timestamp}-${index}`}><time>{new Date(event.timestamp).toLocaleTimeString('zh-CN', { hour12: false })}</time><span>{event.level === 'command' ? '$' : event.level === 'success' ? '✓' : event.level === 'error' ? '×' : '›'}</span><code>{terminalEventText(event)}</code></div>) : <div className="terminal-empty">{running ? <><LoaderCircle className="spinning"/><span>等待 CLI 输出…</span></> : <><Trash2/><span>{job.mode === 'probe' ? '测活日志不存在或已超过 24 小时。' : '保活任务不缓存完整运行日志。'}</span></>}</div>}</div><div className="terminal-foot"><ShieldCheck/><span>{job.mode === 'probe' ? '测活日志脱敏后在 Redis 中缓存 24 小时' : '保活输出仅保留在运行时内存中'}</span><em>{job.mode === 'probe' ? '最多 5000 条 / 约 2 MiB' : '任务结束后自动清空'}</em></div></section></div></div>
+  return <div className="detail-overlay" role="dialog" aria-modal="true" aria-label="测活终端输出"><div className="detail-header"><button className="icon-button" onClick={closeDetail} aria-label="返回并关闭终端"><ChevronLeft/></button><CliIcon cli={job.cli}/><div><span>{cliLabel(job.cli)} · {executionLabel(job.mode, job.runOnce)}</span><h2>{job.providerName || job.providerId || '当前配置'}</h2></div><StatusPill status={job.status}/><div className="detail-actions">{running && <button className="danger-button" disabled={stopping} onClick={() => void stop()}>{stopping ? <LoaderCircle className="spinning"/> : <Square/>}停止任务</button>}<button className="icon-button terminal-close-button" onClick={closeDetail} aria-label="关闭测活终端"><X/></button></div></div><div className="detail-body"><section className="detail-stats"><div><span>任务 ID</span><strong className="mono">{job.id.slice(0, 12)}</strong></div><div><span>请求次数</span><strong>{events.filter(e => e.data?.requestId && e.type !== 'log').length}</strong></div><div><span>已运行</span><strong>{formatDuration(job.elapsedMs ?? Date.now() - new Date(job.startedAt).getTime())}</strong></div><div><span>模式 / 最近结果</span><strong>{executionLabel(job.mode, job.runOnce)} · {job.lastAttemptStatus || '等待中'}</strong></div></section><section className="terminal-card"><div className="terminal-bar"><div className="window-dots"><i/><i/><i/></div><button className={`stream-state terminal-replay-close ${connected ? 'online' : ''}`} onClick={closeDetail} aria-label="关闭终端并返回任务列表">{connected ? <Wifi/> : <WifiOff/>}{connected ? '实时连接' : running ? '正在重连' : '缓存回放'}</button><div className="terminal-actions"><button onClick={() => setPaused(!paused)}>{paused ? <Play/> : <Pause/>}{paused ? '继续滚动' : '暂停滚动'}</button><button onClick={copy} disabled={!events.length}><Copy/>复制</button></div></div><div className="terminal-output" ref={outputRef}>{events.length ? events.map((event, index) => <div className={`log-line ${event.level || ''}`} key={event.id || `${event.timestamp}-${index}`}><time>{new Date(event.timestamp).toLocaleTimeString('zh-CN', { hour12: false })}</time><span>{event.level === 'command' ? '$' : event.level === 'success' ? '✓' : event.level === 'error' ? '×' : '›'}</span><code>{terminalEventText(event)}</code></div>) : <div className="terminal-empty">{running ? <><LoaderCircle className="spinning"/><span>等待 CLI 输出…</span></> : <><Trash2/><span>{job.mode === 'probe' ? '测活日志不存在或已超过 24 小时。' : '保活任务不缓存完整运行日志。'}</span></>}</div>}</div><div className="terminal-foot"><ShieldCheck/><span>{job.mode === 'probe' ? '测活日志脱敏后在 Redis 中缓存 24 小时' : '保活输出仅保留在运行时内存中'}</span><em>{job.mode === 'probe' ? '最多 5000 条 / 约 2 MiB' : '任务结束后自动清空'}</em></div></section></div></div>
 }
 
 function terminalEventText(event: JobEvent) {

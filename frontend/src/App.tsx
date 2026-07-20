@@ -62,6 +62,7 @@ export function App() {
   const [eventsRefreshToken, setEventsRefreshToken] = useState(0)
   const [eventsProviderFilter, setEventsProviderFilter] = useState('')
   const [providersRefreshToken, setProvidersRefreshToken] = useState(0)
+  const [schedulesRefreshToken, setSchedulesRefreshToken] = useState(0)
   const [uiTheme, setUiTheme] = useState<AppSettings['uiTheme']>('deep-ocean')
   const [themeOpen, setThemeOpen] = useState(false)
   const [themeSaving, setThemeSaving] = useState(false)
@@ -70,6 +71,8 @@ export function App() {
   const mainRef = useRef<HTMLElement>(null)
   const previousRoute = useRef({ view, requestId })
   const dashboardLoadVersion = useRef(0)
+  const jobsLoadVersion = useRef(0)
+  const jobSnapshotGeneration = useRef(0)
 
   const navigate = useCallback((next: View) => {
     if (next !== view || requestId) {
@@ -111,10 +114,28 @@ export function App() {
 
   const load = useCallback(async (quiet = false) => {
     const version = ++dashboardLoadVersion.current
+    const jobsGeneration = jobSnapshotGeneration.current
     if (!quiet) setLoading(true)
-    try { const next = await api.dashboard(); if (version !== dashboardLoadVersion.current) return; setData(next); setError('') }
+    try {
+      const next = await api.dashboard()
+      if (version !== dashboardLoadVersion.current) return
+      setData(current => jobsGeneration !== jobSnapshotGeneration.current && current
+        ? { ...next, runningJobs: current.runningJobs, recentJobs: current.recentJobs }
+        : next)
+      setError('')
+    }
     catch (e) { if (version === dashboardLoadVersion.current) setError(e instanceof Error ? e.message : '无法连接 AI Watch 服务') }
     finally { if (version === dashboardLoadVersion.current) setLoading(false) }
+  }, [])
+
+  const loadJobSnapshot = useCallback(async () => {
+    const version = ++jobsLoadVersion.current
+    try {
+      const jobs = await api.jobSnapshot()
+      if (version !== jobsLoadVersion.current) return
+      jobSnapshotGeneration.current++
+      setData(current => current ? { ...current, ...jobs } : current)
+    } catch { /* the full dashboard refresh remains the visible error boundary */ }
   }, [])
 
   useEffect(() => {
@@ -125,6 +146,15 @@ export function App() {
     document.addEventListener('visibilitychange', visible)
     return () => { dashboardLoadVersion.current++; window.clearInterval(t); document.removeEventListener('visibilitychange', visible) }
   }, [load])
+  useEffect(() => {
+    if (view !== 'dashboard') return
+    const refresh = () => { if (!document.hidden) void loadJobSnapshot() }
+    refresh()
+    const timer = window.setInterval(refresh, 2000)
+    const visible = () => refresh()
+    document.addEventListener('visibilitychange', visible)
+    return () => { jobsLoadVersion.current++; window.clearInterval(timer); document.removeEventListener('visibilitychange', visible) }
+  }, [loadJobSnapshot, view])
   useEffect(() => {
     void api.settings().then(settings => {
       setUiTheme(settings.uiTheme)
@@ -159,6 +189,10 @@ export function App() {
 
   const openJob = (job: JobSummary) => { setDetailJob(job); setMobileNav(false) }
   const onStarted = (job: JobSummary, notifyOnComplete: boolean) => { setDrawerOpen(false); setDetailJob(job); if (notifyOnComplete) setNotificationJobs(current => new Set(current).add(job.id)); void load(true) }
+  const onJobChanged = useCallback(() => {
+    setSchedulesRefreshToken(current => current + 1)
+    void loadJobSnapshot()
+  }, [loadJobSnapshot])
   const viewLabel = requestId ? '请求详情' : routeTitle(view)
   useEffect(() => {
     document.title = `AI Watch · ${viewLabel}`
@@ -193,11 +227,11 @@ export function App() {
       </header>
 
       {!requestId && centerForView(view) && <CenterTabs label={centerForView(view)!.label} view={view} navigate={navigate} items={centerForView(view)!.views.map(target => [target, routeTitle(target)])}/>}
-      <Suspense fallback={<RouteLoading/>}>{requestId ? <RequestDetailView requestId={requestId} back={closeRequest}/> : view === 'dashboard' ? <Dashboard data={data} loading={loading} error={error} retry={() => void load()} openNew={() => { setPresetProvider(null); setDrawerOpen(true) }} probeProvider={(provider) => { setPresetProvider(provider); setDrawerOpen(true) }} showProviderRequests={(provider) => { setEventsProviderFilter(provider.id); navigate('events') }} openJob={openJob}/> : view === 'providers' ? <ProviderConfigView discoveredProviders={(data?.providers ?? []).filter(provider => provider.source !== 'manual')} refreshToken={providersRefreshToken} onProbe={(provider) => { setPresetProvider(provider); setDrawerOpen(true) }} onChanged={() => void load(true)}/> : view === 'scenarios' ? <TestScenariosView openRequest={openRequest}/> : view === 'comparisons' ? <ComparisonHistoryView/> : view === 'failover' ? <FailoverGroupsView providers={data?.providers ?? []}/> : view === 'maintenance' ? <MaintenanceView/> : view === 'slos' ? <SLOView navigate={navigate}/> : view === 'reliability' ? <ReliabilityView/> : view === 'incidents' ? <IncidentsView openRequest={openRequest}/> : view === 'schedules' ? <SchedulesView providers={data?.providers ?? []} defaultOptions={jobDefaults} openRequest={openRequest} openJob={openJob}/> : view === 'events' ? <EventsView providers={data?.providers ?? []} refreshToken={eventsRefreshToken} initialProviderId={eventsProviderFilter} openRequest={openRequest}/> : view === 'notification-routing' ? <NotificationRoutingView/> : view === 'diagnostics' ? <DiagnosticsView/> : <SettingsView onThemeChanged={setUiTheme}/>}</Suspense>
+      <Suspense fallback={<RouteLoading/>}>{requestId ? <RequestDetailView requestId={requestId} back={closeRequest}/> : view === 'dashboard' ? <Dashboard data={data} loading={loading} error={error} retry={() => void load()} refreshJobs={onJobChanged} openNew={() => { setPresetProvider(null); setDrawerOpen(true) }} probeProvider={(provider) => { setPresetProvider(provider); setDrawerOpen(true) }} showProviderRequests={(provider) => { setEventsProviderFilter(provider.id); navigate('events') }} openJob={openJob}/> : view === 'providers' ? <ProviderConfigView discoveredProviders={(data?.providers ?? []).filter(provider => provider.source !== 'manual')} refreshToken={providersRefreshToken} onProbe={(provider) => { setPresetProvider(provider); setDrawerOpen(true) }} onChanged={() => void load(true)}/> : view === 'scenarios' ? <TestScenariosView openRequest={openRequest}/> : view === 'comparisons' ? <ComparisonHistoryView/> : view === 'failover' ? <FailoverGroupsView providers={data?.providers ?? []}/> : view === 'maintenance' ? <MaintenanceView/> : view === 'slos' ? <SLOView navigate={navigate}/> : view === 'reliability' ? <ReliabilityView/> : view === 'incidents' ? <IncidentsView openRequest={openRequest}/> : view === 'schedules' ? <SchedulesView providers={data?.providers ?? []} defaultOptions={jobDefaults} refreshToken={schedulesRefreshToken} openRequest={openRequest} openJob={openJob}/> : view === 'events' ? <EventsView providers={data?.providers ?? []} refreshToken={eventsRefreshToken} initialProviderId={eventsProviderFilter} openRequest={openRequest}/> : view === 'notification-routing' ? <NotificationRoutingView/> : view === 'diagnostics' ? <DiagnosticsView/> : <SettingsView onThemeChanged={setUiTheme}/>}</Suspense>
     </main>
     {mobileNav && <button type="button" className="nav-scrim" aria-label="关闭菜单" onClick={() => setMobileNav(false)}/>}
     {drawerOpen && <NewJobDrawer providers={data?.providers ?? []} initialProvider={presetProvider} defaultOptions={jobDefaults} close={() => { setDrawerOpen(false); setPresetProvider(null) }} onStarted={onStarted}/>}
-    {detailJob && <JobDetail initial={detailJob} notifyOnComplete={notificationJobs.has(detailJob.id)} close={() => { setDetailJob(null); void load(true) }} onChanged={() => void load(true)}/>}
+    {detailJob && <JobDetail initial={detailJob} notifyOnComplete={notificationJobs.has(detailJob.id)} close={() => setDetailJob(null)} onChanged={onJobChanged}/>}
     {themeMessage && <div className={`theme-toast ${themeMessage.includes('失败') ? 'error' : ''}`} role="status">{themeMessage}</div>}
   </div>
 }

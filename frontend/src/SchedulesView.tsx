@@ -107,7 +107,7 @@ function ScheduleStatus({ status = 'idle' }: { status?: ScheduleLastStatus }) {
   return <span className={`status-pill ${meta.tone}`}><i/>{meta.label}</span>
 }
 
-export function SchedulesView({ providers, defaultOptions, openRequest, openJob }: { providers: Provider[]; defaultOptions: JobOptions; openRequest: (requestId: string) => void; openJob: (job: JobSummary) => void }) {
+export function SchedulesView({ providers, defaultOptions, refreshToken, openRequest, openJob }: { providers: Provider[]; defaultOptions: JobOptions; refreshToken: number; openRequest: (requestId: string) => void; openJob: (job: JobSummary) => void }) {
   const [schedules, setSchedules] = useState<Schedule[]>([])
   const [total, setTotal] = useState(0)
   const [limit, setLimit] = useState(200)
@@ -127,6 +127,7 @@ export function SchedulesView({ providers, defaultOptions, openRequest, openJob 
   const [scenarios, setScenarios] = useState<TestScenario[]>([])
   const [providerGroups, setProviderGroups] = useState<ProviderFailoverGroup[]>([])
   const requestSequence = useRef(0)
+  const observedRefreshToken = useRef(refreshToken)
 
   const load = useCallback(async () => {
     const sequence = ++requestSequence.current
@@ -147,9 +148,14 @@ export function SchedulesView({ providers, defaultOptions, openRequest, openJob 
     }
   }, [])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => { void load(); return () => { requestSequence.current++ } }, [load])
   useEffect(() => { void Promise.all([api.testScenarios(), api.providerGroups()]).then(([nextScenarios, nextGroups]) => { setScenarios(nextScenarios); setProviderGroups(nextGroups) }).catch(() => { setScenarios([]); setProviderGroups([]) }) }, [])
   const refreshAfterOperation = useDelayedRefresh(load)
+  useEffect(() => {
+    if (observedRefreshToken.current === refreshToken) return
+    observedRefreshToken.current = refreshToken
+    void refreshAfterOperation()
+  }, [refreshAfterOperation, refreshToken])
   useEffect(() => {
     if (!schedules.some(scheduleRunning)) return
     const refresh = () => { if (!document.hidden) void load() }
