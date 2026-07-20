@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "test:e2e": "playwright test",
+    "docs:screenshots": "playwright test tests/e2e/docs-screenshots.spec.ts",
     "test:e2e:install": "playwright install chromium"
   },
   "dependencies": {

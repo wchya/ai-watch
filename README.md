@@ -14,6 +14,18 @@ The web console is bound to the local machine by default:
 http://127.0.0.1:8787
 ```
 
+[![AI Watch Arctic Daylight dashboard](docs/images/dashboard.png)](docs/images/dashboard.png)
+
+The screenshots are generated from the current frontend with Playwright and built-in redacted demo data; real provider credentials are not required.
+
+## Operating Workflow
+
+[![AI Watch workflow from provider configuration to incident response](docs/diagrams/system-workflow.png)](docs/diagrams/system-workflow.png)
+
+AI Watch validates a route before schedules continuously collect request facts. Failures flow into events, request details, and incident timelines, where an operator can retest, apply a maintenance window, or switch to a backup route. Provider-group auto-switching affects explicitly bound AI Watch schedules only.
+
+[Editable workflow source](docs/diagrams/system-workflow.drawio)
+
 ## Highlights
 
 - **Provider management** — combines the current Codex/Claude CLI configuration, startup snapshots imported from CC Switch, and manually maintained providers whose credentials are encrypted with AES-GCM.
@@ -42,6 +54,23 @@ The primary navigation is defined centrally in `frontend/src/navigation.ts`:
 | Settings | `/settings/*` | Runtime settings, notifications, routing, and diagnostics |
 
 Legacy page paths are normalized to the corresponding product area. Request detail deep links use `/requests/:requestId`.
+
+## Product Tour
+
+<table>
+  <tr>
+    <td width="50%"><strong>Providers</strong><br/>Discover read-only CLI configuration, maintain encrypted manual providers, and choose a proxy policy per route.<br/><a href="docs/images/providers.png"><img src="docs/images/providers.png" alt="Provider configuration page"/></a></td>
+    <td width="50%"><strong>Validation</strong><br/>Save reusable scenarios, compare providers, and reopen historical request facts.<br/><a href="docs/images/validation.png"><img src="docs/images/validation.png" alt="Validation comparison history page"/></a></td>
+  </tr>
+  <tr>
+    <td width="50%"><strong>Automation</strong><br/>Manage schedules, provider groups, advisory or automatic failover, and maintenance windows.<br/><a href="docs/images/automation.png"><img src="docs/images/automation.png" alt="Automation failover page"/></a></td>
+    <td width="50%"><strong>Stability</strong><br/>Inspect success rate, latency, anomaly windows, SLOs, error budgets, and incident guidance.<br/><a href="docs/images/stability.png"><img src="docs/images/stability.png" alt="Stability reliability analysis page"/></a></td>
+  </tr>
+  <tr>
+    <td width="50%"><strong>Settings and notifications</strong><br/>Configure jobs, notification routing, and Mihomo subscriptions without returning saved secrets in plaintext.<br/><a href="docs/images/settings.png"><img src="docs/images/settings.png" alt="System diagnostics settings page"/></a></td>
+    <td width="50%"><strong>Overview</strong><br/>Combine providers, actionable failures, running jobs, schedules, and environment health in one view.<br/><a href="docs/images/dashboard.png"><img src="docs/images/dashboard.png" alt="AI Watch overview page"/></a></td>
+  </tr>
+</table>
 
 ## Quick Start
 
@@ -184,6 +213,17 @@ Providers can select the default proxy, direct access, or a custom proxy. Subscr
 - Maintenance windows suppress automated actions and notifications but do not terminate running jobs.
 - All frontend write requests automatically include an `Idempotency-Key`.
 
+## System Architecture
+
+[![AI Watch system architecture](docs/diagrams/system-architecture.png)](docs/diagrams/system-architecture.png)
+
+- The browser uses the React/Vite SPA through HTTP APIs and SSE.
+- The AI Watch container merges read-only host configuration, the startup CC Switch snapshot, and manual providers from Redis, then creates isolated temporary configuration for each job.
+- Redis stores settings, provider snapshots, encrypted configuration, events, and runtime metadata. Mihomo supplies a Compose-private proxy exit and subscription hot reload.
+- Reliability, SLO, incident, failover, and notification features consume structured redacted request facts rather than a general Redis key browser or raw CLI output.
+
+[Editable architecture source](docs/diagrams/system-architecture.drawio)
+
 ## Local Development
 
 ### Prerequisites
@@ -245,6 +285,15 @@ npm run test:e2e:install
 ```
 
 The frontend end-to-end suite starts its own Vite server on port `4173` and uses mocked API behavior, so it does not require real provider credentials.
+
+Regenerate the README screenshots with:
+
+```bash
+cd frontend
+npm run docs:screenshots
+```
+
+The screenshot task uses a 1440×960 viewport, the Arctic Daylight theme, and redacted demo data. Editable draw.io sources live in `docs/diagrams` and can be exported again to the matching PNG filenames with the draw.io desktop app.
 
 ## Deployment
 
