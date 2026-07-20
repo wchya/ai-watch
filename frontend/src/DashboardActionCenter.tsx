@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, AlertCircle, CalendarClock, CheckCircle2, Clock3, ExternalLink, LoaderCircle, RefreshCw, ShieldAlert, Square, TrendingUp } from 'lucide-react'
 import { api } from './api'
 import type { DashboardData, Incident, JobSummary, Provider, ReliabilityData, Schedule } from './types'
@@ -37,10 +37,13 @@ export function DashboardActionCenter({ data, probeProvider, openJob }: { data: 
   const [operationError, setOperationError] = useState('')
   const [stopping, setStopping] = useState('')
   const [stopped, setStopped] = useState<Set<string>>(new Set())
+  const loadVersion = useRef(0)
 
   const load = useCallback(async (quiet = false) => {
+    const version = ++loadVersion.current
     if (!quiet) setLoading(true)
     const results = await Promise.allSettled([api.incidents(), api.schedules(), api.reliability('24h')])
+    if (version !== loadVersion.current) return
     const nextErrors: string[] = []
     if (results[0].status === 'fulfilled') setIncidents(results[0].value)
     else nextErrors.push('事故')
@@ -58,7 +61,7 @@ export function DashboardActionCenter({ data, probeProvider, openJob }: { data: 
     const timer = window.setInterval(refresh, 15_000)
     const visible = () => { if (!document.hidden) void load(true) }
     document.addEventListener('visibilitychange', visible)
-    return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', visible) }
+    return () => { loadVersion.current++; window.clearInterval(timer); document.removeEventListener('visibilitychange', visible) }
   }, [load])
 
   const items = useMemo(() => {

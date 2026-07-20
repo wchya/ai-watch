@@ -6,6 +6,7 @@ import {
 import { api } from './api'
 import { Select } from './Select'
 import type { Cli, ManualProvider, ManualProviderWrite, Provider, ProxyMode } from './types'
+import { useLatestRequest } from './useLatestRequest'
 
 const emptyDraft = (cli: Cli): ManualProviderWrite => ({
   id: '', name: '', cli, baseUrl: '', model: '', provider: '', apiKey: '', clearApiKey: false,
@@ -28,13 +29,15 @@ export function ProviderConfigView({ discoveredProviders, onProbe, onChanged, re
   const [deletingBusy, setDeletingBusy] = useState(false)
   const [changingId, setChangingId] = useState('')
   const [changingCCSwitchId, setChangingCCSwitchId] = useState('')
+  const { beginRequest, isLatestRequest } = useLatestRequest()
 
   const load = useCallback(async () => {
+    const version = beginRequest()
     setLoading(true); setError('')
-    try { setProviders(await api.manualProviders()) }
-    catch (e) { setError(e instanceof Error ? e.message : '无法读取手填供应商') }
-    finally { setLoading(false) }
-  }, [])
+    try { const next = await api.manualProviders(); if (!isLatestRequest(version)) return; setProviders(next) }
+    catch (e) { if (isLatestRequest(version)) setError(e instanceof Error ? e.message : '无法读取手填供应商') }
+    finally { if (isLatestRequest(version)) setLoading(false) }
+  }, [beginRequest, isLatestRequest])
   useEffect(() => { void load() }, [load, refreshToken])
 
   const remove = async () => {

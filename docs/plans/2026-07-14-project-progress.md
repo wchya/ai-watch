@@ -1,7 +1,7 @@
 # AI Watch 项目进度与剩余验收
 
 **更新日期：** 2026-07-20
-**状态：** 核心产品与中英文视觉文档已完成，部署验收仍受 7 条前端 E2E 失败阻塞
+**状态：** 本轮深度产品与交互优化已完成；功能、状态治理、无障碍、响应式、三主题、样式收敛与全量验证均有直接证据
 
 ## 已实现并有自动化证据
 
@@ -36,9 +36,19 @@
 - 新增事故中心；相同 Provider/Provider Group 的失败只形成一条开放事故，支持错误聚合、关联请求、确认、静默、备注、关闭、重开和连续成功自动恢复。
 - SQLite 迁移版本已更新至 v18，启动时删除退役的供应商示例表与 Redis 集合。
 - `App.tsx` 已降至 194 行，`server.go` 已降至 213 行；前端功能组件和后端 Handler 均按职责拆分。
-- Playwright 浏览器验收已扩展为 33 条，覆盖七个领域入口、合成场景、故障切换、事故时间线、请求详情、文档截图和五档响应式宽度。
+- Playwright 浏览器验收已从历史 35 条扩展为 41 条并全部通过；新增跨领域触控、字号、多宽度水平溢出、120 条分页、三主题状态对比度和 reduced-motion 验收。
 - 2026-07-15 重建容器后，Redis、Mihomo、AI Watch 均为 healthy；`/api/health` 返回 `status: ok`。空闲内存约为 AI Watch 18.5 MiB，三容器合计约 95 MiB。
 - 2026-07-20 重建中英文 README，接入 6 张极昼主题页面截图、工作流图和系统架构图；截图生成测试、相对链接、draw.io 结构、前端生产构建、Go 全量测试与 Compose 配置校验均通过。
+- 2026-07-20 完成首批深度交互优化：恢复 7 条回归，规范对比深链接，拆分 12 个领域异步 chunk，主入口 JS 从约 479 kB 降至约 289 kB，并补充 skip link、路由焦点和关键触控目标。
+- Maintenance、SLO、Notification Routing 已在写操作成功后立即合并服务端返回实体；Reliability 处置会即时禁用相关计划，后台刷新只承担事实校准。
+- Comparison、Reliability、Maintenance、SLO、Notification Routing 已通过请求版本号丢弃过期响应；四个主要处置视图的成功提示具有 live 语义并在 4 秒后自动清理。
+- 请求治理已进一步覆盖 Dashboard、Action Center、Schedules、Request Detail、Incidents/Postmortem、Failover、Test Scenarios、Provider Config 与 Diagnostics；轮询页面隐藏时暂停，恢复后单次校准。
+- Reliability 趋势新增文字结论与键盘可展开数据表，移除 hover-only 数据依赖；Deep/Graphite muted 与 Arctic muted/info 语义 Token 已提升至 AA 对比度。
+- 原 1423 行 `styles.css` 已按原级联顺序拆成 Base/Shell、Data Workspaces、Theme System、Domains、Interaction/Accessibility 五层；生产构建体积保持稳定，后续只需继续清理重复覆盖和固定色。
+- 375px 跨领域触控审计已通过，覆盖可见按钮、链接、`summary` 和自定义选择器的 44×44px 下限；13 路由字号审计也已通过，正文 `p` 不低于 12px，`small`/`dt` 不低于 11px。
+- 13 个主路由在 320、768、1024、1440px 下均无水平溢出；375px 由触控审计同步覆盖。
+- 新增共享 `useLatestRequest`，首批迁移 Diagnostics、Request Detail、Provider Config；新增共享 `ListPagination`，Schedules 与 Comparison History 每页只渲染 50 条并提供可访问页码摘要。
+- 新增 `--control-border`、`--surface-input` 和导航状态 Token，三主题文字/状态达到 4.5:1、真实输入边界达到 3:1；Select 的 Escape 不再连带关闭父抽屉。
 
 ## 尚需完成或补强
 
@@ -47,24 +57,27 @@
 - [x] 补主题切换、领域路由和小屏供应商操作区的浏览器测试。
 - [x] 自动检查 320px、手机、平板和桌面宽度。
 - [x] 人工抽查 README 六张关键截图及两张流程/架构图中的字体渲染、标签重叠和信息密度。
-- 继续根据真实浏览器反馈修正极昼主题中遗漏的固定暗色值。
+- [x] 极昼主题高风险固定暗色已迁移到语义 Token，六张 README 截图未发现暗色残留；剩余工作仅限可证明级联等价的低风险旧规则。
 
 ### 自动化回归恢复
 
-2026-07-20 完整 Playwright 验收结果为 26/33。以下 7 条失败需要在部署验收前恢复：
-
-- 对比历史按原集合重跑后未进入新的对比详情。
-- 可靠性建议暂停相关计划后仍显示前一次备用验证提示。
-- 极昼主题断言使用了同时命中 Mihomo 与钉钉面板的非唯一选择器。
-- 清除 Mihomo 订阅后未显示基础配置恢复提示。
-- 维护窗口 Mock 时间已过期，卡片显示“已结束”而非“进行中”。
-- SLO 暂停操作后卡片未刷新为“已暂停”。
-- 通知渠道删除操作未记录预期动作。
+- [x] 2026-07-20 修复确认弹层测试漂移、维护窗口固定日期、深链接与安全配置语义类问题。
+- [x] 回归恢复阶段达到 Playwright 35/35；加入触控、字号、分页、多宽度、三主题状态和 reduced-motion 验收后，完整套件为 41/41。
 
 ### 持续补强
 
-- 人工抽查事故中心、故障切换和合成场景在三套主题下的字体渲染与信息密度。
-- 继续收集真实 Provider 故障样本，校准事故严重程度和恢复阈值的默认值。
+- [x] 13 个主路由的自动字号审计全部通过；Reliability、Incidents、Comparison、Diagnostics 的关联正文和技术标签也已同步提升。
+- [x] 375px 跨领域主操作满足 44px 下限，320px、768px、1024px、1440px 跨领域主流程无水平溢出。
+- [x] 三主题语义状态、真实控件边界、焦点与禁用状态已自动复核；故障切换、可靠性、对比历史等极昼截图已人工抽查。
+- [x] 完成原 1423 行 `styles.css` 的五层结构拆分并保持导入顺序和构建结果稳定。
+- [x] 完成低风险遗留覆盖与固定色收敛：Events/Schedules 源规则已 Token 化，后置迁移覆盖层已删除；品牌、终端窗口点、JSON 语法色和 Select Portal 适配色按语义保留。
+- [x] Schedules 与最多 500 条的 Comparison History 已增加每页 50 条分页；Events 与计划日志抽屉保留既有服务端分页。
+- [x] 六张 PNG 已人工复核，变化来自有效视觉更新，未发现标签重叠、截断、暗色残留或异常密度。
+
+### 非阻塞后续
+
+- 继续收集真实 Provider 故障样本，校准事故严重程度和恢复阈值的默认值；该项依赖运行期数据，不阻塞当前 Trellis 任务收尾。
+- 将其余已具备局部版本号保护的读取视图逐步迁移到共享 `useLatestRequest`，保持领域行为不变。
 
 已补充的容器证据：
 
@@ -72,6 +85,15 @@
 - 重启 AI Watch 后，同一任务的 `request_start`、`request_end` 和脱敏返回摘要仍可回放。
 - 单元测试覆盖 API Key、自定义代理 URL、钉钉 Webhook 和错误输出脱敏；运行 Redis 扫描确认默认 Prompt 原文匹配数为 0。
 
+## 当前活动任务
+
+- Trellis：`.trellis/tasks/07-20-deep-product-interaction-optimization`
+- 状态：验收完成，进入 Trellis 收尾归档
+- 已完成阶段：回归恢复、交互底座、状态一致性、请求治理、图表无障碍、字号/触控/多宽度、三主题对比度、reduced-motion、截图复核、CSS 结构拆分、共享 hook 首批迁移和大列表分页。
+- 当前阶段：计划内实现和复验已完成；41 条 Playwright、生产构建、Go、Compose、Trellis context 和差异检查均通过。
+- 收尾结论：六张 README 截图已人工复核，无重叠、截断、暗色泄漏或异常密度；任务可进入归档。
+- 后续队列：扩大共享 hook 迁移范围和基于真实 Provider 样本校准事故阈值，均不阻塞当前任务。
+
 ## 完成标准
 
-只有以上剩余项目获得当前代码、测试输出或运行容器的直接证据后，项目才可标记为完成。
+当前 Trellis 任务的计划内完成标准已经满足。真实 Provider 样本校准和共享 hook 扩面属于持续优化，不作为本轮完成条件。

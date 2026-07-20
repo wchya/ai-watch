@@ -59,6 +59,8 @@ export type ApiMock = {
   failNextActionCenter: () => void
   failNextJobRead: () => void
   failNextProxyApply: () => void
+  seedSchedules: (count: number) => void
+  seedComparisons: (count: number) => void
 }
 
 export async function installApiMock(page: Page): Promise<ApiMock> {
@@ -75,7 +77,8 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
   let failJobReads = 0
   let failProxyApply = 0
   let schedules = [{ id: 'schedule-1', name: '未知状态计划', enabled: true, cli: 'codex', providerId: '', providerName: '当前 Codex 配置', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 62, startMinute: 540, endMinute: 1080, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'future_status', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:00:00Z' }, { id: 'schedule-running', name: '运行中计划', enabled: true, cli: 'codex', providerId: '', providerName: '当前 Codex 配置', mode: 'keepalive', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: false, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'running', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:00:00Z' }, { id: 'schedule-claude-risk', name: 'Claude 异常巡检', enabled: true, cli: 'claude', providerId: 'cc-switch:claude-main', providerGroupId: 'claude-main', providerName: 'Claude 主线路', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'failed', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:30:00Z' }, { id: 'schedule-advisory', name: 'Claude 建议组巡检', enabled: true, cli: 'claude', providerId: 'cc-switch:claude-main', providerGroupId: 'claude-advisory', providerName: 'Claude 建议切换组', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'idle', nextRunAt: '2026-07-16T01:45:00Z' }]
-  let providerGroups: Array<Record<string, any>> = [{ id: 'claude-main', name: 'Claude 主备组', cli: 'claude', enabled: true, primaryProviderId: 'cc-switch:claude-main', backupProviderIds: ['cc-switch:claude-backup'], scenarioId: 'basic-ready', failureThreshold: 3, cooldownSeconds: 600, mode: 'automatic', activeProviderId: 'cc-switch:claude-backup', recoveryThreshold: 2, recoveryProbeIntervalSeconds: 300, lastRecoveryProbeAt: '2026-07-15T11:55:00Z', lastRecoveryProbeStatus: 'success', maintenanceUntil: '2026-07-16T12:00:00Z' }, { id: 'claude-advisory', name: 'Claude 建议切换组', cli: 'claude', enabled: true, primaryProviderId: 'cc-switch:claude-main', backupProviderIds: ['cc-switch:claude-backup'], scenarioId: 'basic-ready', failureThreshold: 3, cooldownSeconds: 600, mode: 'advisory', activeProviderId: 'cc-switch:claude-main', recoveryThreshold: 2, recoveryProbeIntervalSeconds: 300, advice: { status: 'open', suggestedProviderId: 'cc-switch:claude-backup', validationJobId: 'validation-job', validationRequestId: 'validation-request', reason: '备用线路已通过基础可用性场景', createdAt: '2026-07-16T01:00:00Z', updatedAt: '2026-07-16T01:01:00Z' } }]
+  const initialMaintenanceUntil = new Date(Date.now() + 60 * 60_000).toISOString()
+  let providerGroups: Array<Record<string, any>> = [{ id: 'claude-main', name: 'Claude 主备组', cli: 'claude', enabled: true, primaryProviderId: 'cc-switch:claude-main', backupProviderIds: ['cc-switch:claude-backup'], scenarioId: 'basic-ready', failureThreshold: 3, cooldownSeconds: 600, mode: 'automatic', activeProviderId: 'cc-switch:claude-backup', recoveryThreshold: 2, recoveryProbeIntervalSeconds: 300, lastRecoveryProbeAt: '2026-07-15T11:55:00Z', lastRecoveryProbeStatus: 'success', maintenanceUntil: initialMaintenanceUntil }, { id: 'claude-advisory', name: 'Claude 建议切换组', cli: 'claude', enabled: true, primaryProviderId: 'cc-switch:claude-main', backupProviderIds: ['cc-switch:claude-backup'], scenarioId: 'basic-ready', failureThreshold: 3, cooldownSeconds: 600, mode: 'advisory', activeProviderId: 'cc-switch:claude-main', recoveryThreshold: 2, recoveryProbeIntervalSeconds: 300, advice: { status: 'open', suggestedProviderId: 'cc-switch:claude-backup', validationJobId: 'validation-job', validationRequestId: 'validation-request', reason: '备用线路已通过基础可用性场景', createdAt: '2026-07-16T01:00:00Z', updatedAt: '2026-07-16T01:01:00Z' } }]
   let incidents: Array<Record<string, any>> = [{ id: 'incident-1', subjectType: 'group', subjectId: 'claude-main', subjectName: 'Claude 主备组', providerId: 'cc-switch:claude-main', groupId: 'claude-main', title: 'Claude 主备组 请求连续失败', status: 'open', severity: 'critical', failureCount: 3, errorCounts: { timeout: 2, overloaded: 1 }, jobIds: ['job-1'], requestIds: ['req-schedule-1'], timeline: [{ id: 'entry-1', at: '2026-07-15T03:51:28Z', type: 'failure', message: '供应商请求超时', requestId: 'req-schedule-1', jobId: 'job-1' }], startedAt: '2026-07-15T03:50:00Z', updatedAt: '2026-07-15T03:51:28Z' }]
   let postmortem: Record<string, any> | null = null
   let notificationChannels: Array<Record<string, any>> = []
@@ -83,6 +86,7 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
   let proxySubscription: Record<string, any> = { configured: false, applied: false, nodeCount: 0 }
   let scenarioComparison: Record<string, any> | null = { id: 'comparison-1', scenarioId: 'basic-ready', scenarioName: '基础可用性', cli: 'claude', status: 'completed', createdAt: '2026-07-15T12:00:00Z', items: [{ providerId: 'cc-switch:claude-main', providerName: 'Claude 主线路', jobId: 'comparison-job-1', requestId: 'req-comparison-1', status: 'success', durationMillis: 700, responseExcerpt: 'READY', startedAt: '2026-07-15T12:00:00Z', endedAt: '2026-07-15T12:00:01Z' }, { providerId: 'cc-switch:claude-backup', providerName: 'Claude 备用线路', jobId: 'comparison-job-2', requestId: 'req-comparison-2', status: 'success', durationMillis: 900, responseExcerpt: 'READY', startedAt: '2026-07-15T12:00:00Z', endedAt: '2026-07-15T12:00:01Z' }] }
   let rerunComparison: Record<string, any> | null = null
+  let comparisonListOverride: Array<Record<string, any>> | null = null
 
   page.on('console', message => {
     if (message.type() === 'error' && message.text() !== 'Failed to load resource: net::ERR_CONNECTION_CLOSED') consoleErrors.push(message.text())
@@ -136,7 +140,7 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
       scenarioComparison = { id: 'comparison-1', scenarioId: body.scenarioId, scenarioName: '基础可用性', cli: body.cli, status: 'running', createdAt: '2026-07-15T12:00:00Z', items: body.providerIds.map((providerId, index) => ({ providerId, providerName: providers.find(provider => provider.id === providerId && provider.cli === body.cli)?.name || (providerId ? providerId : `当前 ${body.cli === 'codex' ? 'Codex' : 'Claude'} 配置`), jobId: `comparison-job-${index + 1}`, status: 'running' })) }
       return json(route, scenarioComparison, 202)
     }
-    if (method === 'GET' && path === '/scenario-comparisons') return json(route, { items: [rerunComparison, scenarioComparison].filter(Boolean), total: [rerunComparison, scenarioComparison].filter(Boolean).length, retentionLimited: false })
+    if (method === 'GET' && path === '/scenario-comparisons') { const items = comparisonListOverride ?? [rerunComparison, scenarioComparison].filter(Boolean); return json(route, { items, total: items.length, retentionLimited: items.length >= 500 }) }
     if (method === 'GET' && path === '/scenario-comparisons/comparison-1' && scenarioComparison) {
       scenarioComparison = { ...scenarioComparison, status: 'completed', items: (scenarioComparison.items as Array<Record<string, any>>).map((item, index) => ({ ...item, requestId: `req-comparison-${index + 1}`, status: 'success', durationMillis: 700 + index * 100, responseExcerpt: 'READY', startedAt: '2026-07-15T12:00:00Z', endedAt: '2026-07-15T12:00:01Z' })) }
       return json(route, scenarioComparison)
@@ -301,5 +305,27 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
     failNextActionCenter: () => { failActionCenter = 10 },
     failNextJobRead: () => { failJobReads = 1 },
     failNextProxyApply: () => { failProxyApply = 1 },
+    seedSchedules: (count) => {
+      const template = schedules[0]
+      schedules = Array.from({ length: count }, (_, index) => ({
+        ...template,
+        id: `schedule-page-${index + 1}`,
+        name: `分页计划 ${String(index + 1).padStart(3, '0')}`,
+        lastStatus: 'idle',
+        lastJobId: undefined,
+        nextRunAt: new Date(Date.parse('2026-07-16T01:00:00Z') + index * 60_000).toISOString(),
+      })) as typeof schedules
+    },
+    seedComparisons: (count) => {
+      comparisonListOverride = Array.from({ length: count }, (_, index) => ({
+        id: index === 0 ? 'comparison-1' : `comparison-page-${index + 1}`,
+        scenarioId: 'basic-ready',
+        scenarioName: `分页对比 ${String(index + 1).padStart(3, '0')}`,
+        cli: 'claude',
+        status: 'completed',
+        createdAt: new Date(Date.parse('2026-07-15T12:00:00Z') - index * 60_000).toISOString(),
+        items: [{ providerId: 'cc-switch:claude-main', providerName: 'Claude 主线路', jobId: `comparison-page-job-${index + 1}`, status: 'success', durationMillis: 700 }],
+      }))
+    },
   }
 }

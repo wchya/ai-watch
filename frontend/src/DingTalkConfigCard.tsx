@@ -40,7 +40,7 @@ export function DingTalkConfigCard({ onConfigured }: { onConfigured?: (configure
   }
 
   const source = config?.source === 'redis' ? 'Redis 加密配置' : config?.source === 'environment' ? '环境变量回退' : '未配置'
-  return <div className="dingtalk-secure-config">
+  return <div className="secure-config-card dingtalk-config-card" aria-busy={busy !== null}>
     <div className="dingtalk-config-status"><div className="notification-icon dingtalk"><Webhook/></div><div><strong>钉钉机器人</strong><span>{busy === 'load' ? '正在读取配置' : `${source}${config?.maskedWebhook ? ` · ${config.maskedWebhook}` : ''}`}</span></div><span className={`config-badge ${config?.configured ? 'ok' : ''}`}>{config?.configured ? '已配置' : '未配置'}</span></div>
     <div className="secure-config-note compact"><ShieldCheck/><span><strong>Redis 优先，环境变量回退</strong><small>页面保存后使用 AES-GCM 密文；清除 Redis 配置后会自动回退到 DINGTALK_WEBHOOK_URL。</small></span></div>
     <label className="field"><span>替换 Webhook URL</span><div className="dingtalk-webhook-input"><KeyRound/><input type="password" autoComplete="new-password" value={webhook} onChange={event => setWebhook(event.target.value)} placeholder={config?.configured ? '留空不修改当前配置' : 'https://oapi.dingtalk.com/robot/send?...'}/></div></label>

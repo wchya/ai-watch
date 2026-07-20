@@ -11,6 +11,7 @@ const shots = [
 ] as const
 
 test('generate README screenshots', async ({ page }) => {
+  test.setTimeout(120_000)
   await installApiMock(page)
   await page.setViewportSize({ width: 1440, height: 960 })
   await page.goto('/')

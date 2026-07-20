@@ -5,6 +5,7 @@ import {
   Terminal, TimerReset, Trash2, X,
 } from 'lucide-react'
 import { api } from './api'
+import { LIST_PAGE_SIZE, ListPagination } from './ListPagination'
 import { Select } from './Select'
 import { useDelayedRefresh } from './useDelayedRefresh'
 import type {
@@ -116,6 +117,7 @@ export function SchedulesView({ providers, defaultOptions, openRequest, openJob 
   const [selected, setSelected] = useState<Set<string>>(() => new Set())
   const [cliFilter, setCliFilter] = useState<'all' | Cli>('all')
   const [stateFilter, setStateFilter] = useState<'all' | 'enabled' | 'paused'>('all')
+  const [page, setPage] = useState(1)
   const [editor, setEditor] = useState<Schedule | 'new' | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Schedule | null>(null)
   const [changingId, setChangingId] = useState('')
@@ -161,6 +163,11 @@ export function SchedulesView({ providers, defaultOptions, openRequest, openJob 
     (cliFilter === 'all' || schedule.cli === cliFilter) &&
     (stateFilter === 'all' || (stateFilter === 'enabled' ? schedule.enabled : !schedule.enabled)),
   ), [cliFilter, schedules, stateFilter])
+  const pageCount = Math.max(1, Math.ceil(filtered.length / LIST_PAGE_SIZE))
+  const pageSchedules = useMemo(() => filtered.slice((page - 1) * LIST_PAGE_SIZE, page * LIST_PAGE_SIZE), [filtered, page])
+  const selectablePageSchedules = useMemo(() => pageSchedules.filter(schedule => !scheduleRunning(schedule)), [pageSchedules])
+  useEffect(() => { setPage(1) }, [cliFilter, stateFilter])
+  useEffect(() => { setPage(current => Math.min(current, pageCount)) }, [pageCount])
   const enabledCount = schedules.filter(schedule => schedule.enabled).length
   const nextSchedule = schedules.filter(schedule => schedule.enabled && schedule.nextRunAt)
     .sort((a, b) => new Date(a.nextRunAt!).getTime() - new Date(b.nextRunAt!).getTime())[0]
@@ -174,9 +181,11 @@ export function SchedulesView({ providers, defaultOptions, openRequest, openJob 
   })
   const toggleAllVisible = () => setSelected(current => {
     const next = new Set(current)
-    const visible = filtered.slice(0, 50)
-    const allSelected = visible.length > 0 && visible.every(schedule => next.has(schedule.id))
-    visible.forEach(schedule => allSelected ? next.delete(schedule.id) : next.add(schedule.id))
+    const allSelected = selectablePageSchedules.length > 0 && selectablePageSchedules.every(schedule => next.has(schedule.id))
+    selectablePageSchedules.forEach(schedule => {
+      if (allSelected) next.delete(schedule.id)
+      else if (next.size < LIST_PAGE_SIZE) next.add(schedule.id)
+    })
     return next
   })
 
@@ -291,8 +300,8 @@ export function SchedulesView({ providers, defaultOptions, openRequest, openJob 
     </section>
 
     <section className="panel schedule-list-panel">
-      <header className="schedule-list-head"><label className="schedule-check"><input type="checkbox" checked={filtered.length > 0 && filtered.slice(0, 50).every(schedule => selected.has(schedule.id))} onChange={toggleAllVisible}/><i><Check/></i><span>选择当前结果</span></label><span>{filtered.length} 条规则</span></header>
-      {loading ? <div className="schedule-loading"><LoaderCircle className="spinning"/><span>正在读取计划任务</span></div> : filtered.length ? <div className="schedule-list">{filtered.map(schedule => { const running = scheduleRunning(schedule); const changing = changingId === schedule.id; const terminalLoading = terminalLoadingId === schedule.id; return <article className={`schedule-row ${!schedule.enabled ? 'paused' : ''} ${running ? 'running' : ''}`} data-status={running ? 'running' : schedule.lastStatus || 'idle'} key={schedule.id} aria-busy={changing || terminalLoading}>
+      <header className="schedule-list-head"><label className="schedule-check"><input type="checkbox" aria-label="选择当前页可操作计划" checked={selectablePageSchedules.length > 0 && selectablePageSchedules.every(schedule => selected.has(schedule.id))} onChange={toggleAllVisible}/><i><Check/></i><span>选择当前页</span></label><span>{filtered.length} 条规则 · 第 {page}/{pageCount} 页</span></header>
+      {loading ? <div className="schedule-loading"><LoaderCircle className="spinning"/><span>正在读取计划任务</span></div> : filtered.length ? <div className="schedule-list">{pageSchedules.map(schedule => { const running = scheduleRunning(schedule); const changing = changingId === schedule.id; const terminalLoading = terminalLoadingId === schedule.id; return <article className={`schedule-row ${!schedule.enabled ? 'paused' : ''} ${running ? 'running' : ''}`} data-status={running ? 'running' : schedule.lastStatus || 'idle'} key={schedule.id} aria-busy={changing || terminalLoading}>
         <label className="schedule-check row-check"><input type="checkbox" checked={selected.has(schedule.id)} disabled={running || (!selected.has(schedule.id) && selected.size >= 50)} onChange={() => toggleSelected(schedule.id)}/><i><Check/></i><span className="sr-only">选择 {schedule.name}</span></label>
         <CliMark cli={schedule.cli}/>
         <div className="schedule-identity"><div><strong>{schedule.name}</strong><ScheduleStatus status={running ? 'running' : schedule.lastStatus}/>{running && <em className="schedule-running-badge">运行中 · 已锁定</em>}</div><span>{schedule.providerName || schedule.providerId || '当前配置'} · {modeLabel(schedule.mode)}</span></div>
@@ -300,6 +309,7 @@ export function SchedulesView({ providers, defaultOptions, openRequest, openJob 
         <div className="schedule-next"><span>下一次 / 最近一次</span><strong>{schedule.enabled ? formatDateTime(schedule.nextRunAt) : '已暂停'}</strong><small>{formatDateTime(schedule.lastOccurrenceAt)}</small></div>
         <div className="schedule-row-actions"><div className="schedule-observe-actions"><button className="schedule-action-button schedule-terminal-button" disabled={changing || terminalLoading || !schedule.lastJobId} aria-label={`查看实时终端：${schedule.name}`} title={schedule.lastJobId ? running ? '查看当前任务的实时终端输出' : '回放最近一轮终端输出' : '尚无可回放的终端输出'} onClick={() => void openTerminal(schedule)}>{terminalLoading ? <LoaderCircle className="spinning"/> : <Terminal/>}<span>{terminalLoading ? '连接中' : running ? '实时终端' : '终端'}</span></button><button className="schedule-action-button schedule-log-button" disabled={changing} aria-label={`查看运行日志：${schedule.name}`} title="查看该计划产生的请求日志" onClick={() => setLogTarget(schedule)}><FileText/><span>请求日志</span></button></div><div className="schedule-manage-actions">{running ? <button className="schedule-state stop" disabled={changing} aria-label={`停止运行：${schedule.name}`} onClick={() => void stopRunning(schedule)}>{changing ? <LoaderCircle className="spinning"/> : <Square/>}<span>{changing ? '停止中' : '停止'}</span></button> : <button className={`schedule-state ${schedule.enabled ? 'on' : ''}`} disabled={changing} aria-pressed={schedule.enabled} aria-label={`${schedule.enabled ? '暂停' : '启用'}：${schedule.name}`} onClick={() => void toggleEnabled(schedule)}>{changing ? <LoaderCircle className="spinning"/> : schedule.enabled ? <PauseCircle/> : <Play/>}<span>{changing ? schedule.enabled ? '暂停中' : '启用中' : schedule.enabled ? '暂停' : '启用'}</span></button>}<button className="icon-button schedule-edit-button" disabled={running || changing} aria-label={`编辑：${schedule.name}`} onClick={() => setEditor(schedule)}><Edit3/></button><button className="icon-button danger-icon schedule-delete-button" disabled={running || changing} aria-label={`删除：${schedule.name}`} onClick={() => setDeleteTarget(schedule)}><Trash2/></button></div></div>
       </article>})}</div> : <div className="schedule-empty"><div><CalendarClock/></div><strong>{schedules.length ? '没有匹配的计划任务' : '还没有计划任务'}</strong><p>{schedules.length ? '调整客户端或状态筛选，查看其他规则。' : '创建第一条自动巡检规则，定时观察 Provider 可用性。'}</p>{!schedules.length && <button className="primary" onClick={() => setEditor('new')}><Plus/>新建计划</button>}</div>}
+      {!loading && <ListPagination page={page} total={filtered.length} label="计划任务分页" onPageChange={setPage}/>}
     </section>
 
     <div className="schedule-safety"><ShieldCheck/><span><strong>规则只保存非敏感参数</strong><small>运行时从本地 Provider 解析连接信息；每个目标最多保留一个活跃任务，避免重复探测。</small></span></div>
@@ -319,16 +329,19 @@ function ScheduleLogDrawer({ schedule, close, openRequest }: { schedule: Schedul
   const [status, setStatus] = useState('all')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const loadVersion = useRef(0)
   const load = useCallback(async () => {
+    const version = ++loadVersion.current
     setLoading(true); setError('')
     try {
       const result = await api.events({ scheduleId: schedule.id, type: 'request_end', limit: 50, offset })
+      if (version !== loadVersion.current) return
       setEvents(result.events); setTotal(result.total)
     }
-    catch (e) { setError(e instanceof Error ? e.message : '无法读取计划运行日志') }
-    finally { setLoading(false) }
+    catch (e) { if (version === loadVersion.current) setError(e instanceof Error ? e.message : '无法读取计划运行日志') }
+    finally { if (version === loadVersion.current) setLoading(false) }
   }, [offset, schedule.id])
-  useEffect(() => { void load() }, [load])
+  useEffect(() => { void load(); return () => { loadVersion.current++ } }, [load])
   useEffect(() => {
     const key = (event: KeyboardEvent) => { if (event.key === 'Escape') close() }
     window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key)

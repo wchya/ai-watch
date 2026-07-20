@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AlertCircle, ArrowLeft, CheckCircle2, Clock3, Copy, ExternalLink, LoaderCircle, RefreshCw, ShieldCheck, Terminal, XCircle } from 'lucide-react'
 import { api } from './api'
 import type { RequestDetail } from './types'
+import { useLatestRequest } from './useLatestRequest'
 
 const statusMeta = (status: string) => status === 'success' ? { label: '请求成功', tone: 'success', icon: <CheckCircle2/> } : status === 'running' ? { label: '正在运行', tone: 'running', icon: <LoaderCircle className="spinning"/> } : status === 'timeout' ? { label: '请求超时', tone: 'warning', icon: <Clock3/> } : status === 'stopped' ? { label: '已停止', tone: 'muted', icon: <XCircle/> } : { label: status === 'start_failed' ? '启动失败' : '请求失败', tone: 'danger', icon: <AlertCircle/> }
 const dateTime = (value?: string) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—'
@@ -13,12 +14,14 @@ export function RequestDetailView({ requestId, back }: { requestId: string; back
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
+  const { beginRequest, isLatestRequest } = useLatestRequest()
   const load = useCallback(async () => {
+    const version = beginRequest()
     setLoading(true); setError('')
-    try { setDetail(await api.requestDetail(requestId)) }
-    catch (cause) { setError(cause instanceof Error ? cause.message : '请求详情读取失败') }
-    finally { setLoading(false) }
-  }, [requestId])
+    try { const next = await api.requestDetail(requestId); if (!isLatestRequest(version)) return; setDetail(next) }
+    catch (cause) { if (isLatestRequest(version)) setError(cause instanceof Error ? cause.message : '请求详情读取失败') }
+    finally { if (isLatestRequest(version)) setLoading(false) }
+  }, [beginRequest, isLatestRequest, requestId])
   useEffect(() => { void load() }, [load])
   const command = useMemo(() => detail ? `$ ${detail.cli || 'cli'}${detail.model ? ` --model ${detail.model}` : ''} [PROMPT REDACTED]` : '', [detail])
   const copy = async () => {

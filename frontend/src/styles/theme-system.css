@@ -1,0 +1,91 @@
+/* Global semantic design system — 2026-07-15 */
+.app-shell {
+  --app-bg:#06101d;--app-bg-elevated:#091727;--surface-1:#0b1928;--surface-2:#102132;--surface-3:#15283a;
+  --surface-hover:#172d40;--surface-active:#19394a;--text-primary:#e7f1f7;--text-secondary:#9db0bd;--text-muted:#748a9a;
+  --line-subtle:rgba(124,158,179,.09);--line-default:rgba(124,158,179,.17);--line-strong:rgba(124,158,179,.28);
+  --control-bg:#081522;--control-border:#49677b;--code-bg:#06111b;--overlay-bg:rgba(2,8,14,.72);--shadow-panel:0 18px 55px rgba(0,0,0,.22);
+  --status-info:#55d7d3;--status-info-soft:rgba(85,215,211,.1);--status-success:#63dda5;--status-success-soft:rgba(99,221,165,.1);
+  --status-warning:#f3be68;--status-warning-soft:rgba(243,190,104,.1);--status-danger:#ff7d8c;--status-danger-soft:rgba(255,125,140,.1);
+  --text-inverse:#041719;--page-bg:var(--app-bg);--surface-input:var(--control-bg);--shadow-overlay:0 28px 90px rgba(0,0,0,.42);--shadow-button:0 8px 22px rgba(0,0,0,.18);
+  --nav-text:var(--text-secondary);--nav-hover-text:var(--text-primary);--nav-hover-bg:var(--surface-hover);--nav-active-text:var(--text-primary);--nav-active-bg:var(--surface-active);--nav-active-accent:var(--status-info);--nav-active-icon-text:var(--status-info);--nav-active-icon-bg:transparent;--nav-active-icon-padding:0px;--nav-active-icon-radius:0px;
+  --radius-sm:8px;--radius-md:12px;--radius-lg:16px;--motion-fast:160ms;--motion-normal:220ms;
+  min-height:100dvh;color:var(--text-primary);background:var(--app-bg);
+}
+.app-shell.theme-graphite-signal {
+  --app-bg:#111416;--app-bg-elevated:#171b1e;--surface-1:#1a1f22;--surface-2:#20262a;--surface-3:#282f33;
+  --surface-hover:#2c3539;--surface-active:#30403f;--text-primary:#edf2f1;--text-secondary:#acb8b6;--text-muted:#808f8d;
+  --line-subtle:rgba(184,205,201,.08);--line-default:rgba(184,205,201,.16);--line-strong:rgba(184,205,201,.27);
+  --control-bg:#151a1d;--control-border:#5a6b68;--code-bg:#101416;--overlay-bg:rgba(7,9,10,.76);--shadow-panel:0 18px 50px rgba(0,0,0,.25);
+  --status-info:#80cbc4;--status-info-soft:rgba(128,203,196,.1);--status-success:#8bd6a8;--status-success-soft:rgba(139,214,168,.1);
+  --status-warning:#e5bd78;--status-warning-soft:rgba(229,189,120,.1);--status-danger:#ef8792;--status-danger-soft:rgba(239,135,146,.1);
+}
+.app-shell.theme-arctic-daylight {
+  --app-bg:#edf3f6;--app-bg-elevated:#f6f9fa;--surface-1:#ffffff;--surface-2:#f5f8fa;--surface-3:#e9f0f3;
+  --surface-hover:#e7f0f3;--surface-active:#dcecef;--text-primary:#172c36;--text-secondary:#425e6b;--text-muted:#596d76;
+  --line-subtle:rgba(35,76,91,.08);--line-default:rgba(35,76,91,.16);--line-strong:rgba(35,76,91,.27);
+  --control-bg:#f8fbfc;--control-border:#7f9198;--code-bg:#eef4f6;--overlay-bg:rgba(25,48,59,.42);--shadow-panel:0 14px 40px rgba(42,73,86,.1);
+  --status-info:#07777b;--status-info-soft:rgba(7,119,123,.1);--status-success:#157c50;--status-success-soft:rgba(21,124,80,.1);
+  --status-warning:#9b5a0a;--status-warning-soft:rgba(155,90,10,.1);--status-danger:#bd3346;--status-danger-soft:rgba(189,51,70,.1);
+  --text-inverse:#ffffff;--shadow-overlay:0 24px 70px rgba(42,73,86,.2);--shadow-button:0 7px 18px rgba(42,73,86,.14);
+  --nav-text:#486571;--nav-hover-text:#173945;--nav-hover-bg:#e2edf0;--nav-active-text:#073d48;--nav-active-bg:#d5e9ec;--nav-active-accent:#087f83;--nav-active-icon-text:#ffffff;--nav-active-icon-bg:#087f83;--nav-active-icon-padding:3px;--nav-active-icon-radius:6px;
+  color-scheme:light;
+}
+.app-shell,.app-shell * { scrollbar-color:var(--line-strong) transparent }
+.app-shell code,.app-shell pre,.app-shell time,.app-shell .mono { font-family:"Fira Code",ui-monospace,monospace }
+.app-shell .ambient { opacity:.045 }.theme-arctic-daylight .ambient { opacity:.025 }
+.app-shell .sidebar { background:color-mix(in srgb,var(--app-bg-elevated) 94%,transparent);border-color:var(--line-default) }
+.app-shell .sidebar nav button { color:var(--nav-text);transition:color var(--motion-fast),background var(--motion-fast),box-shadow var(--motion-fast) }
+.app-shell .sidebar nav button:hover { color:var(--nav-hover-text);background:var(--nav-hover-bg) }
+.app-shell .sidebar nav button.active { color:var(--nav-active-text);background:var(--nav-active-bg);box-shadow:inset 3px 0 0 var(--nav-active-accent),inset 0 0 0 1px color-mix(in srgb,var(--nav-active-accent) 16%,transparent);font-weight:700 }
+.app-shell .sidebar nav button.active svg { padding:var(--nav-active-icon-padding);border-radius:var(--nav-active-icon-radius);color:var(--nav-active-icon-text);background:var(--nav-active-icon-bg) }
+.app-shell .topbar { background:color-mix(in srgb,var(--app-bg-elevated) 90%,transparent);border-color:var(--line-subtle) }
+.app-shell .main-area { background:radial-gradient(circle at 72% -18%,color-mix(in srgb,var(--status-info) 8%,transparent),transparent 34%),var(--app-bg) }
+.app-shell .panel,.app-shell .metric-card { color:var(--text-primary);background:var(--surface-1);border-color:var(--line-default);box-shadow:var(--shadow-panel) }
+.app-shell .metric-card span,.app-shell .metric-card small { color:var(--text-muted) }
+.app-shell .metric-card strong { color:var(--text-primary) }
+.app-shell .panel-title { border-color:var(--line-subtle) }
+.app-shell .system-pulse,.app-shell .provider-vault-summary,.app-shell .event-summary,.app-shell .schedule-summary,.app-shell .slo-summary,.app-shell .incident-summary,.app-shell .maintenance-summary,.app-shell .notification-routing-summary,.app-shell .request-detail-summary { color:var(--text-primary);background:var(--surface-1);border-color:var(--line-default);box-shadow:var(--shadow-panel) }
+.app-shell .system-pulse>div,.app-shell .provider-vault-summary>div,.app-shell .event-summary>div,.app-shell .slo-summary>div,.app-shell .incident-summary>div,.app-shell .maintenance-summary>div,.app-shell .notification-routing-summary>div,.app-shell .request-detail-summary>div { border-color:var(--line-subtle) }
+.app-shell .system-pulse span,.app-shell .provider-vault-summary span,.app-shell .provider-vault-summary small,.app-shell .event-summary span,.app-shell .event-summary small,.app-shell .slo-summary span,.app-shell .slo-summary small,.app-shell .incident-summary span,.app-shell .incident-summary small,.app-shell .maintenance-summary span,.app-shell .maintenance-summary small,.app-shell .notification-routing-summary span,.app-shell .notification-routing-summary small,.app-shell .request-detail-summary span,.app-shell .request-detail-summary small { color:var(--text-muted) }
+.app-shell .system-pulse strong,.app-shell .provider-vault-summary strong,.app-shell .event-summary strong,.app-shell .slo-summary strong,.app-shell .incident-summary strong,.app-shell .maintenance-summary strong,.app-shell .notification-routing-summary strong,.app-shell .request-detail-summary strong { color:var(--text-primary) }
+.app-shell .drawer,.app-shell .event-confirm { color:var(--text-primary);background:var(--surface-1);border-color:var(--line-strong);box-shadow:var(--shadow-overlay) }
+.app-shell .drawer-header,.app-shell .drawer-footer { border-color:var(--line-default) }
+.app-shell .toast-inline { color:var(--status-danger);background:var(--surface-1);border-color:color-mix(in srgb,var(--status-danger) 28%,var(--line-default));box-shadow:var(--shadow-overlay) }
+.app-shell .toast-inline.success { color:var(--status-success);background:var(--surface-1);border-color:color-mix(in srgb,var(--status-success) 28%,var(--line-default)) }
+.app-shell .skeleton-card i { background:linear-gradient(90deg,var(--surface-2),var(--surface-3),var(--surface-2));background-size:200% }
+.app-shell .page-heading h1,.app-shell .panel-title h2,.app-shell h2,.app-shell h3,.app-shell strong { color:var(--text-primary) }
+.app-shell .page-heading p,.app-shell .panel-title p,.app-shell small,.app-shell .privacy-note { color:var(--text-muted) }
+.app-shell input,.app-shell textarea,.app-shell select,.app-shell .number-input { color:var(--text-primary);background:var(--control-bg);border-color:var(--control-border) }
+.app-shell input::placeholder,.app-shell textarea::placeholder { color:var(--text-muted) }
+.app-shell .secondary,.app-shell .icon-button { color:var(--text-secondary);background:var(--surface-2);border-color:var(--line-default) }
+.app-shell .secondary:hover,.app-shell .icon-button:hover { color:var(--text-primary);background:var(--surface-hover);border-color:var(--line-strong) }
+.app-shell button:focus-visible,.app-shell input:focus-visible,.app-shell textarea:focus-visible,.app-shell select:focus-visible { outline:2px solid var(--status-info);outline-offset:2px }
+.app-shell .overlay-scrim,.app-shell .event-confirm-scrim,.app-shell .nav-scrim { background:var(--overlay-bg) }
+.app-shell .drawer-footer { background:var(--surface-2);border-color:var(--line-default) }
+.app-shell .form-section,.app-shell .notification-card,.app-shell .provider-vault-card,.app-shell .provider-discovered-readonly article { background:var(--surface-2);border-color:var(--line-subtle) }
+.app-shell .provider-categories { scrollbar-color:var(--line-strong) transparent }
+.app-shell .provider-category { background:var(--surface-2);border-color:var(--line-default) }
+.app-shell .provider-category>header { background:var(--surface-3);border-color:var(--line-subtle) }
+.app-shell .provider-category>header strong { color:var(--text-primary) }
+.app-shell .provider-category>header small { color:var(--text-muted) }
+.app-shell .provider-category>header>em { color:var(--status-info);background:var(--status-info-soft) }
+.app-shell .provider-category.claude>header>em { color:var(--status-warning);background:var(--status-warning-soft) }
+.app-shell .provider-category .provider-mini-list>div { border-color:var(--line-subtle) }
+.app-shell .provider-category .provider-mini-list>div:hover { background:var(--surface-hover) }
+.app-shell .provider-mini-list strong { color:var(--text-primary) }
+.app-shell .provider-mini-list small,.app-shell .provider-mini-meta em { color:var(--text-muted) }
+.app-shell .provider-source-readonly { color:var(--text-secondary)!important }
+.app-shell .provider-runtime-state.running { color:var(--status-info);background:var(--status-info-soft) }
+.app-shell .provider-runtime-state.success { color:var(--status-success);background:var(--status-success-soft) }
+.app-shell .provider-runtime-state.warning { color:var(--status-warning);background:var(--status-warning-soft) }
+.app-shell .provider-runtime-state.danger { color:var(--status-danger);background:var(--status-danger-soft) }
+.app-shell .provider-runtime-state.muted { color:var(--text-muted);background:var(--surface-3) }
+.app-shell .provider-current { color:var(--status-info);background:var(--status-info-soft) }
+.theme-arctic-daylight .provider-category { background:#fff;border-color:#c8d7dc;box-shadow:0 4px 16px rgba(42,73,86,.055) }
+.theme-arctic-daylight .provider-category>header { background:#eef4f6 }
+.theme-arctic-daylight .provider-category .cli-icon.codex { color:#087f83;background:#dceff0;border-color:#b9dfe1 }
+.theme-arctic-daylight .provider-category .cli-icon.claude { color:#8d4d22;background:#f4e7dd;border-color:#e7cdbb }
+.theme-arctic-daylight .provider-mini-list>div>button:hover { color:#fff }
+.app-shell .event-level.level-success { color:var(--status-success);background:var(--status-success-soft) }
+.app-shell .event-level.level-warning,.app-shell .event-level.level-warn { color:var(--status-warning);background:var(--status-warning-soft) }
+.app-shell .event-level.level-error,.app-shell .event-level.level-fatal { color:var(--status-danger);background:var(--status-danger-soft) }

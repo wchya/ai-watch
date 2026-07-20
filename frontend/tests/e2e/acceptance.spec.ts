@@ -29,6 +29,13 @@ async function saveEvidence(page: Page, testInfo: TestInfo, name: string) {
   await page.screenshot({ path: testInfo.outputPath(`${name}.png`), animations: 'disabled' })
 }
 
+async function confirmDialog(page: Page, label: string) {
+  const dialog = page.getByRole('alertdialog')
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: label, exact: true }).click()
+  await expect(dialog).toBeHidden()
+}
+
 async function expectLightSurface(page: Page, selector: string) {
   const surface = page.locator(selector).first()
   await expect(surface).toBeVisible()
@@ -47,6 +54,215 @@ function assertClean(mock: ApiMock) {
   expect(mock.unmatched).toEqual([])
   expect(mock.consoleErrors).toEqual([])
 }
+
+test('键盘可以跳过侧栏且路由切换后焦点进入主内容', async ({ page }) => {
+  const mock = await installApiMock(page)
+  await page.goto('/')
+  await page.keyboard.press('Tab')
+  const skip = page.getByRole('link', { name: '跳到主要内容' })
+  await expect(skip).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('main')).toBeFocused()
+  await openView(page, 'Provider')
+  await expect(page).toHaveURL(/\/providers$/)
+  await expect(page.getByRole('main')).toBeFocused()
+  assertClean(mock)
+})
+
+test('移动端核心处置与筛选按钮保持 44px 触控目标', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 760 })
+  const mock = await installApiMock(page)
+  for (const [path, heading, selector] of [
+    ['/reliability', '比较每条线路的真实稳定性。', '.reliability-remediation-actions button'],
+    ['/maintenance', '维护期间继续记录，但暂时保持安静。', '.maintenance-card footer button'],
+    ['/slos', '看清可靠性还能消耗多久。', '.slo-card footer button'],
+    ['/comparisons', '每一次线路对比，都能重新打开。', '.comparison-filters button'],
+  ] as const) {
+    await page.goto(path)
+    await expect(page.getByRole('heading', { name: heading })).toBeVisible()
+    await expect(page.locator(selector).first()).toHaveCSS('min-height', '44px')
+    await expectNoHorizontalOverflow(page)
+  }
+  assertClean(mock)
+})
+
+test('移动端各领域可见主操作保持 44px 触控目标', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 760 })
+  const mock = await installApiMock(page)
+  for (const path of ['/', '/providers', '/events', '/schedules', '/scenarios', '/failover', '/reliability', '/maintenance', '/slos', '/incidents', '/comparisons', '/settings/notifications', '/settings/diagnostics']) {
+    await page.goto(path)
+    await expect(page.getByRole('main')).toBeVisible()
+    const undersized = await page.locator('main button, main a[href], main summary, main .select-trigger').evaluateAll(elements => elements.flatMap(element => {
+      const node = element as HTMLElement
+      const style = getComputedStyle(node)
+      const rect = node.getBoundingClientRect()
+      if (style.display === 'none' || style.visibility === 'hidden' || rect.width === 0 || rect.height === 0 || node.closest('[aria-hidden="true"]')) return []
+      if (node.matches('[class*="scrim"], .sr-only, .select-native')) return []
+      return rect.width < 43.5 || rect.height < 43.5 ? [`${node.tagName.toLowerCase()}.${node.className || '(no-class)'} ${Math.round(rect.width)}×${Math.round(rect.height)} “${node.innerText.trim().slice(0, 24)}”`] : []
+    }))
+    expect(undersized, `${path} 存在过小主操作`).toEqual([])
+    await expectNoHorizontalOverflow(page)
+  }
+  assertClean(mock)
+})
+
+test('各领域正文与辅助说明遵守 12px 和 11px 字号下限', async ({ page }) => {
+  const mock = await installApiMock(page)
+  for (const path of ['/', '/providers', '/events', '/schedules', '/scenarios', '/failover', '/reliability', '/maintenance', '/slos', '/incidents', '/comparisons', '/settings/notifications', '/settings/diagnostics']) {
+    await page.goto(path)
+    await expect(page.getByRole('main')).toBeVisible()
+    const undersized = await page.locator('main p, main small, main dt').evaluateAll(elements => elements.flatMap(element => {
+      const node = element as HTMLElement
+      const rect = node.getBoundingClientRect()
+      const style = getComputedStyle(node)
+      if (style.display === 'none' || style.visibility === 'hidden' || rect.width === 0 || rect.height === 0 || node.closest('[aria-hidden="true"]')) return []
+      const floor = node.tagName.toLowerCase() === 'p' ? 12 : 11
+      const size = Number.parseFloat(style.fontSize)
+      return size + .01 < floor ? [`${node.tagName.toLowerCase()}.${node.className || '(no-class)'} ${size}px “${node.innerText.trim().slice(0, 32)}”`] : []
+    }))
+    expect(undersized, `${path} 存在低于字号下限的正文或辅助说明`).toEqual([])
+  }
+  assertClean(mock)
+})
+
+test('计划任务与对比历史大列表按 50 条分页', async ({ page }) => {
+  const mock = await installApiMock(page)
+  mock.seedSchedules(120)
+  mock.seedComparisons(120)
+
+  await page.goto('/schedules')
+  await expect(page.locator('.schedule-row')).toHaveCount(50)
+  const schedulePagination = page.getByRole('navigation', { name: '计划任务分页' })
+  await expect(schedulePagination).toContainText('第 1 / 3 页 · 显示 1–50，共 120 条')
+  await schedulePagination.getByRole('button', { name: '下一页' }).click()
+  await expect(page.locator('.schedule-list').getByText('分页计划 051', { exact: true })).toBeVisible()
+  await expect(page.locator('.schedule-list').getByText('分页计划 001', { exact: true })).toHaveCount(0)
+
+  await page.goto('/comparisons')
+  await expect(page.locator('.comparison-history-list > button')).toHaveCount(50)
+  const comparisonPagination = page.getByRole('navigation', { name: '对比历史分页' })
+  await expect(comparisonPagination).toContainText('第 1 / 3 页 · 显示 1–50，共 120 条')
+  await comparisonPagination.getByRole('button', { name: '下一页' }).click()
+  await expect(page.locator('.comparison-history-list').getByText('分页对比 051', { exact: true })).toBeVisible()
+  await expect(page.locator('.comparison-history-list').getByText('分页对比 001', { exact: true })).toHaveCount(0)
+  assertClean(mock)
+})
+
+test('各领域主流程在多档宽度下无水平溢出', async ({ page }) => {
+  test.setTimeout(120_000)
+  const mock = await installApiMock(page)
+  const paths = ['/', '/providers', '/events', '/schedules', '/scenarios', '/failover', '/reliability', '/maintenance', '/slos', '/incidents', '/comparisons', '/settings/notifications', '/settings/diagnostics']
+  for (const width of [320, 768, 1024, 1440]) {
+    await page.setViewportSize({ width, height: 900 })
+    for (const path of paths) {
+      await page.goto(path)
+      await expect(page.getByRole('main')).toBeVisible()
+      await expectNoHorizontalOverflow(page)
+    }
+  }
+  assertClean(mock)
+})
+
+test('三套主题的文字、状态、焦点与表单边界满足对比度基线', async ({ page }) => {
+  const mock = await installApiMock(page)
+  await page.goto('/schedules')
+
+  for (const label of ['深海终端', '石墨信号', '极昼控制台']) {
+    await page.getByRole('button', { name: /界面主题/ }).click()
+    await page.getByRole('menuitemradio', { name: new RegExp(label) }).click()
+    const ratios = await page.locator('.app-shell').evaluate(shell => {
+      type Color = [number, number, number, number]
+      const parse = (value: string): Color => {
+        const source = value.trim()
+        if (source.startsWith('#')) {
+          const hex = source.slice(1)
+          const full = hex.length === 3 ? hex.split('').map(char => char + char).join('') : hex
+          return [Number.parseInt(full.slice(0, 2), 16), Number.parseInt(full.slice(2, 4), 16), Number.parseInt(full.slice(4, 6), 16), 1]
+        }
+        const values = source.match(/[\d.]+/g)?.map(Number) || [0, 0, 0, 0]
+        return [values[0], values[1], values[2], values[3] ?? 1]
+      }
+      const over = (foreground: Color, background: Color): Color => {
+        const alpha = foreground[3] + background[3] * (1 - foreground[3])
+        if (!alpha) return [0, 0, 0, 0]
+        return [0, 1, 2].map(index => (foreground[index] * foreground[3] + background[index] * background[3] * (1 - foreground[3])) / alpha).concat(alpha) as Color
+      }
+      const luminance = (color: Color) => {
+        const channels = color.slice(0, 3).map(value => value / 255).map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4)
+        return .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2]
+      }
+      const contrast = (foreground: Color, background: Color) => {
+        const [high, low] = [luminance(foreground), luminance(background)].sort((a, b) => b - a)
+        return (high + .05) / (low + .05)
+      }
+      const style = getComputedStyle(shell)
+      const token = (name: string) => parse(style.getPropertyValue(name))
+      const surface1 = token('--surface-1')
+      const surface2 = token('--surface-2')
+      const control = token('--control-bg')
+      const statusRatio = (name: string) => contrast(token(name), over(token(`${name}-soft`), surface1))
+      return {
+        primary: contrast(token('--text-primary'), surface1),
+        secondary: contrast(token('--text-secondary'), surface2),
+        muted: contrast(token('--text-muted'), surface2),
+        info: statusRatio('--status-info'),
+        success: statusRatio('--status-success'),
+        warning: statusRatio('--status-warning'),
+        danger: statusRatio('--status-danger'),
+        focus: contrast(token('--status-info'), surface1),
+        controlBoundary: contrast(token('--control-border'), control),
+      }
+    })
+    for (const [name, ratio] of Object.entries(ratios)) {
+      const minimum = name === 'controlBoundary' ? 3 : 4.5
+      expect(ratio, `${label} 的 ${name} 对比度不足`).toBeGreaterThanOrEqual(minimum)
+    }
+
+    const refresh = page.locator('.schedule-refresh')
+    await expect(refresh).toBeEnabled()
+    await page.locator('.schedule-filter-group button').last().focus()
+    await page.keyboard.press('Tab')
+    await expect(refresh).toBeFocused()
+    await expect(refresh).toHaveCSS('outline-style', 'solid')
+
+    const disabled = page.locator('.schedule-terminal-button:disabled').first()
+    await expect(disabled).toBeVisible()
+    expect(Number(await disabled.evaluate(element => getComputedStyle(element).opacity))).toBeLessThanOrEqual(.65)
+    await expect(disabled).toHaveCSS('cursor', 'not-allowed')
+
+    await page.getByRole('button', { name: '新建计划' }).click()
+    const input = page.getByRole('dialog').getByLabel('计划名称')
+    const actualBoundary = await input.evaluate(element => {
+      const parse = (value: string) => (value.match(/[\d.]+/g) || []).slice(0, 3).map(Number)
+      const luminance = (color: number[]) => {
+        const channels = color.map(value => value / 255).map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4)
+        return .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2]
+      }
+      const style = getComputedStyle(element)
+      const values = [luminance(parse(style.borderTopColor)), luminance(parse(style.backgroundColor))].sort((a, b) => b - a)
+      return (values[0] + .05) / (values[1] + .05)
+    })
+    expect(actualBoundary, `${label} 的真实输入框边界对比度不足`).toBeGreaterThanOrEqual(3)
+    await page.getByRole('dialog').getByRole('button', { name: '取消' }).click()
+  }
+  assertClean(mock)
+})
+
+test('reduced-motion 会关闭关键弹层和状态动效', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  const mock = await installApiMock(page)
+  await page.goto('/schedules')
+  await page.getByRole('button', { name: '新建计划' }).click()
+  const trigger = page.getByRole('dialog').locator('.select-trigger').first()
+  await trigger.click()
+  const popover = page.locator('.select-popover')
+  await expect(popover).toBeVisible()
+  await expect(popover).toHaveCSS('animation-name', 'none')
+  expect(await trigger.evaluate(element => Number.parseFloat(getComputedStyle(element).transitionDuration) || 0)).toBeLessThanOrEqual(.01)
+  await page.keyboard.press('Escape')
+  await page.getByRole('dialog').getByRole('button', { name: '取消' }).click()
+  assertClean(mock)
+})
 
 test('顶栏主题切换会即时应用并持久化三套主题', async ({ page }, testInfo) => {
   const mock = await installApiMock(page)
@@ -162,12 +378,12 @@ test('对比历史支持深链接、请求详情和按原集合重跑', async ({
   await page.locator('.comparison-history-list>button').first().click()
   await expect(page).toHaveURL(/\/comparisons\/comparison-1$/)
   await expect(page.getByRole('button', { name: '请求详情' }).first()).toBeVisible()
-  page.once('dialog', dialog => void dialog.accept())
   await page.getByRole('button', { name: '按原集合重跑' }).click()
-  await expect(page).toHaveURL(/\/comparisons\/comparison-2$/)
+  await confirmDialog(page, '开始重跑')
+  await expect(page).toHaveURL(/\/validation\/comparisons\/comparison-2$/)
   await expect.poll(() => mock.bulkActions.at(-1)).toBe('scenario_comparison_rerun')
   await page.goBack()
-  await expect(page).toHaveURL(/\/comparisons\/comparison-1$/)
+  await expect(page).toHaveURL(/\/validation\/comparisons\/comparison-1$/)
   await page.getByRole('button', { name: '请求详情' }).first().click()
   await expect(page).toHaveURL(/\/requests\/req-comparison-1$/)
   assertClean(mock)
@@ -289,6 +505,15 @@ test('可靠性页面支持 Provider 对比、时间窗切换和移动端布局'
   await expect(page.getByText('93%')).toBeVisible()
   await expect(page.getByText('推荐主线路')).toBeVisible()
   await expect(page.getByText('建议暂停')).toBeVisible()
+  await expect(page.getByRole('button', { name: '导出报告' })).toHaveCSS('white-space', 'nowrap')
+  await expect(page.getByText(/24 小时内共 42 次请求/)).toBeVisible()
+  const trendData = page.getByText('查看 24 个时间桶的数据表')
+  await trendData.focus()
+  await page.keyboard.press('Enter')
+  const trendTable = page.getByRole('table', { name: '24 小时可靠性趋势明细' })
+  await expect(trendTable).toBeVisible()
+  await expect(trendTable.getByRole('columnheader')).toHaveCount(7)
+  await expect(trendTable.getByRole('row')).toHaveCount(25)
   await expect(page.getByRole('link', { name: '最近请求' })).toHaveAttribute('href', '/requests/req-schedule-1')
   await page.getByLabel('报告格式').selectOption('json')
   const download = page.waitForEvent('download')
@@ -317,8 +542,8 @@ test('可靠性建议支持复测、备用验证、相关计划和确认暂停',
   await claudeCard.getByRole('button', { name: '测试备用' }).click()
   await expect(page.getByRole('status')).toContainText('备用线路验证已启动')
   await expect.poll(() => mock.reliabilityActions.at(-1)).toBe('cc-switch:claude-main:validate_backup')
-  page.once('dialog', dialog => void dialog.accept())
   await claudeCard.getByRole('button', { name: '暂停 1 个计划' }).click()
+  await confirmDialog(page, '暂停 1 个计划')
   await expect(page.getByRole('status')).toContainText('已暂停 1 个相关计划')
   await expect.poll(() => mock.reliabilityActions.at(-1)).toBe('cc-switch:claude-main:pause_schedules')
   await page.getByRole('button', { name: '相关计划' }).click()
@@ -420,7 +645,7 @@ test('极昼主题覆盖钉钉配置、计划操作栏和页面底部', async ({
   await page.getByRole('button', { name: /界面主题/ }).click()
   await page.getByRole('menuitemradio', { name: /极昼控制台/ }).click()
   await openView(page, '设置与通知')
-  await expect(page.locator('.dingtalk-secure-config')).toHaveCSS('background-color', 'rgb(255, 255, 255)')
+  await expect(page.locator('.dingtalk-config-card')).toHaveCSS('background-color', 'rgb(255, 255, 255)')
   await expect(page.getByText('Redis 优先，环境变量回退')).toBeVisible()
   await expect.poll(() => page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe('rgb(237, 244, 247)')
   await expect.poll(() => page.evaluate(() => [getComputedStyle(document.documentElement).backgroundColor, getComputedStyle(document.body).backgroundColor, getComputedStyle(document.getElementById('root')!).backgroundColor])).toEqual(['rgb(237, 244, 247)', 'rgb(237, 244, 247)', 'rgb(237, 244, 247)'])
@@ -439,12 +664,12 @@ test('极昼主题下本地供应商测活按钮保持清晰层级和交互反�
 
   const probe = page.getByRole('button', { name: '测活：Ray 主线路' })
   await expect(probe).toBeVisible()
-  await expect(probe).toHaveCSS('color', 'rgb(8, 127, 131)')
+  await expect(probe).toHaveCSS('color', 'rgb(7, 119, 123)')
   await expect(probe).toHaveCSS('min-height', '44px')
   await expect.poll(() => probe.evaluate(element => getComputedStyle(element).backgroundImage)).toContain('linear-gradient')
   await probe.hover()
   await expect(probe).toHaveCSS('color', 'rgb(255, 255, 255)')
-  await expect(probe).toHaveCSS('background-color', 'rgb(8, 127, 131)')
+  await expect(probe).toHaveCSS('background-color', 'rgb(7, 119, 123)')
   assertClean(mock)
 })
 
@@ -496,8 +721,8 @@ test('代理订阅可以在系统设置中保存测试并清除', async ({ page 
   await expect(panel.getByText('代理连通测试通过')).toBeVisible()
   expect(mock.bulkActions).toContain('proxy:test')
 
-  page.once('dialog', dialog => dialog.accept())
   await panel.getByRole('button', { name: '清除订阅' }).click()
+  await confirmDialog(page, '清除订阅')
   await expect(panel.getByText('订阅已清除，基础代理配置已恢复')).toBeVisible()
   await expect(panel.getByText('未配置', { exact: true })).toBeVisible()
   expect(mock.bulkActions).toContain('proxy:clear')
@@ -601,7 +826,6 @@ test('维护窗口支持开始、延长、提前结束和未来调度', async ({
 
 test('SLO 错误预算支持配置、暂停、恢复和路由跳转', async ({ page }) => {
   const mock = await installApiMock(page)
-  page.on('dialog', dialog => void dialog.accept())
   await page.goto('/slos')
   await expect(page).toHaveURL(/\/slos$/)
   await expect(page.getByRole('heading', { name: '看清可靠性还能消耗多久。' })).toBeVisible()
@@ -618,6 +842,7 @@ test('SLO 错误预算支持配置、暂停、恢复和路由跳转', async ({ p
   await expect(card).toContainText('错误预算剩余')
   await expect.poll(() => mock.bulkActions.at(-1)).toBe('slo:configure')
   await card.getByRole('button', { name: '暂停' }).click()
+  await confirmDialog(page, '暂停计算')
   await expect(card).toContainText('已暂停')
   await expect.poll(() => mock.bulkActions.at(-1)).toBe('slo:pause')
   await card.getByRole('button', { name: '恢复' }).click()
@@ -635,7 +860,6 @@ test('SLO 错误预算支持配置、暂停、恢复和路由跳转', async ({ p
 
 test('通知路由中心支持加密渠道、分流、测试和删除回退', async ({ page }) => {
   const mock=await installApiMock(page)
-  page.on('dialog',dialog=>void dialog.accept())
   await page.goto('/notification-routing')
   await expect(page).toHaveURL(/\/settings\/notifications$/)
   await expect(page.getByRole('heading',{name:'让每类消息，抵达正确的人。'})).toBeVisible()
@@ -659,6 +883,7 @@ test('通知路由中心支持加密渠道、分流、测试和删除回退', as
   await expect(card).not.toHaveCSS('background-color','rgb(7, 23, 34)')
   await page.setViewportSize({width:375,height:760});await expectNoHorizontalOverflow(page)
   await card.getByRole('button',{name:'删除'}).click()
+  await confirmDialog(page, '删除渠道')
   await expect.poll(()=>mock.bulkActions.at(-1)).toBe('notification-channel:delete')
   await expect(page.getByLabel('新事故目标渠道')).toHaveValue('')
   assertClean(mock)

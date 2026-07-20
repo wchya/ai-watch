@@ -93,7 +93,7 @@ export function Select({ children, className = '', disabled, value, defaultValue
       else if (event.key === 'Home') { event.preventDefault(); setActive(options.findIndex(option => !option.disabled)) }
       else if (event.key === 'End') { event.preventDefault(); let last = options.length - 1; while (last > 0 && options[last]?.disabled) last--; setActive(last) }
       else if ((event.key === 'Enter' || event.key === ' ') && open) { event.preventDefault(); choose(active) }
-      else if (event.key === 'Escape' && open) { event.preventDefault(); setOpen(false) }
+      else if (event.key === 'Escape' && open) { event.preventDefault(); event.stopPropagation(); setOpen(false) }
     }}>
       <span>{selected?.label || '请选择'}</span><ChevronDown/>
     </button>

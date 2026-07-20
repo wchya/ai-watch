@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Activity, CheckCircle2, Clock3, Cpu, Database, FolderClock, HardDrive, LoaderCircle, Network, RefreshCw, Server, Settings2, TriangleAlert } from 'lucide-react'
 import { api } from './api'
 import type { SystemDiagnostics } from './types'
+import { useLatestRequest } from './useLatestRequest'
 
 const bytes = (value: number) => value < 1024 * 1024 ? `${Math.round(value / 1024)} KiB` : `${(value / 1024 / 1024).toFixed(1)} MiB`
 const checkLabel = (state: string) => state === 'ok' ? '版本可读' : state === 'timeout' ? '检查超时' : state === 'version_unreadable' ? '版本不可读' : '不可用'
@@ -10,11 +11,13 @@ export function DiagnosticsView() {
   const [data, setData] = useState<SystemDiagnostics | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const { beginRequest, isLatestRequest } = useLatestRequest()
   const load = useCallback(async () => {
+    const version = beginRequest()
     setLoading(true); setError('')
-    try { setData(await api.diagnostics()) } catch (e) { setError(e instanceof Error ? e.message : '诊断信息读取失败') }
-    finally { setLoading(false) }
-  }, [])
+    try { const next = await api.diagnostics(); if (!isLatestRequest(version)) return; setData(next) } catch (e) { if (isLatestRequest(version)) setError(e instanceof Error ? e.message : '诊断信息读取失败') }
+    finally { if (isLatestRequest(version)) setLoading(false) }
+  }, [beginRequest, isLatestRequest])
   useEffect(() => { void load() }, [load])
 
   const ccSwitch = data?.ccSwitchSync

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertCircle, Braces, Check, CheckCircle2, Clock3, ExternalLink, FlaskConical, Gauge, LoaderCircle, Pencil, Play, Plus, Regex, Save, ShieldCheck, Trash2, X } from 'lucide-react'
 import { api } from './api'
 import { confirmAction } from './ConfirmDialog'
@@ -19,13 +19,15 @@ export function TestScenariosView({ openRequest = (requestId: string) => { windo
   const [message, setMessage] = useState('')
   const [editing, setEditing] = useState<TestScenario | 'new' | null>(null)
   const [running, setRunning] = useState<TestScenario | null>(null)
+  const loadVersion = useRef(0)
   const load = useCallback(async () => {
+    const version = ++loadVersion.current
     setLoading(true); setError('')
-    try { setValues(await api.testScenarios()) }
-    catch (cause) { setError(cause instanceof Error ? cause.message : '无法读取测试场景') }
-    finally { setLoading(false) }
+    try { const next = await api.testScenarios(); if (version !== loadVersion.current) return; setValues(next) }
+    catch (cause) { if (version === loadVersion.current) setError(cause instanceof Error ? cause.message : '无法读取测试场景') }
+    finally { if (version === loadVersion.current) setLoading(false) }
   }, [])
-  useEffect(() => { void load() }, [load])
+  useEffect(() => { void load(); return () => { loadVersion.current++ } }, [load])
   const saved = async (body: TestScenarioWriteRequest) => {
     const value = await api.saveTestScenario(body)
     setValues(current => [...current.filter(item => item.id !== value.id), value].sort((a, b) => Number(b.builtIn) - Number(a.builtIn) || a.name.localeCompare(b.name, 'zh-CN')))
@@ -57,6 +59,7 @@ function ScenarioRunDialog({ scenario, close }: { scenario: TestScenario; close:
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const rowPollVersion = useRef(0)
   useEffect(() => {
     let active = true
     void api.dashboard().then(data => {
@@ -71,13 +74,19 @@ function ScenarioRunDialog({ scenario, close }: { scenario: TestScenario; close:
   useEffect(() => {
     const pending = rows.filter(row => row.job && !terminalJob(row.job))
     if (!pending.length) return
-    const timer = window.setTimeout(() => {
-      void Promise.all(pending.map(async row => {
+    const version = ++rowPollVersion.current
+    const refresh = async () => {
+      if (document.hidden) return
+      const updated = await Promise.all(pending.map(async row => {
         try { return { ...row, job: await api.getJob(row.job!.id) } }
         catch (cause) { return { ...row, error: cause instanceof Error ? cause.message : '读取结果失败' } }
-      })).then(updated => setRows(current => current.map(row => updated.find(item => item.provider.cli === row.provider.cli && item.provider.id === row.provider.id) || row)))
-    }, 1000)
-    return () => window.clearTimeout(timer)
+      }))
+      if (version === rowPollVersion.current) setRows(current => current.map(row => updated.find(item => item.provider.cli === row.provider.cli && item.provider.id === row.provider.id) || row))
+    }
+    const timer = window.setTimeout(() => void refresh(), 1000)
+    const visible = () => { if (!document.hidden) { window.clearTimeout(timer); void refresh() } }
+    document.addEventListener('visibilitychange', visible)
+    return () => { rowPollVersion.current++; window.clearTimeout(timer); document.removeEventListener('visibilitychange', visible) }
   }, [rows])
   const toggle = (provider: Provider) => {
     const id = `${provider.cli}:${provider.id}`
@@ -85,7 +94,7 @@ function ScenarioRunDialog({ scenario, close }: { scenario: TestScenario; close:
   }
   const run = async () => {
     if (!selectedProviders.length) { setError('请至少选择一个 Provider'); return }
-    setBusy(true); setError(''); setRows([])
+    rowPollVersion.current++; setBusy(true); setError(''); setRows([])
     try {
       const result = await api.bulkJobs({ action: 'probe_once', items: selectedProviders.map(provider => ({ targetId: `${provider.cli}:${provider.id}`, cli: provider.cli, providerId: provider.id, scenarioId: scenario.id })) })
       setRows(selectedProviders.map(provider => {
@@ -110,6 +119,7 @@ function ScenarioBatchDialog({ scenario, close, openRequest }: { scenario: TestS
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const comparisonVersion = useRef(0)
   useEffect(() => {
     let active = true
     void api.dashboard().then(data => {
@@ -125,8 +135,16 @@ function ScenarioBatchDialog({ scenario, close, openRequest }: { scenario: TestS
   const compatible = useMemo(() => providers.filter(provider => provider.cli === cli), [cli, providers])
   useEffect(() => {
     if (!comparison || comparison.status === 'completed') return
-    const timer = window.setTimeout(() => void api.scenarioComparison(comparison.id).then(setComparison).catch(cause => setError(cause instanceof Error ? cause.message : '对比结果刷新失败')), 1000)
-    return () => window.clearTimeout(timer)
+    const version = ++comparisonVersion.current
+    const refresh = async () => {
+      if (document.hidden) return
+      try { const next = await api.scenarioComparison(comparison.id); if (version === comparisonVersion.current) setComparison(next) }
+      catch (cause) { if (version === comparisonVersion.current) setError(cause instanceof Error ? cause.message : '对比结果刷新失败') }
+    }
+    const timer = window.setTimeout(() => void refresh(), 1000)
+    const visible = () => { if (!document.hidden) { window.clearTimeout(timer); void refresh() } }
+    document.addEventListener('visibilitychange', visible)
+    return () => { comparisonVersion.current++; window.clearTimeout(timer); document.removeEventListener('visibilitychange', visible) }
   }, [comparison])
   const toggle = (provider: Provider) => setSelected(current => {
     const next = new Set(current)
@@ -135,15 +153,16 @@ function ScenarioBatchDialog({ scenario, close, openRequest }: { scenario: TestS
     return next
   })
   const changeCLI = (next: Cli) => {
-    setCli(next); setComparison(null)
+    comparisonVersion.current++; setBusy(false); setCli(next); setComparison(null)
     setSelected(new Set(providers.filter(provider => provider.cli === next).slice(0, 10).map(provider => provider.id)))
   }
   const run = async () => {
     if (selected.size < 2 || selected.size > 10) { setError('请选择 2–10 个同客户端 Provider'); return }
+    const version = ++comparisonVersion.current
     setBusy(true); setError(''); setComparison(null)
-    try { setComparison(await api.createScenarioComparison({ scenarioId: scenario.id, cli, providerIds: [...selected] })) }
-    catch (cause) { setError(cause instanceof Error ? cause.message : '批量测试启动失败') }
-    finally { setBusy(false) }
+    try { const next = await api.createScenarioComparison({ scenarioId: scenario.id, cli, providerIds: [...selected] }); if (version === comparisonVersion.current) setComparison(next) }
+    catch (cause) { if (version === comparisonVersion.current) setError(cause instanceof Error ? cause.message : '批量测试启动失败') }
+    finally { if (version === comparisonVersion.current) setBusy(false) }
   }
   const rows = useMemo(() => [...(comparison?.items || [])].sort((a, b) => {
     const aRank = a.status === 'success' ? 0 : comparisonTerminal(a.status) ? 2 : 1

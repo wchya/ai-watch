@@ -1,0 +1,330 @@
+/* Shared operational readability and touch layer.
+   Keep domain identity in styles.css; this file owns cross-domain interaction floors. */
+
+.app-shell :is(
+  .page-heading p,
+  .panel-title p,
+  .error-banner span,
+  .privacy-note,
+  .field-help,
+  .form-section-title p,
+  .provider-category-empty,
+  .schedule-empty p,
+  .incident-empty p,
+  .comparison-empty span,
+  .scenario-run-empty,
+  .notification-channel-empty span
+) {
+  font-size:12px;
+  line-height:1.6;
+}
+
+.app-shell :is(
+  .metric-card span,
+  .metric-card small,
+  .job-main > span,
+  .health-row span,
+  .connection-card span,
+  .action-item small,
+  .schedule-summary span,
+  .schedule-summary small,
+  .schedule-window small,
+  .schedule-next small,
+  .incident-safety small,
+  .incident-summary span,
+  .incident-summary small,
+  .event-summary span,
+  .event-summary small,
+  .provider-vault-summary span,
+  .provider-vault-summary small
+) {
+  font-size:11px;
+  line-height:1.45;
+}
+
+.app-shell :is(
+  .provider-discovered-readonly > header small,
+  .provider-discovered-readonly article small,
+  .provider-vault-title small,
+  .provider-vault-card dt,
+  .provider-vault-card dd
+) {
+  font-size:11px;
+  line-height:1.45;
+}
+
+.app-shell .provider-vault-card-main > p {
+  font-size:12px;
+  line-height:1.5;
+}
+
+.app-shell :is(
+  .theme-trigger small,
+  .theme-trigger strong,
+  .action-center > header span,
+  .action-center > header small
+) {
+  font-size:11px;
+  line-height:1.35;
+}
+
+.app-shell .event-kind-tabs button small {
+  font-size:11px;
+  line-height:1.4;
+}
+
+.app-shell :is(
+  .reliability-advice > header span,
+  .reliability-advice > header small,
+  .reliability-advice-card > header em,
+  .reliability-advice-card > header b,
+  .reliability-advice-card footer span
+) {
+  font-size:11px;
+  line-height:1.45;
+}
+
+.app-shell .reliability-advice-card ul {
+  font-size:12px;
+  line-height:1.6;
+}
+
+.app-shell .reliability-advice-card footer strong {
+  font-size:12px;
+  line-height:1.45;
+}
+
+.app-shell :is(
+  .comparisons-safety small,
+  .comparison-history-list small,
+  .comparison-history-list em,
+  .comparison-batch-status,
+  .comparison-history-detail > header span:first-child,
+  .comparison-history-detail header small,
+  .comparison-ranking small,
+  .comparison-ranking article > span:nth-of-type(2),
+  .comparison-ranking article > button,
+  .comparison-ranking article > em
+) {
+  font-size:11px;
+  line-height:1.45;
+}
+
+.app-shell .comparison-retention {
+  font-size:12px;
+  line-height:1.5;
+}
+
+.app-shell .diagnostics-panel-heading p,
+.app-shell .config-lane li span {
+  font-size:12px;
+  line-height:1.6;
+}
+
+.app-shell :is(
+  .diagnostic-cli > span small,
+  .diagnostic-cli dt,
+  .diagnostic-metrics small,
+  .runtime-gauge small,
+  .runtime-entry small,
+  .config-lane header em
+) {
+  font-size:11px;
+  line-height:1.45;
+}
+
+.app-shell :is(
+  .scenarios-privacy small,
+  .scenario-card > p,
+  .scenario-run-intro small,
+  .request-detail-heading p,
+  .request-result-callout span,
+  .request-safety small,
+  .failover-safety small,
+  .failover-advice span,
+  .failover-auto-note small,
+  .maintenance-behavior span,
+  .maintenance-effects,
+  .maintenance-dialog-note,
+  .slo-note span,
+  .slo-dialog-note,
+  .notification-routing-safety span,
+  .notification-channel-guard,
+  .postmortem-seal span,
+  .postmortem-editor > header span
+) {
+  font-size:12px;
+  line-height:1.6;
+}
+
+.app-shell :is(
+  .scenario-card header small,
+  .scenario-card dt,
+  .scenario-card dd,
+  .scenario-selection-count small,
+  .request-detail-heading > div:nth-child(2) > span,
+  .request-detail-status small,
+  .request-detail-summary span,
+  .request-detail-grid header span,
+  .request-error-grid dt,
+  .request-command dt,
+  .request-context dt,
+  .request-network dt,
+  .failover-toolbar > span,
+  .failover-summary span,
+  .failover-summary small,
+  .failover-card dt,
+  .failover-card > header small,
+  .failover-topology small,
+  .maintenance-summary span,
+  .maintenance-summary small,
+  .maintenance-card dt,
+  .maintenance-card header small,
+  .slo-summary span,
+  .slo-summary small,
+  .slo-card header small,
+  .slo-budget-label span,
+  .slo-budget > small,
+  .slo-card dt,
+  .notification-routing-summary span,
+  .notification-routing-summary small,
+  .notification-route-board header small,
+  .notification-route-source small,
+  .notification-route-board label > span,
+  .notification-route-board label > small,
+  .notification-channel-section header small,
+  .notification-channel-card header small,
+  .notification-channel-card dt,
+  .notification-channel-card dd,
+  .postmortem-header small,
+  .postmortem-facts span,
+  .postmortem-evidence header span,
+  .postmortem-evidence time,
+  .postmortem-editor > label > span
+) {
+  font-size:11px;
+  line-height:1.45;
+}
+
+.app-shell :is(
+  .scenario-card header em,
+  .failover-card > header > .failover-state,
+  .slo-status,
+  .notification-channel-card > header > span
+) {
+  font-size:11px;
+}
+
+.app-shell :is(
+  .scenario-card > footer button,
+  .scenario-request-link,
+  .request-back,
+  .schedule-request-detail-link,
+  .failover-apply-advice,
+  .failover-card > footer button,
+  .maintenance-card > footer button,
+  .slo-filters button,
+  .slo-links button,
+  .slo-card > footer button,
+  .notification-route-board > header button,
+  .notification-channel-card > footer button,
+  .postmortem-footer button
+) {
+  min-height:40px;
+  font-size:12px;
+}
+
+.app-shell :is(
+  .scenario-delete,
+  .postmortem-actions > div > button,
+  .postmortem-header .icon-button
+) {
+  min-width:40px;
+  min-height:40px;
+}
+
+.app-shell :is(button, input, textarea, select, .select-trigger):disabled {
+  cursor:not-allowed;
+}
+
+.app-shell :is(
+  .postmortem-editor textarea,
+  .postmortem-editor input,
+  .notification-route-board select
+) {
+  color:var(--text-primary);
+  background:var(--control-bg);
+  border-color:var(--control-border);
+}
+
+@media (max-width:760px), (pointer:coarse) {
+  .app-shell main :is(button, a[href], summary, .select-trigger) {
+    min-width:44px;
+    min-height:44px;
+    touch-action:manipulation;
+  }
+
+  .app-shell main a[href] {
+    display:inline-flex;
+    align-items:center;
+  }
+
+  .app-shell main .provider-mini-list > div > .provider-mini-actions > .provider-requests {
+    min-width:44px;
+  }
+
+  .app-shell :is(
+    .scenario-card > footer button,
+    .scenario-request-link,
+    .request-back,
+    .schedule-request-detail-link,
+    .failover-apply-advice,
+    .failover-card > footer button,
+    .maintenance-card > footer button,
+    .slo-filters button,
+    .slo-links button,
+    .slo-card > footer button,
+    .notification-route-board > header button,
+    .notification-channel-card > footer button,
+    .postmortem-footer button,
+    .scenario-delete,
+    .postmortem-actions > div > button,
+    .postmortem-header .icon-button
+  ) {
+    min-width:44px;
+    min-height:44px;
+  }
+
+  .app-shell :is(
+    input:not([type='checkbox']):not([type='radio']),
+    textarea,
+    select,
+    .select-trigger
+  ) {
+    font-size:16px;
+  }
+
+  .app-shell :is(
+    .scenario-card > footer,
+    .failover-card > footer,
+    .maintenance-card > footer,
+    .slo-card > footer,
+    .notification-channel-card > footer,
+    .postmortem-footer > div
+  ) {
+    gap:8px;
+  }
+}
+
+@media (max-width:480px) {
+  .app-shell .reliability-heading-actions > div .select-shell {
+    min-width:0;
+    flex:1;
+  }
+
+  .app-shell .reliability-heading-actions > div .secondary {
+    min-width:112px;
+    flex:none;
+    white-space:nowrap;
+  }
+}

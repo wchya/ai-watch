@@ -38,9 +38,9 @@ export function ProxySubscriptionCard() {
 
   const applied = Boolean(config?.configured && config.applied && !config.errorStage)
   const badge = config?.configured ? applied ? '已应用' : '需检查' : '未配置'
-  return <section className="panel settings-panel proxy-subscription-panel">
+  return <section className="panel settings-panel proxy-subscription-panel" aria-busy={busy !== null}>
     <div className="panel-title"><div><h2>代理订阅</h2><p>加密保存并热重载 Mihomo</p></div></div>
-    <div className="dingtalk-secure-config proxy-subscription-config">
+    <div className="secure-config-card proxy-subscription-config">
       <div className="dingtalk-config-status"><div className="notification-icon proxy"><Network/></div><div><strong>Mihomo 订阅</strong><span>{busy === 'load' ? '正在读取配置' : config?.maskedUrl || '使用基础代理配置'}</span></div><span className={`config-badge ${applied ? 'ok' : ''}`}>{badge}</span></div>
       <div className="proxy-subscription-metrics"><div><Gauge/><span><strong>{config?.nodeCount || 0}</strong><small>可用节点</small></span></div><div><Network/><span><strong title={config?.currentNode}>{config?.currentNode || '—'}</strong><small>当前节点</small></span></div><div><RefreshCw/><span><strong>{checkedAt(config?.lastCheckedAt)}</strong><small>最近检查</small></span></div></div>
       <div className="secure-config-note compact"><ShieldCheck/><span><strong>订阅地址仅加密保存</strong><small>页面不会返回明文；新配置验证失败时自动恢复上一份可用配置。</small></span></div>
