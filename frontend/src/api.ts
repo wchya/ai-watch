@@ -40,6 +40,15 @@ async function requestText(path: string): Promise<string> {
   return response.text()
 }
 
+async function requestHealth(): Promise<{ status: string; version?: string }> {
+  const response = await fetch(`${API_BASE}/health`)
+  const body = await response.json().catch(() => ({})) as { status?: string; version?: string }
+  if (!response.ok && !(response.status === 503 && body.status === 'degraded')) {
+    throw new ApiError(`请求失败 (${response.status})`, response.status)
+  }
+  return { status: body.status || 'degraded', version: body.version }
+}
+
 interface RawProvider { id: string; name: string; cli: 'codex' | 'claude'; current: boolean; enabled?: boolean; model?: string; baseUrl?: string; maskedKey?: string; proxyMode?: Provider['proxyMode']; hasProxyUrl?: boolean; maskedProxyUrl?: string; state?: Provider['state'] }
 interface RawJob {
   id: string; mode: 'probe' | 'keepalive'; cli: 'codex' | 'claude'; providerId?: string;
@@ -252,7 +261,7 @@ export const api = {
   jobSnapshot: requestJobSnapshot,
   async dashboard(): Promise<DashboardData> {
     const [health, config, rawProviders, jobs] = await Promise.all([
-      request<{ status: string; version?: string }>('/health'),
+      requestHealth(),
       request<RawConfigStatus>('/config/status'),
       request<RawProvider[]>('/providers'),
       requestJobSnapshot(),

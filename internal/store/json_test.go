@@ -581,7 +581,7 @@ func TestEventsRejectSecretsAndForbiddenRawFields(t *testing.T) {
 		{Type: "bad", Message: "token sk-abcdefghijklmnop"},
 		{Type: "bad", Data: map[string]any{"apiKey": "masked-or-not"}},
 		{Type: "bad", Data: map[string]any{"nested": map[string]any{"output": "READY"}}},
-		{Type: "bad", Data: map[string]any{"url": "https://oapi.example/robot?access_token=abcdef"}},
+		{Type: "bad", Data: map[string]any{"url": "https://oapi.example/robot?access_token=abcdefghijkl"}},
 	}
 	for _, value := range cases {
 		if err := store.SaveEvent(value); err == nil {
@@ -594,6 +594,25 @@ func TestEventsRejectSecretsAndForbiddenRawFields(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("persisted %d sensitive events", count)
+	}
+}
+
+func TestEventsAcceptRedactedCredentialMarkers(t *testing.T) {
+	store := New(t.TempDir())
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.SaveEvent(Event{Type: "safe", Data: map[string]any{
+		"error": "request failed: access_token=[REDACTED]",
+	}}); err != nil {
+		t.Fatalf("rejected redacted event: %v", err)
+	}
+}
+
+func TestPrepareEventReportsSensitiveFieldPath(t *testing.T) {
+	_, _, err := prepareEvent(Event{Type: "bad", Data: map[string]any{
+		"items": []any{map[string]string{"url": "https://example.test?access_token=abcdefghijkl"}},
+	}})
+	if err == nil || err.Error() != `event data field "data.items[0].url" contains credential-like data` {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

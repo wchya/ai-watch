@@ -19,6 +19,28 @@ type cachedJobEventStore struct {
 	events map[string][]domain.Event
 }
 
+type recoverableEventStore struct {
+	store.Store
+	mu  sync.Mutex
+	err error
+}
+
+func (s *recoverableEventStore) SaveEvent(event store.Event, retention ...store.EventRetention) error {
+	s.mu.Lock()
+	err := s.err
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return s.Store.SaveEvent(event, retention...)
+}
+
+func (s *recoverableEventStore) setError(err error) {
+	s.mu.Lock()
+	s.err = err
+	s.mu.Unlock()
+}
+
 func (s *cachedJobEventStore) SaveJobEvent(jobID string, event domain.Event, _ store.JobEventRetention) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -36,6 +58,50 @@ func (s *cachedJobEventStore) ListJobEvents(jobID string, after uint64) ([]domai
 		}
 	}
 	return values, nil
+}
+
+func TestPersistenceErrorIncludesEventTypeAndRecovers(t *testing.T) {
+	base := store.New(t.TempDir())
+	t.Cleanup(func() { _ = base.Close() })
+	st := &recoverableEventStore{Store: base, err: errors.New("temporary write failure")}
+	m := New(fakeResolver{}, nil, st)
+	t.Cleanup(m.Shutdown)
+
+	m.recordOperationalEvent(store.Event{Type: "request_end", Message: "safe"})
+	if err := m.FlushEvents(); err == nil || err.Error() != `persist event "request_end": temporary write failure` {
+		t.Fatalf("unexpected persistence error: %v", err)
+	}
+
+	st.setError(nil)
+	m.recordOperationalEvent(store.Event{Type: "job_state", Message: "safe"})
+	if err := m.FlushEvents(); err != nil {
+		t.Fatalf("persistence did not recover: %v", err)
+	}
+	if got := m.PersistenceError(); got != "" {
+		t.Fatalf("persistence error was not cleared: %q", got)
+	}
+}
+
+func TestOperationalEventRedactsCredentialBeforePersistence(t *testing.T) {
+	base := store.New(t.TempDir())
+	t.Cleanup(func() { _ = base.Close() })
+	m := New(fakeResolver{}, nil, base)
+	t.Cleanup(m.Shutdown)
+
+	m.recordOperationalEvent(store.Event{Type: "reliability_digest_failed", Data: map[string]any{
+		"error": "request failed: access_token=abcdefghijkl",
+	}})
+	if err := m.FlushEvents(); err != nil {
+		t.Fatalf("persist redacted event: %v", err)
+	}
+	events, err := base.ListEvents(store.EventFilter{Limit: 10})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+	got, _ := events[0].Data["error"].(string)
+	if got != "request failed: access_token=[REDACTED]" {
+		t.Fatalf("credential was not redacted: %q", got)
+	}
 }
 
 type fakeResolver struct{ cfg domain.ResolvedConfig }

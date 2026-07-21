@@ -33,7 +33,7 @@ var ErrScheduleLimit = errors.New("schedule limit reached")
 
 var (
 	forbiddenEventKey = regexp.MustCompile(`(?i)(^|[_-])(api[_-]?key|auth|authorization|credential|output|prompt|secret|token|webhook)([_-]|$)`)
-	credentialValue   = regexp.MustCompile(`(?i)(sk-[a-z0-9_-]{8,}|access_token=|bearer\s+[a-z0-9._~+/=-]{8,})`)
+	credentialValue   = regexp.MustCompile(`(?i)(sk-[a-z0-9_-]{8,}|access_token=[a-z0-9._~+/=-]{8,}|bearer\s+[a-z0-9._~+/=-]{8,})`)
 	scheduleID        = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 )
 
@@ -1551,9 +1551,6 @@ func prepareEvent(value Event) (Event, []byte, error) {
 	if credentialValue.MatchString(value.Message) {
 		return Event{}, nil, errors.New("event message contains credential-like data")
 	}
-	if err := validateEventData(value.Data); err != nil {
-		return Event{}, nil, err
-	}
 	data := []byte("{}")
 	if len(value.Data) > 0 {
 		var err error
@@ -1565,8 +1562,12 @@ func prepareEvent(value Event) (Event, []byte, error) {
 	if len(data) > maxEventDataBytes {
 		return Event{}, nil, fmt.Errorf("event data exceeds %d bytes", maxEventDataBytes)
 	}
-	if credentialValue.Match(data) {
-		return Event{}, nil, errors.New("event data contains credential-like data")
+	var normalized any
+	if err := json.Unmarshal(data, &normalized); err != nil {
+		return Event{}, nil, fmt.Errorf("decode event data: %w", err)
+	}
+	if err := validateEventData(normalized, "data"); err != nil {
+		return Event{}, nil, err
 	}
 	if value.At.IsZero() {
 		value.At = time.Now().UTC()
@@ -1576,26 +1577,27 @@ func prepareEvent(value Event) (Event, []byte, error) {
 	return value, data, nil
 }
 
-func validateEventData(value any) error {
+func validateEventData(value any, path string) error {
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, item := range typed {
+			itemPath := path + "." + key
 			if forbiddenEventKey.MatchString(key) {
-				return fmt.Errorf("event data contains forbidden field %q", key)
+				return fmt.Errorf("event data contains forbidden field %q", itemPath)
 			}
-			if err := validateEventData(item); err != nil {
+			if err := validateEventData(item, itemPath); err != nil {
 				return err
 			}
 		}
 	case []any:
-		for _, item := range typed {
-			if err := validateEventData(item); err != nil {
+		for index, item := range typed {
+			if err := validateEventData(item, fmt.Sprintf("%s[%d]", path, index)); err != nil {
 				return err
 			}
 		}
 	case string:
 		if credentialValue.MatchString(typed) {
-			return errors.New("event data contains credential-like data")
+			return fmt.Errorf("event data field %q contains credential-like data", path)
 		}
 	}
 	return nil

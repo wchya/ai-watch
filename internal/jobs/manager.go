@@ -671,6 +671,10 @@ func (m *Manager) publishLocked(rt *runtime, typ, msg string, data map[string]an
 }
 
 func (m *Manager) recordOperationalEvent(event store.Event) {
+	event.Message = security.Redact(event.Message)
+	if event.Data != nil {
+		event.Data = redactEventData(event.Data, nil)
+	}
 	m.mu.RLock()
 	if m.closing {
 		m.mu.RUnlock()
@@ -899,19 +903,30 @@ func (m *Manager) persistEvents() {
 			close(item.barrier)
 			continue
 		}
+		attempted := false
+		var persistenceErr error
 		if item.operationalEvent != nil {
+			attempted = true
 			if err := m.store.SaveEvent(*item.operationalEvent, item.retention); err != nil {
-				m.persistenceErr.Store(err.Error())
+				persistenceErr = fmt.Errorf("persist event %q: %w", item.operationalEvent.Type, err)
 			} else if item.operationalEvent.Type == "request_end" {
 				m.queueReliabilityEvaluation(*item.operationalEvent)
 			}
 		}
 		if item.jobEvent != nil {
 			if cache, ok := m.store.(store.JobEventStore); ok {
+				attempted = true
 				if err := cache.SaveJobEvent(item.jobID, *item.jobEvent, store.JobEventRetention{TTL: probeLogTTL, MaxRows: probeLogMaxRows, MaxBytes: probeLogMaxBytes}); err != nil {
-					m.persistenceErr.Store(err.Error())
+					if persistenceErr == nil {
+						persistenceErr = fmt.Errorf("persist job event %q: %w", item.jobEvent.Type, err)
+					}
 				}
 			}
+		}
+		if persistenceErr != nil {
+			m.persistenceErr.Store(persistenceErr.Error())
+		} else if attempted {
+			m.persistenceErr.Store("")
 		}
 	}
 }
