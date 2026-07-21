@@ -363,6 +363,10 @@ export const api = {
     storeLocalPrefs(body)
     return { ...body, ...raw }
   },
+  setBrowserNotifications(enabled: boolean) {
+    const current = readLocalPrefs()
+    localStorage.setItem('ai-watch-ui-settings', JSON.stringify({ ...current, browserNotifications: enabled }))
+  },
   async events(query: EventQuery): Promise<EventListResult> {
     const params = new URLSearchParams({ limit: String(query.limit) })
     if (query.offset != null) params.set('offset', String(query.offset))

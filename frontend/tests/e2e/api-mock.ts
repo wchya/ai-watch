@@ -43,6 +43,8 @@ const manualProviders = [
 
 const completedJob = { id: 'job-1', mode: 'probe', runOnce: true, cli: 'codex', providerId: 'ray', providerName: 'Ray 主线路', model: 'gpt-5', status: 'success', phase: 'probe', latestAttempt: 'success', attempts: 1, startedAt: '2026-07-15T03:51:18Z', endedAt: '2026-07-15T03:51:28Z', elapsedMillis: 10000 }
 const runningJob = { ...completedJob, status: 'running', latestAttempt: '', endedAt: undefined, elapsedMillis: 0 }
+const secondJob = { ...completedJob, id: 'job-2', cli: 'claude', providerId: 'cc-switch:claude-main', providerName: 'Claude 主线路', model: 'claude-sonnet-4' }
+const secondRunningJob = { ...secondJob, status: 'running', latestAttempt: '', endedAt: undefined, elapsedMillis: 0 }
 
 const json = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 
@@ -80,7 +82,7 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
   let failJobReads = 0
   let failProxyApply = 0
   let currentJob = { ...completedJob }
-  let schedules = [{ id: 'schedule-1', name: '未知状态计划', enabled: true, cli: 'codex', providerId: '', providerName: '当前 Codex 配置', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 62, startMinute: 540, endMinute: 1080, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'future_status', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:00:00Z' }, { id: 'schedule-running', name: '运行中计划', enabled: true, cli: 'codex', providerId: '', providerName: '当前 Codex 配置', mode: 'keepalive', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: false, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'running', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:00:00Z' }, { id: 'schedule-claude-risk', name: 'Claude 异常巡检', enabled: true, cli: 'claude', providerId: 'cc-switch:claude-main', providerGroupId: 'claude-main', providerName: 'Claude 主线路', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'failed', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:30:00Z' }, { id: 'schedule-advisory', name: 'Claude 建议组巡检', enabled: true, cli: 'claude', providerId: 'cc-switch:claude-main', providerGroupId: 'claude-advisory', providerName: 'Claude 建议切换组', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'idle', nextRunAt: '2026-07-16T01:45:00Z' }]
+  let schedules = [{ id: 'schedule-1', name: '未知状态计划', enabled: true, cli: 'codex', providerId: '', providerName: '当前 Codex 配置', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 62, startMinute: 540, endMinute: 1080, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'future_status', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:00:00Z' }, { id: 'schedule-running', name: '运行中计划', enabled: true, cli: 'codex', providerId: '', providerName: '当前 Codex 配置', mode: 'keepalive', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: false, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'running', lastJobId: 'job-1', nextRunAt: '2026-07-16T01:00:00Z' }, { id: 'schedule-claude-risk', name: 'Claude 异常巡检', enabled: true, cli: 'claude', providerId: 'cc-switch:claude-main', providerGroupId: 'claude-main', providerName: 'Claude 主线路', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'failed', lastJobId: 'job-2', nextRunAt: '2026-07-16T01:30:00Z' }, { id: 'schedule-advisory', name: 'Claude 建议组巡检', enabled: true, cli: 'claude', providerId: 'cc-switch:claude-main', providerGroupId: 'claude-advisory', providerName: 'Claude 建议切换组', mode: 'probe', timezone: 'Asia/Shanghai', weekdaysMask: 127, startMinute: 0, endMinute: 1440, untilSuccess: true, timeoutSeconds: 15, retryIntervalSeconds: 3, keepaliveIntervalSeconds: 120, failureThreshold: 3, lastStatus: 'idle', nextRunAt: '2026-07-16T01:45:00Z' }]
   const initialMaintenanceUntil = new Date(Date.now() + 60 * 60_000).toISOString()
   let providerGroups: Array<Record<string, any>> = [{ id: 'claude-main', name: 'Claude 主备组', cli: 'claude', enabled: true, primaryProviderId: 'cc-switch:claude-main', backupProviderIds: ['cc-switch:claude-backup'], scenarioId: 'basic-ready', failureThreshold: 3, cooldownSeconds: 600, mode: 'automatic', activeProviderId: 'cc-switch:claude-backup', recoveryThreshold: 2, recoveryProbeIntervalSeconds: 300, lastRecoveryProbeAt: '2026-07-15T11:55:00Z', lastRecoveryProbeStatus: 'success', maintenanceUntil: initialMaintenanceUntil }, { id: 'claude-advisory', name: 'Claude 建议切换组', cli: 'claude', enabled: true, primaryProviderId: 'cc-switch:claude-main', backupProviderIds: ['cc-switch:claude-backup'], scenarioId: 'basic-ready', failureThreshold: 3, cooldownSeconds: 600, mode: 'advisory', activeProviderId: 'cc-switch:claude-main', recoveryThreshold: 2, recoveryProbeIntervalSeconds: 300, advice: { status: 'open', suggestedProviderId: 'cc-switch:claude-backup', validationJobId: 'validation-job', validationRequestId: 'validation-request', reason: '备用线路已通过基础可用性场景', createdAt: '2026-07-16T01:00:00Z', updatedAt: '2026-07-16T01:01:00Z' } }]
   let incidents: Array<Record<string, any>> = [{ id: 'incident-1', subjectType: 'group', subjectId: 'claude-main', subjectName: 'Claude 主备组', providerId: 'cc-switch:claude-main', groupId: 'claude-main', title: 'Claude 主备组 请求连续失败', status: 'open', severity: 'critical', failureCount: 3, errorCounts: { timeout: 2, overloaded: 1 }, jobIds: ['job-1'], requestIds: ['req-schedule-1'], timeline: [{ id: 'entry-1', at: '2026-07-15T03:51:28Z', type: 'failure', message: '供应商请求超时', requestId: 'req-schedule-1', jobId: 'job-1' }], startedAt: '2026-07-15T03:50:00Z', updatedAt: '2026-07-15T03:51:28Z' }]
@@ -107,6 +109,10 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
     if (method === 'GET' && path === '/config/status') return json(route, { codexCli: true, claudeCli: true, sqliteCli: true, codexConfig: true, claudeConfig: true, ccSwitchDb: true })
     if (method === 'GET' && path === '/providers') return json(route, providers)
     if (method === 'GET' && path === '/jobs') return json(route, [currentJob])
+    if (method === 'POST' && path === '/jobs') {
+      currentJob = { ...runningJob }
+      return json(route, currentJob, 202)
+    }
     if (method === 'GET' && path === '/jobs/job-1') {
       if (failJobReads > 0) {
         failJobReads--
@@ -114,6 +120,7 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
       }
       return json(route, currentJob)
     }
+    if (method === 'GET' && path === '/jobs/job-2') return json(route, secondJob)
     if (method === 'POST' && path === '/jobs/job-1/stop') {
       stopJobCalls.push('job-1')
       currentJob = { ...currentJob, status: 'stopped', latestAttempt: 'stopped', endedAt: '2026-07-15T03:51:29Z', elapsedMillis: 11000 }
@@ -187,6 +194,14 @@ export async function installApiMock(page: Page): Promise<ApiMock> {
         `event: request_log\ndata: ${JSON.stringify({ id: 2, type: 'request_log', at: '2026-07-15T03:51:27Z', message: 'READY\\n', data: { requestId: 'req-1', job: runningJob } })}\n\n`,
       ]
       if (!active) stream.push(`event: request_end\ndata: ${JSON.stringify({ id: 3, type: 'request_end', at: '2026-07-15T03:51:28Z', message: '请求结束', data: { requestId: 'req-1', status: currentJob.status, durationMillis: 10000, exitCode: 0, responseExcerpt: 'READY', job: currentJob } })}\n\n`)
+      return route.fulfill({ status: 200, contentType: 'text/event-stream', body: stream.join('') })
+    }
+    if (method === 'GET' && path === '/jobs/job-2/events') {
+      const stream = [
+        `event: request_start\ndata: ${JSON.stringify({ id: 11, type: 'request_start', at: '2026-07-15T04:01:18Z', message: '请求开始', data: { requestId: 'req-2', cli: 'claude', model: 'claude-sonnet-4', target: 'https://claude.example.com', proxyMode: 'default', job: secondRunningJob } })}\n\n`,
+        `event: request_log\ndata: ${JSON.stringify({ id: 12, type: 'request_log', at: '2026-07-15T04:01:27Z', message: 'SECOND_JOB_OUTPUT\\n', data: { requestId: 'req-2', job: secondRunningJob } })}\n\n`,
+        `event: request_end\ndata: ${JSON.stringify({ id: 13, type: 'request_end', at: '2026-07-15T04:01:28Z', message: '请求结束', data: { requestId: 'req-2', status: 'success', durationMillis: 10000, exitCode: 0, responseExcerpt: 'SECOND_JOB_OUTPUT', job: secondJob } })}\n\n`,
+      ]
       return route.fulfill({ status: 200, contentType: 'text/event-stream', body: stream.join('') })
     }
     if (method === 'GET' && path === '/settings') return json(route, settings)

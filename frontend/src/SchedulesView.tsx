@@ -45,7 +45,7 @@ const formatDateTime = (iso?: string) => iso
 
 const scheduleStatusMeta: Record<ScheduleLastStatus, { label: string; tone: string }> = {
   idle: { label: '等待首次运行', tone: 'muted' },
-  skipped: { label: '已跳过', tone: 'muted' },
+  skipped: { label: '等待目标空闲', tone: 'muted' },
   queued: { label: '已排队', tone: 'info' },
   starting: { label: '准备中', tone: 'info' },
   running: { label: '运行中', tone: 'running' },

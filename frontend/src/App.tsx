@@ -57,6 +57,7 @@ export function App() {
   const [presetProvider, setPresetProvider] = useState<Provider | null>(null)
   const [jobDefaults, setJobDefaults] = useState<JobOptions>(DEFAULT_OPTIONS)
   const [notificationJobs, setNotificationJobs] = useState<Set<string>>(() => new Set())
+  const [browserNotifications, setBrowserNotifications] = useState(false)
   const [detailJob, setDetailJob] = useState<JobSummary | null>(null)
   const [mobileNav, setMobileNav] = useState(false)
   const [eventsRefreshToken, setEventsRefreshToken] = useState(0)
@@ -158,12 +159,43 @@ export function App() {
   useEffect(() => {
     void api.settings().then(settings => {
       setUiTheme(settings.uiTheme)
+      setBrowserNotifications(settings.browserNotifications)
       setJobDefaults(current => ({ ...current, timeoutSeconds: settings.timeoutSeconds, retryIntervalSeconds: settings.retryIntervalSeconds, keepaliveIntervalSeconds: settings.keepaliveIntervalSeconds }))
     }).catch(cause => {
       setThemeMessage(cause instanceof Error ? `设置加载失败：${cause.message}` : '设置加载失败')
       window.setTimeout(() => setThemeMessage(''), 5000)
     })
   }, [])
+  useEffect(() => {
+    if (!notificationJobs.size) return
+    let disposed = false
+    let checking = false
+    const check = async () => {
+      if (checking) return
+      checking = true
+      try {
+        const finished: JobSummary[] = []
+        await Promise.all([...notificationJobs].map(async id => {
+          try {
+            const job = await api.getJob(id)
+            if (!['queued', 'starting', 'running'].includes(job.status)) finished.push(job)
+          } catch { /* a later poll can recover transient read failures */ }
+        }))
+        if (disposed || !finished.length) return
+        if (browserNotifications && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+          finished.forEach(job => new Notification(`AI Watch · ${job.status === 'success' ? '成功' : job.status === 'stopped' ? '已停止' : '失败'}`, { body: `${job.cli === 'codex' ? 'Codex' : 'Claude'} ${job.mode === 'probe' ? '测活' : '保活'}任务：${job.providerName || job.providerId || '当前配置'}` }))
+        }
+        setNotificationJobs(current => {
+          const next = new Set(current)
+          finished.forEach(job => next.delete(job.id))
+          return next
+        })
+      } finally { checking = false }
+    }
+    void check()
+    const timer = window.setInterval(() => void check(), 2000)
+    return () => { disposed = true; window.clearInterval(timer) }
+  }, [browserNotifications, notificationJobs])
   useEffect(() => {
     if (!themeOpen) return
     const close = (event: MouseEvent) => { if (!themeRef.current?.contains(event.target as Node)) setThemeOpen(false) }
@@ -227,11 +259,11 @@ export function App() {
       </header>
 
       {!requestId && centerForView(view) && <CenterTabs label={centerForView(view)!.label} view={view} navigate={navigate} items={centerForView(view)!.views.map(target => [target, routeTitle(target)])}/>}
-      <Suspense fallback={<RouteLoading/>}>{requestId ? <RequestDetailView requestId={requestId} back={closeRequest}/> : view === 'dashboard' ? <Dashboard data={data} loading={loading} error={error} retry={() => void load()} refreshJobs={onJobChanged} openNew={() => { setPresetProvider(null); setDrawerOpen(true) }} probeProvider={(provider) => { setPresetProvider(provider); setDrawerOpen(true) }} showProviderRequests={(provider) => { setEventsProviderFilter(provider.id); navigate('events') }} openJob={openJob}/> : view === 'providers' ? <ProviderConfigView discoveredProviders={(data?.providers ?? []).filter(provider => provider.source !== 'manual')} refreshToken={providersRefreshToken} onProbe={(provider) => { setPresetProvider(provider); setDrawerOpen(true) }} onChanged={() => void load(true)}/> : view === 'scenarios' ? <TestScenariosView openRequest={openRequest}/> : view === 'comparisons' ? <ComparisonHistoryView/> : view === 'failover' ? <FailoverGroupsView providers={data?.providers ?? []}/> : view === 'maintenance' ? <MaintenanceView/> : view === 'slos' ? <SLOView navigate={navigate}/> : view === 'reliability' ? <ReliabilityView/> : view === 'incidents' ? <IncidentsView openRequest={openRequest}/> : view === 'schedules' ? <SchedulesView providers={data?.providers ?? []} defaultOptions={jobDefaults} refreshToken={schedulesRefreshToken} openRequest={openRequest} openJob={openJob}/> : view === 'events' ? <EventsView providers={data?.providers ?? []} refreshToken={eventsRefreshToken} initialProviderId={eventsProviderFilter} openRequest={openRequest}/> : view === 'notification-routing' ? <NotificationRoutingView/> : view === 'diagnostics' ? <DiagnosticsView/> : <SettingsView onThemeChanged={setUiTheme}/>}</Suspense>
+      <Suspense fallback={<RouteLoading/>}>{requestId ? <RequestDetailView requestId={requestId} back={closeRequest}/> : view === 'dashboard' ? <Dashboard data={data} loading={loading} error={error} retry={() => void load()} refreshJobs={onJobChanged} openNew={() => { setPresetProvider(null); setDrawerOpen(true) }} probeProvider={(provider) => { setPresetProvider(provider); setDrawerOpen(true) }} showProviderRequests={(provider) => { setEventsProviderFilter(provider.id); navigate('events') }} openJob={openJob}/> : view === 'providers' ? <ProviderConfigView discoveredProviders={(data?.providers ?? []).filter(provider => provider.source !== 'manual')} refreshToken={providersRefreshToken} onProbe={(provider) => { setPresetProvider(provider); setDrawerOpen(true) }} onChanged={() => void load(true)}/> : view === 'scenarios' ? <TestScenariosView openRequest={openRequest}/> : view === 'comparisons' ? <ComparisonHistoryView/> : view === 'failover' ? <FailoverGroupsView providers={data?.providers ?? []}/> : view === 'maintenance' ? <MaintenanceView/> : view === 'slos' ? <SLOView navigate={navigate}/> : view === 'reliability' ? <ReliabilityView/> : view === 'incidents' ? <IncidentsView openRequest={openRequest}/> : view === 'schedules' ? <SchedulesView providers={data?.providers ?? []} defaultOptions={jobDefaults} refreshToken={schedulesRefreshToken} openRequest={openRequest} openJob={openJob}/> : view === 'events' ? <EventsView providers={data?.providers ?? []} refreshToken={eventsRefreshToken} initialProviderId={eventsProviderFilter} openRequest={openRequest}/> : view === 'notification-routing' ? <NotificationRoutingView/> : view === 'diagnostics' ? <DiagnosticsView/> : <SettingsView onThemeChanged={setUiTheme} onBrowserNotificationsChanged={setBrowserNotifications}/>}</Suspense>
     </main>
     {mobileNav && <button type="button" className="nav-scrim" aria-label="关闭菜单" onClick={() => setMobileNav(false)}/>}
     {drawerOpen && <NewJobDrawer providers={data?.providers ?? []} initialProvider={presetProvider} defaultOptions={jobDefaults} close={() => { setDrawerOpen(false); setPresetProvider(null) }} onStarted={onStarted}/>}
-    {detailJob && <JobDetail initial={detailJob} notifyOnComplete={notificationJobs.has(detailJob.id)} close={() => setDetailJob(null)} onChanged={onJobChanged}/>}
+    {detailJob && <JobDetail key={detailJob.id} initial={detailJob} close={() => setDetailJob(null)} onChanged={onJobChanged}/>}
     {themeMessage && <div className={`theme-toast ${themeMessage.includes('失败') ? 'error' : ''}`} role="status">{themeMessage}</div>}
   </div>
 }

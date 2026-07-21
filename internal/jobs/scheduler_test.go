@@ -190,6 +190,17 @@ func TestScheduledProbeTakesPriorityOverKeepaliveForSameTarget(t *testing.T) {
 		t.Fatalf("same target started a second scheduled job: %s", mode)
 	case <-time.After(50 * time.Millisecond):
 	}
+	keepalive, err := st.GetSchedule("keepalive")
+	if err != nil || keepalive.LastStatus != "skipped" || keepalive.LastJobID != "" {
+		t.Fatalf("waiting schedule status was not recorded: schedule=%+v err=%v", keepalive, err)
+	}
+	if err = m.FlushEvents(); err != nil {
+		t.Fatal(err)
+	}
+	events, err := st.ListEvents(store.EventFilter{Type: "schedule_target_busy", Limit: 10})
+	if err != nil || len(events) != 1 || events[0].ProviderID != "keepalive" {
+		t.Fatalf("target busy event missing: events=%+v err=%v", events, err)
+	}
 }
 
 func TestGlobalActiveJobLimit(t *testing.T) {

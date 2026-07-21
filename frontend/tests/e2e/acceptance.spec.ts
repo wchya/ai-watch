@@ -674,6 +674,51 @@ test('计划任务在终端停止后返回列表无需再次停止', async ({ pa
   assertClean(mock)
 })
 
+test('切换不同规则终端时状态和实时输出按 Job 隔离', async ({ page }) => {
+  const mock = await installApiMock(page)
+  await page.goto('/schedules')
+
+  await page.getByRole('button', { name: '查看实时终端：未知状态计划' }).click()
+  let terminal = page.getByRole('dialog', { name: '测活终端输出' })
+  await expect(terminal.locator('.terminal-output')).toContainText('READY')
+  await terminal.getByRole('button', { name: '关闭终端并返回任务列表' }).click()
+
+  const secondRule = page.locator('.schedule-row').filter({ hasText: 'Claude 异常巡检' })
+  await secondRule.getByRole('button', { name: '查看实时终端：Claude 异常巡检' }).click()
+  terminal = page.getByRole('dialog', { name: '测活终端输出' })
+  await expect(terminal).toContainText('Claude 主线路')
+  await expect(terminal.locator('.terminal-output')).toContainText('SECOND_JOB_OUTPUT')
+  await expect(terminal.locator('.terminal-output')).not.toContainText('READY')
+  assertClean(mock)
+})
+
+test('关闭终端后浏览器通知仍会在任务完成时触发', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('ai-watch-ui-settings', JSON.stringify({ browserNotifications: true }))
+    const notifications: Array<{ title: string; body?: string }> = []
+    class MockNotification {
+      static permission = 'granted'
+      static requestPermission = async () => 'granted'
+      constructor(title: string, options?: NotificationOptions) { notifications.push({ title, body: options?.body }) }
+    }
+    Object.defineProperty(window, 'Notification', { configurable: true, value: MockNotification })
+    Object.defineProperty(window, '__notifications', { configurable: true, value: notifications })
+  })
+  const mock = await installApiMock(page)
+  await page.goto('/')
+
+  await page.getByRole('button', { name: '新建任务' }).click()
+  for (let step = 0; step < 4; step++) await page.getByRole('button', { name: /继续/ }).click()
+  await page.getByRole('button', { name: '启动任务' }).click()
+  await page.getByRole('button', { name: '关闭终端并返回任务列表' }).click()
+  mock.setJobStatus('success')
+
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { __notifications: Array<{ title: string }> }).__notifications)).toEqual([
+    expect.objectContaining({ title: 'AI Watch · 成功' }),
+  ])
+  assertClean(mock)
+})
+
 test('测活终端显示脱敏命令、实时输出和返回摘要', async ({ page }, testInfo) => {
   const mock = await installApiMock(page)
   await page.goto('/')

@@ -241,7 +241,14 @@ func (m *Manager) reconcileSchedules(now time.Time) {
 		}
 		opts := scheduleJobOptions(candidate.schedule)
 		_, err = m.start(opts, candidate.schedule.ID, candidate.occurrence)
-		if err != nil && !errors.Is(err, ErrLockConflict) && !errors.Is(err, ErrActiveLimit) && !errors.Is(err, ErrShuttingDown) {
+		if errors.Is(err, ErrLockConflict) {
+			if candidate.schedule.LastStatus != "skipped" || candidate.schedule.LastOccurrenceKey != candidate.occurrence {
+				if markErr := m.store.MarkScheduleRun(candidate.schedule.ID, candidate.occurrence, "skipped", "", now); markErr != nil {
+					m.persistenceErr.Store(markErr.Error())
+				}
+				m.recordOperationalEvent(store.Event{At: now, Type: "schedule_target_busy", Level: "warning", ProviderID: candidate.schedule.ProviderID, Message: "计划任务正在等待同一目标的其他任务结束"})
+			}
+		} else if err != nil && !errors.Is(err, ErrActiveLimit) && !errors.Is(err, ErrShuttingDown) {
 			m.persistenceErr.Store(err.Error())
 		}
 	}
