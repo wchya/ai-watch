@@ -231,7 +231,7 @@ body:has(.theme-graphite-signal) .select-popover { border-color:rgba(205,215,220
 .app-shell .reliability-digest-toggle { margin:18px 22px 0 }
 .app-shell .reliability-digest-fields { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px;padding:18px 22px 10px;transition:opacity var(--motion-fast) }
 .app-shell .reliability-digest-fields.disabled { opacity:.55 }
-.app-shell .reliability-digest-fields .field { padding:0 }
+.app-shell .reliability-digest-fields .field { margin-top:0;padding:0 }
 .app-shell .reliability-digest-fields input,.app-shell .reliability-digest-fields select { width:100%;min-height:42px;color:var(--text-primary);background:var(--control-bg);border-color:var(--control-border) }
 .app-shell .reliability-digest-actions { display:flex;justify-content:flex-end;gap:9px;padding:6px 22px 16px }
 .app-shell .reliability-digest-actions button { min-width:112px }
