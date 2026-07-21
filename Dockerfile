@@ -58,7 +58,8 @@ WORKDIR /app
 
 COPY --from=backend-builder /out/ai-watch /app/ai-watch
 COPY --from=frontend-builder /src/frontend/dist /app/web
-COPY scripts/docker-entrypoint.sh /usr/local/bin/ai-watch-entrypoint
+COPY --chmod=0755 scripts/docker-entrypoint.sh /usr/local/bin/ai-watch-entrypoint
+RUN sed -i 's/\r$//' /usr/local/bin/ai-watch-entrypoint
 
 ENV HOME=/home/aiwatch \
     AI_WATCH_ADDR=0.0.0.0:8787 \
